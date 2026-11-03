@@ -607,8 +607,20 @@ def handle_unmatched_file(file_path: str, file_metadata: dict[str, Any]) -> dict
 # =============================================================================
 
 def queue_requeue(queue_id: int) -> Dict[str, Any]:
+    # ``requeue_queue_item`` only handles terminal rows ("failed"/"removed"/
+    # "cancelled"). A backed-off or pending-release row falls through to the
+    # plain status update, which used to leave ``next_retry_at`` and
+    # ``retry_count`` untouched — the row then read "queued" in the UI but was
+    # filtered out by the worker's due-time gate until its old (possibly
+    # week-away) window passed. A user asking to retry wants it NOW, so the
+    # fallback clears the backoff window and the attempt counter too, exactly
+    # like Force start does.
     updated = requeue_queue_item(queue_id) or update_queue_item(
-        queue_id, status="queued"
+        queue_id,
+        status="queued",
+        retry_count=0,
+        failure_reason=None,
+        next_retry_at=None,
     )
     if not updated:
         return {"success": False, "error": "Queue item not found"}
@@ -669,6 +681,9 @@ def queue_retry_all_failed() -> Dict[str, Any]:
                 text("""
                     UPDATE download_queue
                     SET status = 'queued',
+                        retry_count = 0,
+                        failure_reason = NULL,
+                        next_retry_at = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'failed'
                 """)

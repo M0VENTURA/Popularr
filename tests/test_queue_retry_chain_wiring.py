@@ -329,6 +329,47 @@ class TestPendingItemsAreRePicked:
 
         assert [r["id"] for r in get_ready_for_processing(limit=10)] == [1]
 
+    def test_an_overdue_retried_row_outranks_newer_never_tried_rows(self, queue_env):
+        """More than ``limit`` never-tried rows must not starve a due retry.
+
+        Reported: "older files in the download queue never seem to retry and
+        stay in queue, with only newer files downloading." The selector ordered
+        by ``retry_count ASC`` BEFORE the due time, so every freshly added row
+        (``retry_count=0``) outranked every retried row, and the LIMIT was
+        applied first — a retried row could never be fetched again.
+        """
+        from db.repositories.queue import get_ready_for_processing
+
+        _insert(
+            queue_env,
+            id=1,
+            artist="Old",
+            title="Waiting",
+            status="backed_off",
+            retry_count=3,
+            next_retry_at="2000-01-01 00:00:00",   # long overdue
+            created_at="2000-01-01 00:00:00",
+        )
+        for n in range(2, 7):
+            _insert(
+                queue_env,
+                id=n,
+                artist="New",
+                title=f"Track {n}",
+                status="queued",
+                retry_count=0,
+                next_retry_at=None,
+                created_at="2026-01-01 00:00:00",
+            )
+
+        ready = get_ready_for_processing(limit=3)
+
+        assert [r["id"] for r in ready] == [1, 2, 3], (
+            "the overdue retried row must be selected before newer never-tried "
+            "rows, otherwise it is starved forever whenever more than `limit` "
+            "fresh rows exist"
+        )
+
     def test_rows_that_already_have_a_file_are_not_researched(self, queue_env):
         """An item with a downloaded file belongs to the completion path, not
         the search path."""
@@ -402,7 +443,10 @@ class TestParkedItemsAreRecovered:
         """The UI's "Retry all failed" must move every failed row."""
         from services.queue.queue_processing_service import queue_retry_all_failed
 
-        _insert(queue_env, id=1, artist="A", title="T", status="failed")
+        _insert(
+            queue_env, id=1, artist="A", title="T", status="failed",
+            retry_count=8, next_retry_at="2099-01-01 00:00:00",
+        )
         _insert(queue_env, id=2, artist="B", title="U", status="failed")
         _insert(queue_env, id=3, artist="C", title="V", status="completed")
 
@@ -410,7 +454,13 @@ class TestParkedItemsAreRecovered:
 
         assert result["success"] is True
         assert result["updated_count"] == 2
-        assert _get(queue_env, 1).status == "queued"
+        row = _get(queue_env, 1)
+        assert row.status == "queued"
+        assert row.retry_count == 0, "a fresh start must reset the attempt counter"
+        assert row.next_retry_at is None, (
+            "the old failure window must be cleared, or the retried row is still "
+            "refused until it passes"
+        )
         assert _get(queue_env, 2).status == "queued"
         assert _get(queue_env, 3).status == "completed", "completed rows are untouched"
 
@@ -467,6 +517,37 @@ class TestParkedItemsAreRecovered:
 
         requeue_queue_item(1)
 
+        assert [r["id"] for r in get_ready_for_processing(limit=10)] == [1]
+
+    def test_requeue_clears_the_window_of_a_backed_off_row(self, queue_env):
+        """The per-row Requeue button must run NOW for a backed_off row.
+
+        ``requeue_queue_item`` only matches terminal statuses ('failed' /
+        'removed' / 'cancelled'), so a backed_off row fell through to the plain
+        status update, which left the (possibly week-away) ``next_retry_at`` and
+        the attempt counter untouched — the row read "queued" in the UI but the
+        worker still refused to pick it.
+        """
+        from db.repositories.queue import get_ready_for_processing
+        from services.queue.queue_processing_service import queue_requeue
+
+        _insert(
+            queue_env,
+            id=1,
+            artist="A",
+            title="T",
+            status="backed_off",
+            retry_count=5,
+            next_retry_at="2099-01-01 00:00:00",
+        )
+        assert get_ready_for_processing(limit=10) == []
+
+        queue_requeue(1)
+
+        row = _get(queue_env, 1)
+        assert row.status == "queued"
+        assert row.retry_count == 0
+        assert row.next_retry_at is None
         assert [r["id"] for r in get_ready_for_processing(limit=10)] == [1]
 
 

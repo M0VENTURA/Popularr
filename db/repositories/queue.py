@@ -497,9 +497,17 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
     wait ended (the reported "keeps retrying old files"). 'failed' rows are
     returned to the queue by ``requeue_due_failed_items``, never claimed here.
 
-    Order: priority, then FEWEST attempts (never-tried rows first, so the
-    whole queue gets one turn before anything is retried), then the row that
-    has been due the longest.
+    Order: priority, then the row that has been DUE the longest. Attempts are
+    only a tie-break.
+
+    ⚠️ Ordering by fewest attempts FIRST (never-tried rows ahead of every retry)
+    starved retried rows whenever more than ``limit`` rows were ready: every
+    freshly added album outranked a backed-off or pending_release row forever,
+    so the queue downloaded only the newest additions and the old rows never
+    retried (the reported "older queued files never retry, only newer ones
+    download"). Due time is the fair key — a row that has waited longest goes
+    first, and backoff already pushes a repeatedly-failing row forward so it
+    cannot monopolise the queue.
     """
     try:
         with db_session() as session:
@@ -512,8 +520,8 @@ def get_ready_for_processing(limit: int = 100) -> list[dict[str, Any]]:
                       AND (next_retry_at IS NULL OR next_retry_at <= :now_utc)
                       AND LOWER(COALESCE(source, '')) NOT IN ('local', 'discovered')
                     ORDER BY priority DESC,
-                             COALESCE(retry_count, 0) ASC,
                              COALESCE(next_retry_at, created_at) ASC,
+                             COALESCE(retry_count, 0) ASC,
                              id ASC
                     LIMIT :limit
                 """),

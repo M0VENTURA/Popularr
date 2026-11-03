@@ -17,7 +17,10 @@ BEFORE any claim. Every slot went to old rows the claim then refused (409,
 counted as "failed"), so newer items never started and the old ones were
 retried the moment their wait ended. Now:
 
-* the repository returns only claimable rows, fewest attempts first;
+* the repository returns only claimable rows, OLDEST DUE FIRST — ordering by
+  fewest attempts first starved every backed-off/pending_release row behind an
+  endless stream of freshly added ones (older tracks never retried while only
+  new ones downloaded);
 * a refused claim is a SKIP that uses no slot, and the batch keeps going
   until the free slots are filled with items that actually START;
 * an item is marked failed here only when the processor left it in the claim
