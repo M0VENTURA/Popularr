@@ -1384,9 +1384,31 @@ class NavidromeClient:
         try:
             rating = max(0, min(5, int(rating)))
             data = self._get_subsonic_response("setRating", timeout=15, id=track_id, rating=rating)
-            return data.get("status") == "ok"
+            if data.get("status") == "ok":
+                return True
+            # ⚠️ A failed status arrives over HTTP 200. ``_log_subsonic_status``
+            # demotes "not found" (code 70) to DEBUG, so a stale Navidrome song
+            # ID — the row kept an old ID because ambiguous adoption declined to
+            # change it — reached the operator only as "Navidrome unreachable?
+            # check credentials" after three failures. Name the real reason here,
+            # on the endpoint that most often hits it.
+            error = data.get("error") or {}
+            logger.warning(
+                "Navidrome rejected setRating",
+                track_id=track_id,
+                rating=rating,
+                code=error.get("code"),
+                message=error.get("message"),
+                username=self.username or None,
+            )
+            return False
         except Exception as exc:
-            logger.error("Failed to set rating for track", track_id=track_id, error=str(exc))
+            logger.error(
+                "Failed to set rating for track",
+                track_id=track_id,
+                username=self.username or None,
+                error=str(exc),
+            )
             return False
 
     def scrobble(self, track_id: str, time_stamp: int | None = None, submission: bool = True) -> bool:

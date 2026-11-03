@@ -66,7 +66,23 @@ def get_rating_sync_clients() -> list[Any]:
     clients: list[Any] = []
     try:
         from api_clients.navidrome import NavidromeClient
-        users = load_navidrome_users_from_config()
+
+        # ⚠️ Skip UNUSABLE entries BEFORE picking the primary user.
+        #
+        # This used to take ``users[:1]`` unconditionally. A config that keeps
+        # a setup-wizard stub (or any row with an empty user/password) first
+        # therefore built a client with no credentials for the rating sync,
+        # while the playlist paths iterate and SKIP such rows — which is why
+        # playlist writes could succeed against a real account ("moventura")
+        # in the same minute every ``setRating`` failed. A row without
+        # base_url/user/pass is not an account; it must not become the target.
+        users = [
+            user
+            for user in load_navidrome_users_from_config()
+            if str(user.get("base_url") or "").strip()
+            and str(user.get("user", user.get("username", "")) or "").strip()
+            and str(user.get("pass", user.get("password", "")) or "").strip()
+        ]
         if not is_sync_ratings_to_all_users_enabled() and users:
             users = users[:1]
         for user in users:

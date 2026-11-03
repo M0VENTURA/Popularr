@@ -1407,7 +1407,9 @@ class CoverDetector:
                 # detection has re-confirmed the verdict — doing it first (as
                 # the old code did) stamped a bogus suffix onto a FALSE stored
                 # verdict and then shielded it from re-assessment.
-                _repair = self._suffix_repair_update(track, artist)
+                _repair = self._suffix_repair_update(
+                    track, artist, resolved_original=_orig
+                )
                 if _repair is not None:
                     pending_updates.append(_repair)
                     _repaired_titles.add(_tid)
@@ -1416,6 +1418,20 @@ class CoverDetector:
                     f"(original={_orig})"
                 )
                 return
+            if (
+                self._is_cover_flagged(track)
+                and _stored_orig
+                and _orig
+                and not _same_artist(_stored_orig, _orig)
+            ):
+                # The stored verdict is a cover, but of the WRONG artist (the
+                # reported stale "Santana"). Fall through and write the newly
+                # resolved original over it — DB and FILE together — instead of
+                # preserving the old attribution just because is_cover was set.
+                log_unified(
+                    f"[COVER_DETECT] correcting '{track.get('title')}': "
+                    f"original {_stored_orig} -> {_orig}"
+                )
             cover_results.append(result)
             seen_track_ids.add(_tid)
             pending_updates.append(self._build_update(result, track))
@@ -1843,7 +1859,14 @@ class CoverDetector:
                     update.get("title", ""), update.get("original_artist", "")
                 )
                 if _full_title:
-                    self._update_file_metadata(fp, _full_title, [])
+                    self._update_file_metadata(
+                        fp,
+                        _full_title,
+                        [],
+                        original_artist=str(
+                            update.get("original_artist") or ""
+                        ).strip(),
+                    )
 
         # ── Clear verdicts that this pass could NOT confirm ────────────────
         self._clear_unconfirmed_verdicts(
@@ -1915,19 +1938,28 @@ class CoverDetector:
         self,
         track: dict[str, Any],
         album_artist: str = "",
+        *,
+        resolved_original: str = "",
     ) -> dict[str, Any] | None:
         """An update restoring a confirmed cover's "(X Cover)" title, or None.
 
-        Only for a track whose STORED verdict names an original artist, whose
-        title lacks the suffix, that is not user-locked, and whose original is
+        Only for a track whose verdict names an original artist, whose title
+        lacks a matching suffix, that is not user-locked, and whose original is
         not its own performer (a self-referential verdict is wrong and must not
         be written into the title).
+
+        ``resolved_original`` is the original THIS pass just re-confirmed. It
+        wins over the stored value so a repair can never write back an older
+        attribution; when it is absent the stored value is used.
         """
         if track.get("cover_manual_override"):
             return None
         if not self._is_cover_flagged(track):
             return None
-        original = str(track.get("original_cover_artist") or "").strip()
+        original = (
+            str(resolved_original or "").strip()
+            or str(track.get("original_cover_artist") or "").strip()
+        )
         title = str(track.get("title") or "").strip()
         if not original or not title:
             return None
@@ -3881,12 +3913,36 @@ class CoverDetector:
 
     @staticmethod
     def _update_file_metadata(
-        file_path: str, title: str, additional_genres: list[str]
+        file_path: str,
+        title: str,
+        additional_genres: list[str],
+        *,
+        original_artist: str = "",
     ) -> bool:
+        """Write a cover verdict to the AUDIO FILE, not only the DB.
+
+        ⭐ THE STALE-ATTRIBUTION LOOP. This used to write ``title`` alone. The
+        DB then said ``original_cover_artist = Michael Jackson`` while the file
+        still carried ``ORIGINAL_COVER_ARTIST = Santana`` from an older,
+        wrong verdict. The next Navidrome import reads the file's tags back
+        (``metadata_reader.read_release_tag_values`` — Subsonic never echoes
+        these fields), so Santana returned to the DB and the repair rewrote a
+        "(Santana Cover)" title on every scan: a file mtime change → Navidrome
+        rescan → Popularr scan → repair → again.
+
+        The whole verdict is authoritative, so it is written together: the
+        title suffix and ``ORIGINAL_COVER_ARTIST`` can never disagree, on disk
+        or in the DB. ``is_cover`` is written as ``"1"`` for the same reason
+        (a cleared/absent flag would let the import un-flag the track).
+        """
         try:
             from services.metadata.tag_file_service import write_tags_to_file
 
-            tags: dict[str, Any] = {"title": title}
+            tags: dict[str, Any] = {
+                "title": title,
+                "is_cover": "1",
+                "original_cover_artist": str(original_artist or "").strip(),
+            }
             if additional_genres:
                 tags["genre"] = "; ".join(additional_genres)
             return write_tags_to_file(file_path, tags)
