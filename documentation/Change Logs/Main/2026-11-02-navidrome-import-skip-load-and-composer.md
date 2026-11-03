@@ -57,6 +57,16 @@ Navidrome requests instead of 16.
 - `local_authority_conflicts` compares composer names after removing the same
   non-composer roles, so an existing bloated value now compares EQUAL to the
   cleaned provider value and is overwritten (healed) on the next import.
+  ``tracks`` has no producer/engineer columns, so the STORED row cannot supply
+  those names; the provider payload does, and its role credits are used to
+  filter BOTH sides.
+
+⚠️ The first attempt at this added `producer`/`engineer`/`mixer`/… to the
+prefetch SELECT. Those are NOT `tracks` columns (only `composer` and
+`lyricist` are), so every artist scan failed with
+`column "producer" does not exist`. The prefetch columns are reverted to real
+columns, and a regression test asserts every prefetch name exists on the ORM
+`tracks` table.
 
 ### 4. An empty local value is never a correction
 

@@ -418,15 +418,20 @@ _NON_COMPOSER_ROLES: tuple[str, ...] = (
 )
 
 
-def _composer_tokens(source: dict[str, Any]) -> list[str]:
+def _composer_tokens(
+    source: dict[str, Any],
+    *,
+    counterpart: dict[str, Any] | None = None,
+) -> list[str]:
     """Composer names with non-composer credits removed.
 
     ``displayComposer`` is a full credit roll, so the SAME composer list can
     arrive with producers/engineers/the band appended ("Terry Date", "Sam
-    Hofstedt", "Deftones"). Removing every name the same row credits to a
-    non-composer role makes that bloated value compare equal to the cleaned
-    provider value, so the next import HEALS the stored column instead of
-    protecting it as a local correction forever.
+    Hofstedt", "Deftones"). ``tracks`` has no producer/engineer columns, so the
+    STORED row cannot supply those names — the provider payload can. Removing
+    the union of both sides' non-composer credits makes a bloated stored value
+    compare equal to the cleaned provider value, so the next import HEALS the
+    column instead of protecting it as a local correction forever.
     """
     names = _delimited_tokens(source.get("composer"))
     if not names:
@@ -434,10 +439,17 @@ def _composer_tokens(source: dict[str, Any]) -> list[str]:
     excluded: set[str] = set()
     for role in _NON_COMPOSER_ROLES:
         excluded.update(_delimited_tokens(source.get(role)))
+        if counterpart:
+            excluded.update(_delimited_tokens(counterpart.get(role)))
     return [name for name in names if name not in excluded]
 
 
-def _authority_value(field: str, source: dict[str, Any]) -> str:
+def _authority_value(
+    field: str,
+    source: dict[str, Any],
+    *,
+    counterpart: dict[str, Any] | None = None,
+) -> str:
     if field in ("recording_mbid", "musicbrainz_trackid", "mbid"):
         return _text(
             source.get("recording_mbid")
@@ -457,7 +469,7 @@ def _authority_value(field: str, source: dict[str, Any]) -> str:
             _genre_values(source.get(field) or source.get("genres") or source.get("genre"))
         )
     if field == "composer":
-        return "|".join(_composer_tokens(source))
+        return "|".join(_composer_tokens(source, counterpart=counterpart))
     if field in _PEOPLE_FIELDS or field in _LIST_FIELDS:
         return "|".join(_delimited_tokens(source.get(field)))
     if field in _CASEFOLD_FIELDS:
@@ -577,8 +589,8 @@ def local_authority_conflicts(
         # empty ``disc_number`` / ``albumversion`` against Navidrome's real
         # value ("local='' remote=1" in the report). Nothing was locally set
         # there to protect.
-        existing_value = _authority_value(field, existing)
-        payload_value = _authority_value(field, payload)
+        existing_value = _authority_value(field, existing, counterpart=payload)
+        payload_value = _authority_value(field, payload, counterpart=existing)
         if not existing_value and payload_value:
             continue
         if field in _DATE_FIELDS:

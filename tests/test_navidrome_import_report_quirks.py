@@ -167,6 +167,25 @@ class TestBulletGroupedPeopleCompareAsASet:
 # ===========================================================================
 # 4. Visible skips + bounded artist concurrency
 # ===========================================================================
+class TestPrefetchColumnsExist:
+    def test_every_prefetch_column_is_a_real_tracks_column(self):
+        """The reported crash: ``column "producer" does not exist``.
+
+        ``tracks`` has no producer/engineer/mixer columns (only composer and
+        lyricist). Selecting one made EVERY artist scan fail.
+        """
+        from db.models import Track
+        from services.scanning.navidrome_import import _PREFETCH_TRACK_COLUMNS
+
+        columns = {column.name for column in Track.__table__.columns}
+        missing = [
+            name for name in _PREFETCH_TRACK_COLUMNS if name not in columns
+        ]
+        assert missing == [], (
+            f"prefetch selects non-existent tracks columns: {missing}"
+        )
+
+
 class TestImportVisibilityAndLoad:
     def test_a_skipped_album_index_is_logged(self):
         src = Path("services/scanning/navidrome_import.py").read_text(

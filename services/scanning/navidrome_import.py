@@ -197,11 +197,6 @@ _PREFETCH_BASE_COLUMNS: tuple[str, ...] = (
     "id", "album", "album_artist", "duration", "track_number", "year",
     "file_path", "title", "artist", "disc_number", "musicbrainz_trackid",
     "recording_mbid", "mbid", "navidrome_genres",
-    # Non-composer roles. The composer comparison removes these names, so a
-    # ``displayComposer`` credit roll with producers/engineers/band in it
-    # compares equal to the cleaned provider value and is healed on import.
-    "producer", "engineer", "mixer", "remixer", "performer",
-    "conductor", "djmixer",
 )
 _PREFETCH_AUTHORITY_COLUMNS: tuple[str, ...] = tuple(
     field
@@ -576,13 +571,6 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
                 "recording_mbid": mapping.get("recording_mbid") or "",
                 "mbid": mapping.get("mbid") or "",
                 "navidrome_genres": mapping.get("navidrome_genres") or "",
-                "producer": mapping.get("producer") or "",
-                "engineer": mapping.get("engineer") or "",
-                "mixer": mapping.get("mixer") or "",
-                "remixer": mapping.get("remixer") or "",
-                "performer": mapping.get("performer") or "",
-                "conductor": mapping.get("conductor") or "",
-                "djmixer": mapping.get("djmixer") or "",
                 "local_tags_written_at": mapping.get("local_tags_written_at"),
                 "metadata_dirty_for_navidrome": bool(
                     mapping.get("metadata_dirty_for_navidrome")
