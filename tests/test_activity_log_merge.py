@@ -24,8 +24,14 @@ class _FakeLogger:
 @pytest.fixture
 def fake_loggers(monkeypatch):
     loggers: dict[str, _FakeLogger] = {}
+    real_get_logger = logging.getLogger
 
-    def _get(name):
+    def _get(name=None, *args, **kwargs):
+        # pytest's logging plugin calls ``logging.getLogger()`` with NO name at
+        # teardown; without this pass-through the module patch turns its
+        # teardown into an INTERNALERROR.
+        if name is None:
+            return real_get_logger()
         return loggers.setdefault(name, _FakeLogger())
 
     monkeypatch.setattr(lc.logging, "getLogger", _get)
@@ -153,6 +159,61 @@ class TestViewerMerge:
         assert (
             log_service._LOG_SOURCE_FILES["navidrome_import"]
             == "navidrome_import.log"
+        )
+
+    def test_redundant_and_empty_logs_are_hidden_from_the_viewer(
+        self, tmp_path, monkeypatch
+    ):
+        """The picker: one stream per real source, no duplicates or 0 B files."""
+        for name in (
+            "unified_scan.log",
+            "activity.log",
+            "navidrome_import.log",
+            "error.log",
+            "debug.log",
+            "info.log",              # INFO is a subset of debug.log
+            "client.log",            # merged into activity.log
+            "access.log",            # Hypercorn access log, routinely 0 B
+            "queue_processor.log",   # worker stdout redirect, routinely 0 B
+        ):
+            (tmp_path / name).write_text("x", encoding="utf-8")
+        monkeypatch.setattr(log_service, "resolve_log_dir", lambda: str(tmp_path))
+
+        viewer = {entry["name"] for entry in log_service.viewer_log_files()}
+        assert viewer == {
+            "unified_scan.log",
+            "activity.log",
+            "navidrome_import.log",
+            "error.log",
+            "debug.log",
+        }
+        # Hidden from the picker, still allow-listed for downloads/legacy.
+        listed = {entry["name"] for entry in log_service.list_log_files()}
+        assert {
+            "info.log", "client.log", "access.log", "queue_processor.log",
+        } <= listed
+
+    def test_client_alerts_also_reach_the_activity_stream(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(log_service, "resolve_log_dir", lambda: str(tmp_path))
+
+        log_service.append_client_log("Download failed for Artist - Title")
+
+        activity = (tmp_path / "activity.log").read_text(encoding="utf-8")
+        client = (tmp_path / "client.log").read_text(encoding="utf-8")
+        assert "[CLIENT] Download failed for Artist - Title" in activity, (
+            "UI alerts should sit beside the queue/search events they relate to"
+        )
+        assert "[CLIENT] Download failed for Artist - Title" in client, (
+            "the legacy client.log must still be written"
+        )
+
+    def test_the_api_uses_the_viewer_list(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "routes" / "logs.py"
+        ).read_text(encoding="utf-8")
+        assert "viewer_log_files()" in source, (
+            "the modal's picker reads /api/logs/list; it must not re-expose a "
+            "retired source the live page hides"
         )
 
     def test_the_viewer_js_offers_the_activity_filter(self):

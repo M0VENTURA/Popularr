@@ -24,7 +24,7 @@ from services.log_service import (
     resolve_log_file_path,
     stream_append_log,
     export_log_lines_since,
-    list_log_files,
+    viewer_log_files,
 )
 
 logs_bp = Blueprint(
@@ -69,10 +69,13 @@ def api_logs_list():
     ``services.log_service.LOG_FILE_ALLOWLIST`` and the label preserves what
     the modal's old Scanner / Queue / Soulseek / Navidrome / System tabs meant.
 
-    Returns ``{"files": [{"name", "size", "label"}, ...]}``, curated views
-    first, then the rest alphabetically. Never a directory listing.
+    Returns ``{"files": [{"name", "size", "label"}, ...]}`` — the SAME
+    ``viewer_log_files`` list the live /logs page renders, so retired sources
+    (``info.log``, ``client.log``, empty access/queue redirects) cannot reappear
+    in the modal's picker. Curated views first, then the rest alphabetically.
+    Never a directory listing.
     """
-    return jsonify({"files": list_log_files()})
+    return jsonify({"files": viewer_log_files()})
 
 
 # =============================================================================

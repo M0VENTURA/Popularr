@@ -104,18 +104,25 @@ def _count_lines(path: str) -> int:
 
 
 def append_client_log(message: str) -> None:
-    """Append a client-side UI message to ``client.log`` (alert→toast feed).
+    """Append a client-side UI message to ``activity.log``.
 
     Every ``alert()`` in the app is shimmed into a toast; the same message
-    lands here so UI feedback is greppable in the log files.  Never raises.
+    lands in the unified activity stream so UI feedback sits beside the queue
+    and search events it relates to. ``client.log`` is still written for
+    backward compatibility, but it is no longer a separate viewer source —
+    three tiny queue/search/UI files were harder to use than one stream.
+    Never raises.
     """
     try:
         from datetime import datetime
         log_dir = resolve_log_dir()
-        path = os.path.join(log_dir, "client.log")
         line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [CLIENT] {message}\n"
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(line)
+        for name in ("activity.log", "client.log"):
+            try:
+                with open(os.path.join(log_dir, name), "a", encoding="utf-8") as fh:
+                    fh.write(line)
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -239,17 +246,32 @@ LOG_FILE_ALLOWLIST: tuple[str, ...] = (
 #: the picker never shows a file twice.
 LOG_VIEW_LABELS: dict[str, str] = {
     "unified_scan.log": "Scanner",
-    "activity.log": "Activity (Queue + Search)",
+    "activity.log": "Activity (Queue + Search + UI)",
     "navidrome_import.log": "Navidrome Import",
     "queue.log": "Queue",
     "search.log": "Soulseek",
-    "info.log": "Navidrome",
+    "info.log": "Application (info)",
     "error.log": "System",
+    "debug.log": "Debug",
 }
 
-#: Legacy files kept on disk for compatibility but no longer offered in the
-#: viewer. Queue + search now share ``activity.log``.
-LOG_VIEW_HIDDEN: frozenset[str] = frozenset({"queue.log", "search.log"})
+#: Files kept on disk for compatibility but no longer offered in the viewer.
+#:
+#: * ``queue.log`` / ``search.log`` — merged into ``activity.log``.
+#: * ``info.log`` — INFO is a strict subset of ``debug.log``; keeping it in the
+#:   picker produced two entries that looked like Navidrome logs.
+#: * ``client.log`` — UI alerts are now ALSO written to ``activity.log``.
+#: * ``access.log`` / ``queue_processor.log`` — written by Hypercorn's access
+#:   log and the queue worker's empty stdout redirect; they are routinely 0 B
+#:   and are not application log streams.
+LOG_VIEW_HIDDEN: frozenset[str] = frozenset({
+    "queue.log",
+    "search.log",
+    "info.log",
+    "client.log",
+    "access.log",
+    "queue_processor.log",
+})
 
 #: Presentation order: the curated views first (in tab order), then everything
 #: else alphabetically. Declared once so the route and the API cannot disagree.

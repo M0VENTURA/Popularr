@@ -61,10 +61,13 @@ LOGS_ROUTE = REPO_ROOT / "routes" / "logs.py"
 #: meaning the tabs carried.
 CURATED_VIEWS = {
     "unified_scan.log": "Scanner",
+    "activity.log": "Activity (Queue + Search + UI)",
+    "navidrome_import.log": "Navidrome Import",
     "queue.log": "Queue",
     "search.log": "Soulseek",
-    "info.log": "Navidrome",
+    "info.log": "Application (info)",
     "error.log": "System",
+    "debug.log": "Debug",
 }
 
 
@@ -396,9 +399,10 @@ class TestTheLogFileListEndpoint:
         assert "@logs_bp.route(\"/api/logs/list\"" in logs_route_source
 
     def test_it_returns_the_shared_helper_not_a_new_list(self, logs_route_source):
-        """One allow-list. The page's route reads the same helper, so the two
-        surfaces cannot disagree about which files exist."""
-        assert "list_log_files()" in logs_route_source
+        """One allow-list. The modal's API and the live page both read
+        ``viewer_log_files``, so retired sources cannot reappear in only one
+        of the two surfaces."""
+        assert "viewer_log_files()" in logs_route_source
 
     def test_the_helper_orders_views_first_then_alpha(self, tmp_path, monkeypatch):
         """The shape contract: curated views lead, the rest follow in name
