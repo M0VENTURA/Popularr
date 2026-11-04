@@ -1380,28 +1380,60 @@ class NavidromeClient:
             logger.debug("Navidrome ping failed", error=str(exc))
             return False
 
-    def set_rating(self, track_id: str, rating: int) -> bool:
+    def set_rating_status(self, track_id: str, rating: int) -> str:
+        """Push one rating and CLASSIFY the outcome.
+
+        Returns ``"ok"``, ``"not_found"``, ``"auth"`` or ``"failed"``.
+
+        ⭐ Subsonic code 70 ("data not found") for ``setRating`` means the song
+        id does not exist in Navidrome — a STALE ID (renamed/moved file, or
+        Navidrome re-encoded ids on 0.64), not an outage and not a credential
+        problem. The caller must skip it, keep syncing the album's other tracks,
+        and let a Navidrome import re-adopt the id. Counting it as a failure
+        aborted the whole artist after three tracks and reported "Navidrome
+        unreachable? check credentials" for a perfectly healthy server.
+        """
         try:
             rating = max(0, min(5, int(rating)))
-            data = self._get_subsonic_response("setRating", timeout=15, id=track_id, rating=rating)
+            data = self._get_subsonic_response(
+                "setRating", timeout=15, id=track_id, rating=rating
+            )
             if data.get("status") == "ok":
-                return True
-            # ⚠️ A failed status arrives over HTTP 200. ``_log_subsonic_status``
-            # demotes "not found" (code 70) to DEBUG, so a stale Navidrome song
-            # ID — the row kept an old ID because ambiguous adoption declined to
-            # change it — reached the operator only as "Navidrome unreachable?
-            # check credentials" after three failures. Name the real reason here,
-            # on the endpoint that most often hits it.
+                return "ok"
             error = data.get("error") or {}
+            code = error.get("code")
+            try:
+                code_int = int(code)
+            except (TypeError, ValueError):
+                code_int = None
+            if code_int == 70:
+                # Routine stale id: ONE low-noise line, not a per-user warning.
+                logger.info(
+                    "Navidrome does not know this song id — stale id, rating skipped",
+                    track_id=track_id,
+                    rating=rating,
+                    username=self.username or None,
+                )
+                return "not_found"
+            if code_int in _SUBSONIC_AUTH_ERROR_CODES:
+                logger.warning(
+                    "Navidrome rejected setRating (credentials)",
+                    track_id=track_id,
+                    rating=rating,
+                    code=code,
+                    message=error.get("message"),
+                    username=self.username or None,
+                )
+                return "auth"
             logger.warning(
                 "Navidrome rejected setRating",
                 track_id=track_id,
                 rating=rating,
-                code=error.get("code"),
+                code=code,
                 message=error.get("message"),
                 username=self.username or None,
             )
-            return False
+            return "failed"
         except Exception as exc:
             logger.error(
                 "Failed to set rating for track",
@@ -1409,7 +1441,10 @@ class NavidromeClient:
                 username=self.username or None,
                 error=str(exc),
             )
-            return False
+            return "failed"
+
+    def set_rating(self, track_id: str, rating: int) -> bool:
+        return self.set_rating_status(track_id, rating) == "ok"
 
     def scrobble(self, track_id: str, time_stamp: int | None = None, submission: bool = True) -> bool:
         try:

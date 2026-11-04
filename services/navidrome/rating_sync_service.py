@@ -98,6 +98,46 @@ def get_rating_sync_clients() -> list[Any]:
     return clients
 
 
+def _client_rating_status(client: Any, track_id: str, stars: int) -> str:
+    """One client's outcome: ``ok`` / ``not_found`` / ``auth`` / ``failed``."""
+    fn = getattr(client, "set_rating_status", None)
+    if callable(fn):
+        try:
+            return str(fn(track_id, stars) or "failed")
+        except Exception:
+            return "failed"
+    try:
+        return "ok" if client.set_rating(track_id, stars) else "failed"
+    except Exception:
+        return "failed"
+
+
+def rating_status_for_track(
+    clients: list[Any], track_id: str, stars: int
+) -> str:
+    """Aggregate every user's outcome for one track.
+
+    * any ``ok``                     → ``ok``
+    * otherwise any real failure/auth → ``failed``
+    * ALL ``not_found``              → ``not_found`` (a stale song id)
+
+    ``not_found`` must NOT count as an outage: it is per-track, and the scan
+    keeps syncing the album's remaining tracks.
+    """
+    if not clients:
+        return "failed"
+    statuses = [_client_rating_status(client, track_id, stars) for client in clients]
+    if not statuses:
+        return "failed"
+    if "ok" in statuses:
+        return "ok"
+    if any(status in {"failed", "auth"} for status in statuses):
+        return "failed"
+    if all(status == "not_found" for status in statuses):
+        return "not_found"
+    return "failed"
+
+
 def sync_track_rating_with_clients(clients: list[Any], track_id: str, stars: int) -> bool:
     """Push one track rating through pre-built clients (one per user).
 
@@ -105,13 +145,5 @@ def sync_track_rating_with_clients(clients: list[Any], track_id: str, stars: int
     track's rating is set on every configured user without reconstructing a
     client (or reloading config) per track.
     """
-    if not clients:
-        return False
-    ok = False
-    try:
-        for client in clients:
-            ok = bool(client.set_rating(track_id, stars)) or ok
-    except Exception:
-        return False
-    return ok
+    return rating_status_for_track(clients, track_id, stars) == "ok"
 

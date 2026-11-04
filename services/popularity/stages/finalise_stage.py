@@ -2408,18 +2408,28 @@ def _resolve_max_per_artist(cfg: dict[str, Any]) -> int | None:
 # Navidrome sync
 # ---------------------------------------------------------------------------
 
-def _sync_rating_to_navidrome(track_id: str, stars: int, clients: list[Any] | None = None) -> bool:
+def _sync_rating_to_navidrome(
+    track_id: str, stars: int, clients: list[Any] | None = None
+) -> str:
+    """Push one rating and return ``ok`` / ``not_found`` / ``failed``.
+
+    ``not_found`` (Subsonic code 70) is a STALE song id, not an outage — the
+    caller must skip that track without tripping the consecutive-failure
+    breaker (which used to abort the whole artist after three stale ids and
+    blame credentials).
+    """
     try:
         from services.navidrome.rating_sync_service import (
-            sync_track_rating_to_navidrome,
-            sync_track_rating_with_clients,
+            get_rating_sync_clients,
+            rating_status_for_track,
         )
+
         if clients is None:
-            return sync_track_rating_to_navidrome(track_id, stars)
-        return sync_track_rating_with_clients(clients, track_id, stars)
+            clients = get_rating_sync_clients()
+        return rating_status_for_track(list(clients or []), track_id, stars)
     except Exception as exc:
         logger.debug("Navidrome rating sync call failed", track_id=track_id, error=str(exc))
-        return False
+        return "failed"
 
 
 def _build_rating_sync_clients() -> list[Any]:
@@ -6571,6 +6581,7 @@ def post_album_star_ratings(
             _nav_sync_started = time.monotonic()
             _attempted = 0
             _synced = 0
+            _stale = 0
             _skipped = 0
             _sync_clients: list[Any] | None = None
             _consecutive_failures = 0
@@ -6597,7 +6608,10 @@ def post_album_star_ratings(
                             break
 
                     _attempted += 1
-                    if _sync_rating_to_navidrome(track_id, stars, clients=_sync_clients):
+                    _rating_status = _sync_rating_to_navidrome(
+                        track_id, stars, clients=_sync_clients
+                    )
+                    if _rating_status == "ok":
                         navidrome_synced += 1
                         _synced += 1
                         _consecutive_failures = 0
@@ -6611,6 +6625,19 @@ def post_album_star_ratings(
                             )
                         except Exception:
                             pass
+                    elif _rating_status == "not_found":
+                        # ⭐ STALE Navidrome song id (Subsonic code 70), NOT an
+                        # outage and NOT a credential problem. Counting it as a
+                        # failure aborted the whole artist after three tracks
+                        # and reported "Navidrome unreachable?" for a healthy
+                        # server. Skip it, keep the album's other tracks syncing,
+                        # and let a Navidrome import re-adopt the id.
+                        _stale += 1
+                        _consecutive_failures = 0
+                        logger.debug(
+                            "Navidrome rating skipped — stale song id",
+                            track_id=track_id, artist=str(artist or "").strip(),
+                        )
                     else:
                         _consecutive_failures += 1
                         try:
@@ -6630,18 +6657,19 @@ def post_album_star_ratings(
                             )
                             break
 
-            _failed = _attempted - _synced
+            _failed = _attempted - _synced - _stale
             try:
                 from helpers import scan_log as _scan_log
 
                 _scan_log.log_event(
                     "ratings.updated",
                     f"🔗 Navidrome ratings: {_synced} synced · {_failed} failed · "
-                    f"{_skipped} unchanged for '{artist}'.",
+                    f"{_stale} stale id(s) · {_skipped} unchanged for '{artist}'.",
                     level="warn" if _failed else "info",
                     attempted=_attempted,
                     synced=_synced,
                     failed=_failed,
+                    stale_ids=_stale,
                     unchanged=_skipped,
                 )
             except Exception:
@@ -6649,6 +6677,13 @@ def post_album_star_ratings(
                     log_unified(f"🔗 Navidrome: skipped {_skipped} unchanged rating(s) for '{artist}'")
                 if _synced > 0:
                     log_unified(f"🔗 Navidrome: synced {_synced} rating(s) for '{artist}'")
+            if _stale > 0:
+                # Actionable and non-alarming: these ids are stale, not the
+                # server. The import re-adopts them.
+                log_unified(
+                    f"🔗 Navidrome: {_stale} track(s) have stale song IDs — "
+                    "re-run the Navidrome import scan to refresh them."
+                )
             if _failed > 0:
                 logger.warning(
                     "Navidrome rating syncs failed — check credentials",
