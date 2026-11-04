@@ -33,6 +33,9 @@ def _detector(state: dict | None = None) -> CoverDetector:
     det._load_cover_checked_map = lambda ids: (state or {})
     det._collect_track_writers = lambda *a, **k: {}
     det._persist_checked = lambda *a, **k: None
+    # These tests mock ``_detect_via_work_id`` and never stub the MB client;
+    # the stored-work title check would otherwise make a real request.
+    det._work_title_matches_track = lambda *a, **k: True
     return det
 
 

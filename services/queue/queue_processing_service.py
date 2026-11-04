@@ -1101,6 +1101,20 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
                 copied_individually=1,
                 copied_individually_at=os.path.getmtime(target_path) if os.path.exists(target_path) else None,
             )
+            # Same DB write as the automatic completion path: create/update the
+            # tracks row with the release-level metadata (Release Name, Release
+            # Year, album type/MBIDs) that only tags otherwise carry.
+            try:
+                from services.downloads.download_completion_service import (
+                    persist_import_metadata,
+                )
+
+                persist_import_metadata(item_id, str(target_path))
+            except Exception as _persist_exc:
+                logger.debug(
+                    "Group organize: import metadata persist failed",
+                    queue_id=item_id, error=str(_persist_exc),
+                )
             updated_count += 1
 
         except Exception as exc:
@@ -1151,6 +1165,21 @@ def process_completed_queue_item(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 
         target_path = result.get("target_path")
         update_queue_item(queue_id, status="imported", file_path=target_path)
+        # Same DB write as the automatic completion path (see
+        # ``persist_import_metadata``): without it a manually processed album
+        # kept NULL Release Name / Release Year because only the file tags were
+        # written and the tracks row was created later without them.
+        try:
+            from services.downloads.download_completion_service import (
+                persist_import_metadata,
+            )
+
+            persist_import_metadata(queue_id, str(target_path or ""))
+        except Exception as _persist_exc:
+            logger.debug(
+                "Completed-item import metadata persist failed",
+                queue_id=queue_id, error=str(_persist_exc),
+            )
         return {"success": True, "target_path": target_path}
 
     except Exception as e:

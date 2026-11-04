@@ -227,6 +227,108 @@ class TestImportAppliesThem:
             "by the album's list"
         )
 
+    def test_a_brand_new_album_gets_a_tracks_row_with_the_release_fields(
+        self, monkeypatch
+    ):
+        """A fresh download has no ``tracks`` row yet — the import must CREATE it.
+
+        Reported: "When an album is downloaded and added to the collection,
+        Release Year and Release Name aren't added to the database." The import
+        resolved both, then only wrote them when ``_resolve_track_id_for_import``
+        found an EXISTING row. A brand-new album has none (the library/Navidrome
+        import creates it later), so the whole payload — Release Name, Release
+        Year, album type, MBIDs — was dropped and those columns stayed NULL.
+        """
+        monkeypatch.setattr(dcs, "_resolve_track_id_for_import", lambda **kw: None)
+        item = {
+            "id": 42,
+            "artist": "Band Alpha",
+            "album_artist": "Band Alpha",
+            "album": "The Album Name",
+            "title": "Song One",
+            "track_number": "1",
+            "disc_number": 1,
+            "duration": 201.5,
+            "year": "2024",
+            "release_year": 2024,
+            "recording_mbid": "rec-a",
+            "release_mbid": "rel-1",
+            "metadata": json.dumps({
+                "isrc": "US-1",
+                "tracktotal": "1",
+                "musicbrainz_artistid": "art-1",
+                "album_metadata": dcs._album_level_mb_fields(RELEASE),
+            }),
+        }
+
+        dcs._apply_stored_metadata(
+            dict(item), "/music/Band Alpha/The Album Name/01.flac", allow_insert=True
+        )
+
+        assert self.db_writes, "the new album's tracks row was never created"
+        payload = self.db_writes[-1]
+        assert str(payload.get("id") or "").startswith("dlimport-")
+        assert payload.get("file_path") == "/music/Band Alpha/The Album Name/01.flac", (
+            "the row must carry the FINAL library path so the library import can "
+            "adopt it by path instead of creating a duplicate"
+        )
+        assert payload.get("title") == "Song One"
+        assert payload.get("release_title") == "The Specific Edition Name"
+        assert str(payload.get("release_year")) == "2024"
+
+    def test_the_pre_move_pass_never_inserts(self, monkeypatch):
+        """The pre-move path is the download folder, not the library — inserting
+        there would give the row a temporary path that defeats path adoption."""
+        monkeypatch.setattr(dcs, "_resolve_track_id_for_import", lambda **kw: None)
+        dcs._apply_stored_metadata(
+            {
+                "id": 42,
+                "artist": "Band Alpha",
+                "title": "Song One",
+                "recording_mbid": "rec-a",
+                "release_mbid": "rel-1",
+                "metadata": json.dumps({
+                    "isrc": "US-1",
+                    "tracktotal": "1",
+                    "musicbrainz_artistid": "art-1",
+                }),
+            },
+            "/downloads/incomplete/01.flac",
+        )
+        assert self.db_writes == [], "the pre-move call must stay update-only"
+
+
+class TestTheManualOrganizePathUsesTheSameWriter:
+    """The manual organize paths must reuse ``persist_import_metadata``.
+
+    Both the completed-item processor and the group organizer call it after the
+    move, so a manually organized album gets the same Release Name / Release
+    Year insert as the automatic completion path.
+    """
+
+    def test_persist_import_metadata_inserts_for_a_new_album(self, monkeypatch):
+        from db.repositories import queue as queue_repo
+        from services.downloads import download_completion_service as dcs
+
+        monkeypatch.setattr(
+            queue_repo, "get_queue_item",
+            lambda qid: {"id": qid, "artist": "A", "title": "T"},
+        )
+        seen: dict = {}
+
+        def _fake_apply(item, path, *, allow_insert=False):
+            seen.update(item=dict(item), path=path, allow_insert=allow_insert)
+            return True
+
+        monkeypatch.setattr(dcs, "_apply_stored_metadata", _fake_apply)
+
+        assert dcs.persist_import_metadata(7, "/music/A/01.flac") is True
+        assert seen["allow_insert"] is True, (
+            "the manual path must be allowed to CREATE the tracks row"
+        )
+        assert seen["path"] == "/music/A/01.flac"
+        assert seen["item"]["id"] == 7
+
 
 class TestTheQueueRowCarriesThem:
     """The release fields must survive queueing — the import reads them there."""

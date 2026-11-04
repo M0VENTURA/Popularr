@@ -1272,7 +1272,22 @@ def _fetch_import_art(item: dict[str, Any]) -> Optional[tuple[bytes, str]]:
     return None
 
 
-def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
+def _new_import_track_id() -> str:
+    """A unique placeholder id for a track inserted before the library import.
+
+    The library/Navidrome import later ADOPTS this row by exact file path or
+    recording MBID (``services.scanning.reconciliation.find_adoptable_track_id``)
+    and moves it to the provider's real song id, preserving every column — so a
+    placeholder id here does not create a duplicate row.
+    """
+    import uuid
+
+    return f"dlimport-{uuid.uuid4().hex}"
+
+
+def _apply_stored_metadata(
+    item: dict[str, Any], file_path: str, *, allow_insert: bool = False
+) -> bool:
     _album_level = _resolve_album_level_metadata(item)
 
     meta: dict[str, Any] = {
@@ -1448,12 +1463,67 @@ def _apply_stored_metadata(item: dict[str, Any], file_path: str) -> bool:
             )
             if _track_id:
                 _db_payload["id"] = _track_id
+            elif allow_insert:
+                # ⭐ A BRAND-NEW album has no ``tracks`` row yet at import time —
+                # the library/Navidrome import creates it later. The
+                # update-only path therefore threw the resolved album-level
+                # metadata (Release Name, Release Year, album type, MBIDs,
+                # genres …) away, and the later import never learned it, so
+                # those columns stayed NULL while everything carried by the
+                # FILE tags came back. Insert the row NOW, with the FINAL
+                # (post-move) path; the library import adopts it by path or
+                # recording MBID (``find_adoptable_track_id``).
+                _track_id = _new_import_track_id()
+                _db_payload["id"] = _track_id
+                _db_payload["file_path"] = file_path
+                for _col in (
+                    "title", "artist", "album", "album_artist", "year",
+                    "track_number", "disc_number", "duration",
+                ):
+                    _val = meta.get(_col)
+                    if _val in (None, ""):
+                        _val = item.get(_col)
+                    if _val not in (None, ""):
+                        _db_payload.setdefault(_col, _val)
+
+            if _track_id:
                 from db.repositories.tracks import insert_or_update_track
                 insert_or_update_track(_track_id, _db_payload)
     except Exception as exc:
         logger.debug("Could not persist MB metadata to tracks table", queue_id=item.get("id"), error=str(exc))
 
     return _tags_written
+
+
+def persist_import_metadata(queue_id: Any, target_path: str) -> bool:
+    """Persist a queue row's release metadata onto the landed library row.
+
+    Shared by the AUTOMATIC completion path and the MANUAL organize paths so a
+    manually organized album gets the same DB write — including the
+    ``release_title`` / ``release_year`` insert for a brand-new album, whose
+    ``tracks`` row the library/Navidrome import has not created yet.
+
+    Returns the tag-write outcome (``_apply_stored_metadata``'s contract).
+    """
+    try:
+        if queue_id is None or not target_path:
+            return False
+        from db.repositories.queue import get_queue_item
+
+        item = get_queue_item(int(queue_id)) or {}
+        if not item:
+            return False
+        return bool(
+            _apply_stored_metadata(dict(item), str(target_path), allow_insert=True)
+        )
+    except Exception as exc:
+        logger.debug(
+            "Could not persist import metadata",
+            queue_id=queue_id,
+            path=target_path,
+            error=str(exc),
+        )
+        return False
 
 
 def _resolve_track_id_for_import(
@@ -1578,7 +1648,12 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
             return {"success": False, "error": "missing target path"}
 
         if os.path.isfile(target_path):
-            _apply_stored_metadata(item, target_path)
+            # ``allow_insert`` only on this POST-MOVE call: it carries the final
+            # library path, so a newly downloaded album gets its tracks row (and
+            # its Release Name/Year) immediately, and the pre-move call above is
+            # still update-only (its path is the download folder, which would
+            # defeat path adoption later).
+            _apply_stored_metadata(item, target_path, allow_insert=True)
 
         if not item.get("duration"):
             duration = _extract_duration_seconds(target_path) or _extract_duration_seconds(abs_path)

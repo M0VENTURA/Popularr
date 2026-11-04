@@ -414,6 +414,23 @@ def _titles_match(left: str, right: str) -> bool:
     return lt == rt or lt.startswith(rt) or rt.startswith(lt)
 
 
+def _titles_match_exact(left: str, right: str) -> bool:
+    """Canonical title EQUALITY — never a prefix.
+
+    ``canonical_track_title`` already strips ``(…)``, ``[…]`` and `` - …``
+    suffixes, so genuine version/edition variants still compare equal. A PREFIX
+    is deliberately rejected: ``"Smooth"`` is a prefix of ``"Smooth Criminal"``,
+    and that prefix rule allowed Santana's different song to be taken as the
+    recording (and so the original) of "Smooth Criminal" — the reported
+    "Smooth Criminal (Santana Cover)" that survived even a forced track-page
+    detection. Identity checks are about THE SAME SONG; prefix tolerance belongs
+    only to album/series name matching.
+    """
+    lt = canonical_track_title(left)
+    rt = canonical_track_title(right)
+    return bool(lt) and lt == rt
+
+
 def _same_artist(left: str, right: str) -> bool:
     """True when two credits name the same artist.
 
@@ -1501,6 +1518,15 @@ class CoverDetector:
                     "performer — work lookup skipped"
                 )
                 continue
+            if not self._work_title_matches_track(work_mbid, track.get("title", "")):
+                # A stored work MBID must name THIS song. Trusting it made a
+                # wrong work (e.g. Santana's "Smooth" on a "Smooth Criminal"
+                # row) answer "Santana" forever, even on a forced pass.
+                log_scan_detail(
+                    f"[COVER_DETECT] stored work MBID does not name "
+                    f"'{track.get('title')}' — ignoring it"
+                )
+                continue
             original = self._detect_via_work_id(
                 work_mbid=work_mbid,
                 performer=performer,
@@ -1730,6 +1756,32 @@ class CoverDetector:
             if not hint and not has_annotation:
                 continue
 
+            # ⭐ OUR OWN ANNOTATION IS NOT EVIDENCE OF ITSELF.
+            #
+            # When the title already names the verdict we STORED — ``is_cover``
+            # plus the SAME ``original_cover_artist`` — reading the suffix back
+            # re-confirms a possibly WRONG attribution on every non-forced pass.
+            # The reported "Smooth Criminal (Santana Cover)": a forced pass
+            # resolved/cleared it, then the popularity scan read the suffix,
+            # resolved "Santana" from his own annotation and put it straight
+            # back, so ``_clear_unconfirmed_verdicts`` could never remove it.
+            #
+            # Drop the hint. The work/ISRC/recording/writer steps above (and the
+            # writer fallback below) are the real evidence; if none of them
+            # confirms it, the pass leaves the track unconfirmed and the clear
+            # step removes the stale verdict. A title annotation that is NOT our
+            # stored verdict (nothing stored yet, or a DIFFERENT artist named)
+            # is still honoured.
+            _stored_original = str(track.get("original_cover_artist") or "").strip()
+            if (
+                hint
+                and _stored_original
+                and not track.get("cover_manual_override")
+                and self._is_cover_flagged(track)
+                and _same_artist(hint, _stored_original)
+            ):
+                hint = None
+
             # ⭐ THE TRACK'S OWN ARTIST. Every test below asks "is this the
             # performer's own song?", and on a compilation the album artist is
             # "Various Artists" — which made all three vacuous.
@@ -1791,6 +1843,17 @@ class CoverDetector:
             # ⭐ THE TRACK'S OWN ARTIST — see ``comparison_artist``. Both arms
             # below phrase their answer relative to the performer.
             _performer = comparison_artist(track, artist)
+            if work_mbid and not self._work_title_matches_track(
+                work_mbid, track.get("title", "")
+            ):
+                # Same rule as step 1: a stored work that does not name this
+                # song must not answer for it. Fall through to resolving the
+                # recording (itself title-validated) instead.
+                log_scan_detail(
+                    f"[COVER_DETECT] stored work MBID does not name "
+                    f"'{track.get('title')}' — resolving from the recording"
+                )
+                work_mbid = ""
             if work_mbid:
                 logger.debug("Using pre-fetched work_mbid for cover fallback", track=track.get("title"), work_mbid=work_mbid)
                 original = self._earliest_work_recording(
@@ -3657,13 +3720,39 @@ class CoverDetector:
         if not seed:
             return True
         seed_title = str(seed.get("title") or "").strip()
-        if seed_title and not _titles_match(title, seed_title):
+        if seed_title and not _titles_match_exact(title, seed_title):
             return False
         if performer:
             first_credit = artist_from_credit(seed.get("artist-credit") or [])
             if first_credit and not _same_artist(first_credit, performer):
                 return False
         return True
+
+    def _work_title_matches_track(self, work_mbid: str, title: str) -> bool:
+        """Is a STORED work MBID actually the song this track names?
+
+        The same rule the stored recording id already obeys: a MusicBrainz id is
+        not authoritative merely because it is stored. A wrong work MBID (for
+        example Santana's "Smooth" work on a "Smooth Criminal" row) made the
+        work-first/fallback steps answer "Santana" even on a forced track-page
+        detection, because those steps trusted the id without checking WHICH
+        song it is. A prefix ("Smooth" for "Smooth Criminal") is never enough.
+
+        A failed fetch (empty title) is NOT evidence the id is wrong, so it
+        passes and the id is used as before.
+        """
+        work_mbid = str(work_mbid or "").strip()
+        if not work_mbid:
+            return False
+        try:
+            work_title, _writers = self._work_writers(work_mbid)
+        except Exception:
+            return True
+        work_title = str(work_title or "").strip()
+        if not work_title:
+            return True
+        base_title = _COVER_SUFFIX_RE.sub("", str(title or "")).strip()
+        return _titles_match_exact(base_title, work_title)
 
     def _resolve_recording_mbid(
         self,
@@ -3738,7 +3827,7 @@ class CoverDetector:
                 for mb_track in medium.get("tracks", []) or []:
                     rec = mb_track.get("recording") or {}
                     ct = rec.get("title") or mb_track.get("title") or ""
-                    if not _titles_match(title, ct):
+                    if not _titles_match_exact(title, ct):
                         continue
                     if _artist_matches(
                         rec.get("artist-credit", []) or mb_track.get("artist-credit", [])
@@ -3750,7 +3839,7 @@ class CoverDetector:
         for rec in self._search_recordings_by_title(
             title, limit=10, artist=search_artist or None
         ):
-            if not _titles_match(title, rec.get("title", "")):
+            if not _titles_match_exact(title, rec.get("title", "")):
                 continue
             if not _artist_matches(rec.get("artist-credit", []) or []):
                 continue

@@ -307,3 +307,69 @@ class TestClearCoverAndLock:
         monkeypatch.setattr(svc, "db_session", lambda: session)
 
         assert svc.clear_track_cover_verdict("missing", lock=True) is None
+
+
+# ---------------------------------------------------------------------------
+# 4. A stored WORK must name the same song (the reported "Santana" loop)
+# ---------------------------------------------------------------------------
+
+
+class TestAStoredWorkMustNameTheSameSong:
+    """Reported: "This was happening via the track page run, it was still
+    selecting Santana."
+
+    The track page runs ``detect_covers_for_track`` with ``force=True``, which
+    skips the title-hint step — so "Santana" was coming from a REAL-evidence
+    step that trusted a stored work MBID for a DIFFERENT song. ``_titles_match``
+    accepts prefixes, and "Smooth" is a prefix of "Smooth Criminal", so Santana's
+    "Smooth" work answered for "Smooth Criminal".
+    """
+
+    def test_a_prefix_is_not_the_same_song(self):
+        from services.enrichment.cover_detector_impl import _titles_match_exact
+
+        assert _titles_match_exact("Smooth Criminal", "Smooth") is False
+        assert _titles_match_exact(
+            "Smooth Criminal", "Smooth Criminal (Radio Edit)"
+        ) is True
+
+    def test_a_work_for_a_different_song_is_rejected(self):
+        det = _detector(_StubMB(work={"title": "Smooth"}))
+        assert det._work_title_matches_track("work-smooth", "Smooth Criminal") is False
+
+    def test_a_matching_work_title_is_accepted(self):
+        det = _detector(_StubMB(work={"title": "Smooth Criminal"}))
+        assert det._work_title_matches_track("work-sc", "Smooth Criminal") is True
+
+    def test_the_forced_pass_does_not_query_a_work_for_a_different_song(self):
+        det = _detector(_StubMB(
+            work={"title": "Smooth"},
+            work_recordings=[
+                _recording("rec-smooth", "Smooth", "Santana", "1999-06-15")
+            ],
+        ))
+        det._load_cover_checked_map = lambda ids: {}
+        det._collect_track_writers = lambda *a, **k: {}
+        det._persist_checked = lambda *a, **k: None
+        det._clear_unconfirmed_verdicts = lambda *a, **k: None
+        det._is_va_compilation = lambda *a, **k: False
+
+        queried: list[dict] = []
+        det._detect_via_work_id = lambda **kwargs: queried.append(kwargs) or None
+
+        det.detect_covers_for_album(
+            "20th Century Masters", "Alien Ant Farm",
+            [{
+                "id": "t1",
+                "title": "Smooth Criminal (Santana Cover)",
+                "artist": "Alien Ant Farm",
+                "work_mbid": "work-smooth",
+                "is_cover": 1,
+                "original_cover_artist": "Santana",
+            }],
+            force=True,
+        )
+
+        assert queried == [], (
+            "a work titled 'Smooth' must not answer for 'Smooth Criminal'"
+        )

@@ -133,11 +133,30 @@ def organize_track(track_metadata: dict[str, Any] | int, payload: dict[str, Any]
         infra.fs.music_root,
     )
 
-    return infra.fs.move_to_library(
+    move_result = infra.fs.move_to_library(
         source_path=str(src),
         target=target,
         year=track_metadata.get("year"),
     )
+    # Same DB write as the automatic completion path: persist the queue row's
+    # release-level metadata (Release Name, Release Year, album MBIDs) onto the
+    # landed library row, creating it when the library import has not run yet.
+    if move_result.get("success") and queue_item and queue_item.get("id") is not None:
+        try:
+            from services.downloads.download_completion_service import (
+                persist_import_metadata,
+            )
+
+            persist_import_metadata(
+                queue_item.get("id"),
+                str(move_result.get("target_path") or target),
+            )
+        except Exception as _persist_exc:
+            logger.debug(
+                "Organize: import metadata persist failed",
+                queue_id=queue_item.get("id"), error=str(_persist_exc),
+            )
+    return move_result
 
 
 def _apply_stored_metadata(queue_item: dict[str, Any], file_path: str) -> bool:

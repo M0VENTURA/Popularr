@@ -46,6 +46,9 @@ def _detector(state: dict | None = None) -> CoverDetector:
     det._collect_track_writers = lambda *a, **k: {}
     det._persist_checked = lambda *a, **k: None
     det._clear_unconfirmed_verdicts = lambda *a, **k: None
+    # These tests mock ``_detect_via_work_id`` and never stub the MB client;
+    # the stored-work title check would otherwise make a real request.
+    det._work_title_matches_track = lambda *a, **k: True
     return det
 
 
@@ -254,3 +257,64 @@ class TestTheRepairUsesTheResolvedOriginal:
             "Alien Ant Farm",
             resolved_original="Michael Jackson",
         ) is None
+
+
+# ===========================================================================
+# 5. Our own annotation must not re-confirm itself (the reported Santana loop)
+# ===========================================================================
+class TestAStoredVerdictCannotConfirmItself:
+    """A non-forced scan used to re-read its own suffix as evidence.
+
+    Steps 1-4 are turned off here, leaving only the title-hint step — the
+    scenario where the wrong "Santana" attribution used to survive every
+    popularity scan (a forced pass would clear it, the popularity scan restored
+    it).
+    """
+
+    @staticmethod
+    def _no_other_evidence(det) -> None:
+        det._detect_via_work_id = lambda **kwargs: None   # inconclusive
+        det._detect_via_isrc = lambda **kwargs: None
+        det._detect_via_recording_relation = lambda **kwargs: None
+        det._find_original_recording = lambda *a, **k: None
+        det._resolve_album_release_mbid = lambda *a, **k: ""
+        det._resolve_recording_mbid = lambda *a, **k: ""
+        det._is_va_compilation = lambda *a, **k: False
+
+    def test_the_stored_verdict_is_not_reconfirmed_from_its_own_suffix(
+        self, monkeypatch
+    ):
+        det = _detector(_stored("Santana"))
+        self._no_other_evidence(det)
+        captured = _capture_writes(monkeypatch)
+
+        det.detect_covers_for_album(
+            "20th Century Masters", "Alien Ant Farm",
+            [_track("Smooth Criminal (Santana Cover)")],
+        )
+
+        assert captured["updates"] == [], (
+            "the stored 'Santana' verdict was re-confirmed by its own "
+            "'(Santana Cover)' suffix; nothing could ever correct or clear it, "
+            "which is why the popularity scan kept restoring the wrong cover"
+        )
+
+    def test_an_annotation_that_is_not_our_stored_verdict_is_honoured(
+        self, monkeypatch
+    ):
+        """CONTROL — a title annotation is still evidence when it is not ours."""
+        det = _detector({})
+        self._no_other_evidence(det)
+        captured = _capture_writes(monkeypatch)
+        track = _track("Smooth Criminal (Santana Cover)")
+        track["is_cover"] = 0
+        track["original_cover_artist"] = None
+
+        det.detect_covers_for_album(
+            "20th Century Masters", "Alien Ant Farm", [track]
+        )
+
+        assert captured["updates"], (
+            "an annotation that is NOT our stored verdict must still be used"
+        )
+        assert captured["updates"][0]["original_artist"] == "Santana"
