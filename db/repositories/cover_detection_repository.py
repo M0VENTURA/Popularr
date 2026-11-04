@@ -279,7 +279,15 @@ def apply_cover_metadata_batch(conn, updates: List[Dict], max_retries: int = 5) 
                     reason = update.get("is_cover_reason") or (
                         f"Originally by {orig}" if orig else "Cover detection"
                     )
-                    new_title = build_cover_title(title, orig)
+                    # ⚠️ Rebuild from the CLEAN base. ``build_cover_title`` is
+                    # idempotent against ANY existing "(X Cover)" suffix — it
+                    # returns the title UNCHANGED — so a stale
+                    # "Smooth Criminal (Santana Cover)" arriving here would keep
+                    # its wrong suffix while ``original_cover_artist`` became
+                    # Michael Jackson. The title and the verdict could never
+                    # agree on disk, in the DB, or in Navidrome.
+                    clean_title = COVER_SUFFIX_RE.sub("", title).strip() or title
+                    new_title = build_cover_title(clean_title, orig)
 
                     # ── "Cover" genre, merged — never replacing ───────────
                     try:
@@ -314,7 +322,15 @@ def apply_cover_metadata_batch(conn, updates: List[Dict], max_retries: int = 5) 
                     session.execute(
                         text(
                             "UPDATE tracks SET is_cover = 1, is_cover_reason = :reason, "
-                            "original_cover_artist = :orig "
+                            "original_cover_artist = :orig, "
+                            # Stamp LOCAL AUTHORITY in the same write: the cover
+                            # verdict is a Popularr correction. Without this the
+                            # Navidrome import saw a "clean" row and rewrote the
+                            # title from Navidrome's still-stale index, so the
+                            # corrected cover reverted on the next import.
+                            "local_tags_written_at = CURRENT_TIMESTAMP, "
+                            "metadata_dirty_for_navidrome = TRUE, "
+                            "metadata_source = 'popularr' "
                             "WHERE CAST(id AS TEXT) = :id "
                             "AND cover_manual_override IS NOT TRUE"
                         ),
