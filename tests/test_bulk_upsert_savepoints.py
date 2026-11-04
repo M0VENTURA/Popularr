@@ -165,3 +165,29 @@ class TestOneBadRowDoesNotAbortTheAlbum:
 
     def test_an_empty_batch_is_still_a_no_op(self):
         assert repo.upsert_tracks_bulk([]) is False
+
+
+class TestAConnectionOutageIsNotARefusedRow:
+    def test_a_transient_db_error_propagates(self, monkeypatch):
+        """Reported: a Postgres restart logged "some rows were refused".
+
+        A connection-level failure is not a row-level refusal. Swallowing it
+        marked the whole album failed and hid the outage from the retry wrapper,
+        so the scan carried on as if the data had been rejected.
+        """
+        from sqlalchemy.exc import OperationalError
+
+        session = _PgLikeSession()
+        _wire(monkeypatch, session)
+
+        def _outage(_session: Any, _payload: dict) -> bool:
+            raise OperationalError(
+                "INSERT INTO tracks", {}, Exception("connection refused")
+            )
+
+        monkeypatch.setattr(repo, "_execute_save", _outage)
+        # One attempt: the retry wrapper is covered by its own tests.
+        monkeypatch.setattr(repo, "run_with_db_lock_retry", lambda op: op())
+
+        with pytest.raises(OperationalError):
+            repo.upsert_tracks_bulk([{"id": "a"}])

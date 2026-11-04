@@ -315,6 +315,15 @@ def upsert_tracks_bulk(track_payloads: list[dict]) -> bool:
                     with session.begin_nested():
                         _execute_save(session, payload)
                 except Exception as exc:
+                    if _is_transient_db_error(exc):
+                        # ⚠️ A CONNECTION failure is not "this row was refused".
+                        # Swallowing it here marked the whole album as refused
+                        # (the reported "some rows were refused by the database"
+                        # during a Postgres restart) and hid the outage from
+                        # ``run_with_db_lock_retry``. Re-raise so the batch is
+                        # retried with a fresh connection — or surfaces as a DB
+                        # outage the scan can defer on.
+                        raise
                     # ⚠️ WARNING, not DEBUG, and it names the track + the DB's
                     # own reason. This was ``logger.debug``, so a rejected
                     # statement ("invalid input syntax for type json" against a

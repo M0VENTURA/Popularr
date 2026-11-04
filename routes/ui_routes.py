@@ -2017,7 +2017,13 @@ def _write_album_track_file_tags(
             if _column in payload and not str(payload.get(_column) or "").strip():
                 file_tags[_tag_name] = ""
         if file_tags:
-            return bool(update_file_tags(resolved, file_tags)), resolved
+            # ``force=True``: an explicit album-metadata save is AUTHORITATIVE
+            # for the fields it submits. With ``tagging.fill_missing_only`` a
+            # populated DATE / MUSICBRAINZ_ALBUMID / ALBUMVERSION frame was
+            # never overwritten, so Navidrome kept re-indexing the OLD release
+            # identity and the next import wrote it straight back (the reported
+            # "album keeps re-importing / reverts after a Navidrome import").
+            return bool(update_file_tags(resolved, file_tags, force=True)), resolved
     except Exception as tag_err:
         logger.debug("File tag write failed", track_id=track_id, error=str(tag_err))
     return False, resolved

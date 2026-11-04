@@ -208,11 +208,26 @@ def request_scan_stop(path: str, scan_type: str = "library") -> None:
 
 def is_stop_requested(path: str) -> bool:
     db_scan_type = _extract_scan_type(path)
-    with db_session() as session:
-        state = session.query(ScanState).filter_by(scan_type=db_scan_type).first()
-        if not state:
-            return False
-        return bool(state.stop_requested) or state.status == "stop_requested"
+    try:
+        with db_session() as session:
+            state = session.query(ScanState).filter_by(scan_type=db_scan_type).first()
+            if not state:
+                return False
+            return bool(state.stop_requested) or state.status == "stop_requested"
+    except Exception as exc:
+        # FAIL OPEN. This is a control check called between every artist
+        # (and every batch); a transient DB blip (Postgres restart, dropped
+        # connection) used to raise out of the scan loop and abort the WHOLE
+        # import with "Navidrome import scan failed". Not being able to read
+        # the stop flag is not a reason to fail the scan — the next DB write
+        # will surface a genuine outage, where it can be retried/deferred
+        # properly.
+        logger.warning(
+            "Could not read scan stop state — assuming not stopped",
+            scan_type=db_scan_type,
+            error=str(exc),
+        )
+        return False
 
 def clear_stop_request(path: str) -> None:
     db_scan_type = _extract_scan_type(path)

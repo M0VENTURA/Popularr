@@ -331,7 +331,9 @@ def _existing_non_empty_fields(file_path: str, tags: Dict[str, Any]) -> set[str]
     return present
 
 
-def _write_tags_to_file_impl(file_path: str, tags: Dict[str, Any]) -> bool:
+def _write_tags_to_file_impl(
+    file_path: str, tags: Dict[str, Any], *, force: bool = False
+) -> bool:
     # ── Resolve the path ───────────────────────────────────────────────────
     # A stored path may be RELATIVE to the music root (Navidrome stores it
     # that way, and ``rename-file`` can too). Resolving here — once, for every
@@ -374,7 +376,12 @@ def _write_tags_to_file_impl(file_path: str, tags: Dict[str, Any]) -> bool:
     # fill_missing_only: never overwrite a frame that already carries a value.
     # Empty incoming values still pass through (they are explicit "clear this
     # frame" requests — the writers delete the frame on empty).
-    if cfg.get("fill_missing_only"):
+    #
+    # ``force`` is for writers whose payload is AUTHORITATIVE and must replace a
+    # stale value — the cover verdict (title + IS_COVER +
+    # ORIGINAL_COVER_ARTIST). Without it, a wrong "(Santana Cover)" TITLE frame
+    # was never overwritten and the false attribution survived every repair.
+    if cfg.get("fill_missing_only") and not force:
         already = _existing_non_empty_fields(file_path, tags)
         tags = {
             k: v for k, v in tags.items()
@@ -788,15 +795,20 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
 # PUBLIC WRAPPERS
 # =============================================================================
 
-def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
+def write_tags_to_file(
+    file_path: str, tags: Dict[str, Any], *, force: bool = False
+) -> bool:
     """Write tags, then durably mark the local correction.
 
     ⭐ The mark is what protects the correction from a later, older Navidrome
     import. It is written only after the file write SUCCEEDS: a failed write
     must not claim local authority. Rating/cover-only writes are excluded:
     those columns are already popularity-owned and must not force a scan.
+
+    ``force=True`` bypasses ``tagging.fill_missing_only`` for an authoritative
+    payload (see ``_write_tags_to_file_impl``).
     """
-    ok = _write_tags_to_file_impl(file_path, tags)
+    ok = _write_tags_to_file_impl(file_path, tags, force=force)
     _non_metadata = {"rating", "playcount", "skipcount", "cover_art_data", "cover_art_mime"}
     _is_metadata_write = bool(tags) and any(key not in _non_metadata for key in tags)
     if ok and _is_metadata_write:
@@ -819,10 +831,12 @@ def write_tags_to_file(file_path: str, tags: Dict[str, Any]) -> bool:
     return ok
 
 
-def update_file_tags(file_path: str, tag_updates: Dict[str, Any]) -> bool:
+def update_file_tags(
+    file_path: str, tag_updates: Dict[str, Any], *, force: bool = False
+) -> bool:
     if not file_path or not tag_updates:
         return False
-    return write_tags_to_file(file_path, tag_updates)
+    return write_tags_to_file(file_path, tag_updates, force=force)
 
 
 def _get_track_file_path(track_id: str) -> str | None:

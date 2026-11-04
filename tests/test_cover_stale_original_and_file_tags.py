@@ -318,3 +318,71 @@ class TestAStoredVerdictCannotConfirmItself:
             "an annotation that is NOT our stored verdict must still be used"
         )
         assert captured["updates"][0]["original_artist"] == "Santana"
+
+
+# ===========================================================================
+# 6. The FILE's TITLE is part of the verdict
+# ===========================================================================
+class TestTheFilesTitleIsPartOfTheVerdict:
+    """The logged case: the resolver returned Michael Jackson, but the pass
+    reported ``new=0, already-confirmed=1`` and nothing changed.
+
+    ``_file_cover_tags_are_current`` compared only ``IS_COVER`` and
+    ``ORIGINAL_COVER_ARTIST``. A file whose tags said "Michael Jackson" but
+    whose TITLE frame still said "Smooth Criminal (Santana Cover)" was declared
+    current, so the repair never ran and the stale suffix lived on disk (and in
+    Navidrome) forever.
+    """
+
+    @staticmethod
+    def _patch_file(monkeypatch, tmp_path, *, tags, title):
+        import helpers.metadata_reader as reader
+        import services.metadata.tag_file_service as tfs
+
+        path = tmp_path / "01.mp3"
+        path.write_bytes(b"x")
+        monkeypatch.setattr(reader, "read_release_tag_values", lambda p: dict(tags))
+        monkeypatch.setattr(reader, "read_mp3_metadata", lambda p: {"title": title})
+        monkeypatch.setattr(tfs, "resolve_music_file_path", lambda p: p)
+        return str(path)
+
+    def test_a_stale_title_suffix_is_not_current(self, monkeypatch, tmp_path):
+        path = self._patch_file(
+            monkeypatch, tmp_path,
+            tags={"is_cover": "1", "original_cover_artist": "Michael Jackson"},
+            title="Smooth Criminal (Santana Cover)",
+        )
+
+        assert CoverDetector._file_cover_tags_are_current(
+            path, "Michael Jackson",
+            expected_title="Smooth Criminal (Michael Jackson Cover)",
+        ) is False, (
+            "a file whose TITLE still names Santana must be rewritten even when "
+            "its cover tags already name Michael Jackson"
+        )
+
+    def test_a_matching_title_is_current(self, monkeypatch, tmp_path):
+        path = self._patch_file(
+            monkeypatch, tmp_path,
+            tags={"is_cover": "1", "original_cover_artist": "Michael Jackson"},
+            title="Smooth Criminal (Michael Jackson Cover)",
+        )
+
+        assert CoverDetector._file_cover_tags_are_current(
+            path, "Michael Jackson",
+            expected_title="Smooth Criminal (Michael Jackson Cover)",
+        ) is True
+
+    def test_a_middle_suffix_order_still_compares_the_base_title(
+        self, monkeypatch, tmp_path
+    ):
+        path = self._patch_file(
+            monkeypatch, tmp_path,
+            tags={"is_cover": "1", "original_cover_artist": "Michael Jackson"},
+            title="A Different Song (Michael Jackson Cover)",
+        )
+
+        assert CoverDetector._file_cover_tags_are_current(
+            path, "Michael Jackson",
+            expected_title="Smooth Criminal (Michael Jackson Cover)",
+        ) is False, "the file title must name the same base song"

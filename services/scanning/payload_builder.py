@@ -341,6 +341,40 @@ def build_track_payload(
         if not str(payload.get(_col) or "").strip():
             payload[_col] = _val
 
+    # ── The TWO year columns ─────────────────────────────────────────────
+    # ⭐ ``Child.year`` is the file's DATE tag — the EDITION's year. On the
+    # tracks table ``year`` is the release GROUP's first year and
+    # ``release_year`` is this edition; the album page labels them "Original
+    # Year" / "Release Year".
+    #
+    # Writing the edition into ``year`` did two things:
+    #   * a reissue's ORIGINAL year was replaced by the edition year, and
+    #   * an album whose Original Year and Release Year legitimately differ
+    #     (reported: Original 1987, Release 2013) produced a PERMANENT
+    #     local-authority conflict on ``year`` — Navidrome always reports the
+    #     edition — so the album re-imported and reverted on every Navidrome
+    #     import.
+    # Map each column to what it means: ORIGINALYEAR (the file tag / AlbumID3
+    # original date) → ``year``; DATE/Child.year → ``release_year``. With no
+    # original year the edition is the only year known, so ``year`` keeps it
+    # (the previous behaviour).
+    _edition_year = extracted.get("year")
+    if isinstance(_edition_year, str):
+        # Child.year is normally a bare year; a full date must still land in
+        # the INTEGER column as its year, not be dropped by the type coercion.
+        _year_match = re.search(r"(\d{4})", _edition_year)
+        if _year_match:
+            _edition_year = _year_match.group(1)
+    _original_year = (
+        extracted.get("originalyear")
+        or payload.get("originalyear")
+        or ""
+    )
+    if _edition_year not in (None, ""):
+        payload["release_year"] = _edition_year
+    if _original_year not in (None, ""):
+        payload["year"] = _original_year
+
     # ── Provisional album type ───────────────────────────────────────────
     # A Navidrome import assigns NO album type of its own: the type every UI
     # reads (``musicbrainz_albumtype``) is written by the album stage of the

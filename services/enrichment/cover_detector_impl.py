@@ -405,6 +405,12 @@ def _has_cover_annotation(title: str) -> bool:
     return bool(_COVER_SUFFIX_RE.search(title or ""))
 
 
+def _cover_suffix_artist(title: str) -> str:
+    """The artist named by a trailing ``"(X Cover)"`` suffix, or ``""``."""
+    match = re.search(r"\(([^)]+?)\s+cover\)\s*$", str(title or ""), re.IGNORECASE)
+    return str(match.group(1)).strip() if match else ""
+
+
 def _titles_match(left: str, right: str) -> bool:
     """Canonical title equality, or one side being a prefix of the other."""
     lt = canonical_track_title(left)
@@ -2037,7 +2043,7 @@ class CoverDetector:
             # on the next scan. Write the whole verdict once; afterwards this is
             # a no-op and the file is not touched again.
             if self._file_cover_tags_are_current(
-                str(track.get("file_path") or ""), original
+                str(track.get("file_path") or ""), original, expected_title=title
             ):
                 return None
         if _has_cover_annotation(title) and not _suffix_match:
@@ -4009,7 +4015,9 @@ class CoverDetector:
         }
 
     @staticmethod
-    def _file_cover_tags_are_current(file_path: str, original: str) -> bool:
+    def _file_cover_tags_are_current(
+        file_path: str, original: str, expected_title: str = ""
+    ) -> bool:
         """Does the AUDIO FILE already carry this cover verdict?
 
         A re-confirmed cover with the right title suffix used to produce no
@@ -4017,6 +4025,13 @@ class CoverDetector:
         reported "Santana") survived forever and was re-imported by Navidrome
         on the next scan. Checking the file lets the repair write the full
         verdict once, then go quiet.
+
+        ⭐ The file's TITLE is part of the verdict too. Only ``IS_COVER`` and
+        ``ORIGINAL_COVER_ARTIST`` were compared, so a file whose tags said
+        "Michael Jackson" but whose TITLE still said "Smooth Criminal
+        (Santana Cover)" was declared current and the stale suffix could never
+        be repaired — the reported Santana that survived every track-page run
+        and was echoed back by Navidrome.
 
         Returns True (do NOT write) when the path cannot be resolved or the
         file cannot be read: an unreadable file must not churn on every pass.
@@ -4027,7 +4042,10 @@ class CoverDetector:
         try:
             import os
 
-            from helpers.metadata_reader import read_release_tag_values
+            from helpers.metadata_reader import (
+                read_mp3_metadata,
+                read_release_tag_values,
+            )
             from services.metadata.tag_file_service import resolve_music_file_path
 
             resolved = resolve_music_file_path(path) or path
@@ -4040,8 +4058,34 @@ class CoverDetector:
         is_cover = str(values.get("is_cover") or "").strip().lower()
         stored_original = str(values.get("original_cover_artist") or "").strip()
         cover_ok = is_cover in {"1", "true", "yes", "y"}
-        return cover_ok and bool(stored_original) and _same_artist(
-            stored_original, original
+        if not (
+            cover_ok
+            and bool(stored_original)
+            and _same_artist(stored_original, original)
+        ):
+            return False
+
+        expected_title = str(expected_title or "").strip()
+        if not expected_title:
+            return True
+        try:
+            file_title = str(
+                (read_mp3_metadata(resolved) or {}).get("title") or ""
+            ).strip()
+        except Exception:
+            return True
+        if not file_title:
+            # Unreadable / metadata reading disabled: never churn on a pass that
+            # cannot see the title.
+            return True
+        expected_suffix = _cover_suffix_artist(expected_title)
+        file_suffix = _cover_suffix_artist(file_title)
+        if expected_suffix and (
+            not file_suffix or not _same_artist(file_suffix, expected_suffix)
+        ):
+            return False
+        return canonical_track_title(file_title) == canonical_track_title(
+            expected_title
         )
 
     @staticmethod
@@ -4078,7 +4122,11 @@ class CoverDetector:
             }
             if additional_genres:
                 tags["genre"] = "; ".join(additional_genres)
-            return write_tags_to_file(file_path, tags)
+            # ``force=True``: this verdict is authoritative. With
+            # ``tagging.fill_missing_only`` a populated TITLE /
+            # ORIGINAL_COVER_ARTIST frame was never overwritten, so a stale
+            # "(Santana Cover)" could not be corrected on disk at all.
+            return write_tags_to_file(file_path, tags, force=True)
         except Exception as exc:
             logger.error(
                 "Failed to update file metadata", file_path=file_path, error=str(exc)
@@ -4104,7 +4152,10 @@ class CoverDetector:
         try:
             from services.metadata.tag_file_service import write_tags_to_file
 
-            return write_tags_to_file(file_path, tags)
+            # ``force=True`` so a populated TITLE frame is replaced: the point
+            # of the clear is to strip the "(X Cover)" suffix from disk, which
+            # fill_missing_only would otherwise drop.
+            return write_tags_to_file(file_path, tags, force=True)
         except Exception as exc:
             logger.debug(
                 "Failed to clear cover file tags", file_path=file_path, error=str(exc)
