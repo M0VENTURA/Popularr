@@ -319,20 +319,33 @@ def apply_cover_metadata_batch(conn, updates: List[Dict], max_retries: int = 5) 
                             {"title": new_title, "id": tid},
                         )
 
+                    # A forced re-detect from the album/track page supersedes a
+                    # previous "clear and lock" (``clear_manual_override``): the
+                    # user explicitly asked detection to run again, and the lock
+                    # used to make that button silently do nothing on the stale
+                    # "(Santana Cover)" row.
+                    _clear_override = bool(update.get("clear_manual_override"))
+                    _set_override = (
+                        "cover_manual_override = FALSE, " if _clear_override else ""
+                    )
+                    _override_guard = (
+                        "" if _clear_override
+                        else "AND cover_manual_override IS NOT TRUE"
+                    )
+                    # The LOCAL AUTHORITY stamp rides in the same write: the
+                    # cover verdict is a Popularr correction. Without it the
+                    # Navidrome import saw a "clean" row and rewrote the title
+                    # from Navidrome's still-stale index, reverting the fix.
                     session.execute(
                         text(
                             "UPDATE tracks SET is_cover = 1, is_cover_reason = :reason, "
                             "original_cover_artist = :orig, "
-                            # Stamp LOCAL AUTHORITY in the same write: the cover
-                            # verdict is a Popularr correction. Without this the
-                            # Navidrome import saw a "clean" row and rewrote the
-                            # title from Navidrome's still-stale index, so the
-                            # corrected cover reverted on the next import.
-                            "local_tags_written_at = CURRENT_TIMESTAMP, "
+                            + _set_override
+                            + "local_tags_written_at = CURRENT_TIMESTAMP, "
                             "metadata_dirty_for_navidrome = TRUE, "
                             "metadata_source = 'popularr' "
                             "WHERE CAST(id AS TEXT) = :id "
-                            "AND cover_manual_override IS NOT TRUE"
+                            + _override_guard
                         ),
                         {"reason": reason, "orig": orig, "id": tid},
                     )

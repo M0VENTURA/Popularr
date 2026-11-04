@@ -1301,10 +1301,18 @@ class CoverDetector:
                 if not tid:
                     continue
                 # A user-locked verdict outranks every heuristic: never
-                # re-detect it and never clear it.
+                # re-detect it and never clear it. Say so — otherwise "clear
+                # and lock", then re-scanning, looks like the fix silently did
+                # nothing ("still Santana").
                 if track.get("cover_manual_override"):
                     _confirmed_skipped.add(tid)
                     seen_track_ids.add(tid)
+                    logger.info(
+                        "Cover detection skipped — verdict is locked "
+                        "(clear & lock); unlock on the track page to re-detect",
+                        track=str(track.get("title") or ""),
+                        original=str(track.get("original_cover_artist") or ""),
+                    )
                     continue
                 # ``_cover_recheck`` is set by the scan runner when this pass
                 # stripped "(X Cover)" wording from the title: the stored
@@ -1431,7 +1439,8 @@ class CoverDetector:
                 # the old code did) stamped a bogus suffix onto a FALSE stored
                 # verdict and then shielded it from re-assessment.
                 _repair = self._suffix_repair_update(
-                    track, artist, resolved_original=_orig
+                    track, artist, resolved_original=_orig,
+                    allow_locked=bool(force),
                 )
                 if _repair is not None:
                     pending_updates.append(_repair)
@@ -1447,6 +1456,17 @@ class CoverDetector:
                 and _orig
                 and not _same_artist(_stored_orig, _orig)
             ):
+                if track.get("cover_manual_override") and not force:
+                    # A locked verdict is the user's decision; an ordinary scan
+                    # must not overwrite it. (An EXPLICIT re-detect does — see
+                    # the clear below.)
+                    _confirmed_skipped.add(_tid)
+                    seen_track_ids.add(_tid)
+                    log_scan_detail(
+                        f"[COVER_DETECT] '{track.get('title')}' verdict is "
+                        f"locked at {_stored_orig} — not overwritten by {_orig}"
+                    )
+                    return
                 # The stored verdict is a cover, but of the WRONG artist (the
                 # reported stale "Santana"). Fall through and write the newly
                 # resolved original over it — DB and FILE together — instead of
@@ -1457,7 +1477,14 @@ class CoverDetector:
                 )
             cover_results.append(result)
             seen_track_ids.add(_tid)
-            pending_updates.append(self._build_update(result, track))
+            _build = self._build_update(result, track)
+            if force and track.get("cover_manual_override"):
+                # ⭐ An EXPLICIT "run cover detection" supersedes a prior
+                # "clear and lock". Without this the button silently did
+                # nothing on a locked row and the wrong "(Santana Cover)" was
+                # impossible to fix from the UI.
+                _build["clear_manual_override"] = True
+            pending_updates.append(_build)
 
             # ⭐ The ACTIONABLE event, so it goes to the scan log the operator
             # watches rather than only to ``info.log``. Covers are rare, so one
@@ -2009,6 +2036,7 @@ class CoverDetector:
         album_artist: str = "",
         *,
         resolved_original: str = "",
+        allow_locked: bool = False,
     ) -> dict[str, Any] | None:
         """An update restoring a confirmed cover's "(X Cover)" title, or None.
 
@@ -2020,8 +2048,19 @@ class CoverDetector:
         ``resolved_original`` is the original THIS pass just re-confirmed. It
         wins over the stored value so a repair can never write back an older
         attribution; when it is absent the stored value is used.
+
+        ``allow_locked`` is set for an EXPLICIT re-detect (the album/track page
+        button, which runs forced). A user-locked verdict used to block the
+        repair entirely, so a title stuck on the wrong "(Santana Cover)" could
+        never be rewritten even after detection re-confirmed Michael Jackson.
+        The repair then also clears the lock.
         """
-        if track.get("cover_manual_override"):
+        if track.get("cover_manual_override") and not allow_locked:
+            logger.info(
+                "Cover title repair skipped — verdict is locked",
+                track=track.get("title"),
+                original=str(track.get("original_cover_artist") or ""),
+            )
             return None
         if not self._is_cover_flagged(track):
             return None
@@ -2045,6 +2084,17 @@ class CoverDetector:
             if self._file_cover_tags_are_current(
                 str(track.get("file_path") or ""), original, expected_title=title
             ):
+                # Deliberately visible: this is the "nothing to do" case. It
+                # proves the DB title, the file title and the cover tags all
+                # already name `original`, so a value still showing the OLD
+                # attribution is coming from another surface (Navidrome's index,
+                # a player cache) — not from this row.
+                logger.info(
+                    "Cover verdict already current on disk — nothing to rewrite",
+                    track=str(track.get("title") or ""),
+                    original=original,
+                    manual_override=bool(track.get("cover_manual_override")),
+                )
                 return None
         if _has_cover_annotation(title) and not _suffix_match:
             return None
@@ -2065,6 +2115,10 @@ class CoverDetector:
         update["is_cover_reason"] = (
             str(track.get("is_cover_reason") or "").strip() or update["is_cover_reason"]
         )
+        if track.get("cover_manual_override") and allow_locked:
+            # The explicit re-detect that permitted this repair also releases
+            # the lock, so later scans can maintain the verdict again.
+            update["clear_manual_override"] = True
         return update
 
     def _clear_unconfirmed_verdicts(
