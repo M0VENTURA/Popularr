@@ -1099,12 +1099,26 @@ class CoverDetector:
         # recording. Scan another page for the earliest PERFORMED original
         # (Céline Dion for "My Heart Will Go On") and let it replace the
         # writer-score fallback. Writers are excluded by the helper.
-        if writer_names and (earliest is None or earliest is writer_earliest):
+        #
+        # ⭐ ALSO scan the extra page when the first page was FULL, even though a
+        # non-writer candidate was found. "My Heart Will Go On" has 320
+        # recordings; page 1 contains a 1998 Euro-house cover by "Deja Vu" and
+        # only Céline's UNDATED compilation recording, so she was skipped and
+        # Deja Vu won. Her dated recording is on a later page — which this scan
+        # found, but only in the "no performer candidate" branch. A full page
+        # means the candidate set is incomplete, so look further.
+        _first_page_full = len(recordings) >= 100
+        if writer_names and (
+            earliest is None or earliest is writer_earliest or _first_page_full
+        ):
             _performed_work = self._earliest_performed_recording(
                 work_mbid,
                 performer,
                 writer_names,
-                max_pages=2,
+                # "My Heart Will Go On" has 320 recordings; cover the whole set
+                # (4 pages x 100) so a dated Céline recording past page 1 is
+                # found instead of a 1998 Euro-house cover on page 1.
+                max_pages=4,
             )
             if _performed_work:
                 _performed_year = _performed_work.get("year")

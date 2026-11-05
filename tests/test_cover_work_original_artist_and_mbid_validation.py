@@ -425,6 +425,60 @@ class TestAStoredWorkMustNameTheSameSong:
         assert result is not None
         assert result["artist"] == "Michael Jackson"
 
+    def test_a_huge_work_scans_past_page_one_to_find_the_performed_original(self):
+        """The reported "My Heart Will Go On (Deja Vu Cover)".
+
+        MusicBrainz has 320 recordings of this work. Page 1 contains Céline
+        Dion's UNDATED compilation recording (skipped) and a dated 1998
+        Euro-house cover by "Deja Vu" — so Deja Vu won. Céline's dated recording
+        is on a later page. A FULL first page must trigger the extra-page scan.
+        """
+        filler = [
+            _recording(f"f{i}", "My Heart Will Go On", f"Filler {i}", "2010-01-01")
+            for i in range(98)
+        ]
+        page_one = filler + [
+            _recording("dejavu", "My Heart Will Go On", "Deja Vu", "1998-03-31"),
+            _recording("horner", "My Heart Will Go On", "James Horner", "2004-01-01"),
+        ]
+        page_two = [
+            _recording("celine", "My Heart Will Go On", "Céline Dion", "1996-01-01"),
+        ]
+
+        class _PagedMB:
+            def browse_work_recordings(self, work_id, inc="", limit=100, offset=0):
+                return list(page_one if offset == 0 else page_two if offset == 100 else [])
+
+            def get_work(self, work_id, inc=None):
+                return {
+                    "title": "My Heart Will Go On",
+                    "artist-relation-list": [
+                        {"type": "writer", "artist": {"id": "a-horner", "name": "James Horner"}},
+                        {"type": "writer", "artist": {"id": "a-jennings", "name": "Will Jennings"}},
+                    ],
+                }
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
+            def get_recording(self, mbid, inc=""):
+                return {}
+
+            def search_recordings(self, query, limit=15):
+                return []
+
+        det = _detector(_PagedMB())
+
+        result = det._detect_via_work_id(
+            "work-my-heart", performer="DragonForce", exclude_mbid=""
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion", (
+            "page 1 yields a 1998 cover; a full first page must scan further for "
+            "Céline Dion's dated original"
+        )
+
     def test_the_forced_pass_does_not_query_a_work_for_a_different_song(self):
         det = _detector(_StubMB(
             work={"title": "Smooth"},
