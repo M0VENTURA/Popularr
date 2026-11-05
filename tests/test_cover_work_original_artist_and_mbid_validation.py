@@ -341,6 +341,60 @@ class TestAStoredWorkMustNameTheSameSong:
         det = _detector(_StubMB(work={"title": "Smooth Criminal"}))
         assert det._work_title_matches_track("work-sc", "Smooth Criminal") is True
 
+    def test_an_explicit_cover_relation_beats_a_later_cover_in_the_work(self):
+        """The reported "Smooth Criminal (Santana Cover)".
+
+        Michael Jackson wrote AND sang the song, so his earliest recording is
+        ranked as a WRITER recording and skipped; the earliest NON-writer
+        recording of the work (Santana's later cover) then won and was returned
+        as the original — even though the writer lookup itself found Michael
+        Jackson. An explicit forward ``cover`` recording relation (Alien Ant
+        Farm → Michael Jackson) is authoritative and must win.
+        """
+        seed = {
+            "id": "rec-aaf",
+            "title": "Smooth Criminal",
+            "artist-credit": [{"artist": {"id": "a-aaf", "name": "Alien Ant Farm"}}],
+            "first-release-date": "2001-01-01",
+            "recording-relation-list": [{
+                "type": "cover",
+                "direction": "forward",
+                "recording": {
+                    "id": "rec-mj",
+                    "title": "Smooth Criminal",
+                    "artist-credit": [
+                        {"artist": {"id": "a-mj", "name": "Michael Jackson"}}
+                    ],
+                    "first-release-date": "1987-08-25",
+                },
+            }],
+        }
+        mb = _StubMB(
+            recordings={"rec-aaf": seed},
+            work={
+                "title": "Smooth Criminal",
+                "artist-relation-list": [
+                    {"type": "writer", "artist": {"id": "a-mj", "name": "Michael Jackson"}},
+                ],
+            },
+            work_recordings=[
+                _recording("rec-mj", "Smooth Criminal", "Michael Jackson", "1987-08-25"),
+                _recording("rec-santana", "Smooth Criminal", "Santana", "2010-09-21"),
+            ],
+        )
+        det = _detector(mb)
+
+        result = det._detect_via_work_id(
+            "work-sc", performer="Alien Ant Farm", exclude_mbid="rec-aaf"
+        )
+
+        assert result is not None
+        assert result["artist"] == "Michael Jackson", (
+            "the explicit cover relation must win; without it the "
+            "writer-performer original is skipped and the later Santana cover "
+            "wins"
+        )
+
     def test_the_forced_pass_does_not_query_a_work_for_a_different_song(self):
         det = _detector(_StubMB(
             work={"title": "Smooth"},

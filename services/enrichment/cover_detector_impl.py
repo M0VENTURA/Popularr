@@ -935,6 +935,42 @@ class CoverDetector:
                         own_recording_flagged_cover = True
                     break
 
+        # ⭐ AN EXPLICIT COVER RELATION IS THE MOST AUTHORITATIVE ANSWER.
+        #
+        # MusicBrainz models "this recording is a cover of THAT recording" as a
+        # forward ``cover`` recording relation. When the track's own recording
+        # carries one, the target IS the original — no title/date ranking should
+        # second-guess it.
+        #
+        # The ranking below CANNOT handle the case where the songwriter is the
+        # original performer: Michael Jackson wrote AND sang "Smooth Criminal",
+        # so his earliest recording is classified as a "writer recording"
+        # (``writer_earliest``) and skipped, and the earliest NON-writer
+        # recording — a later cover — is returned. That is exactly the reported
+        # "Smooth Criminal (Santana Cover)": the writer lookup found Michael
+        # Jackson, but the work ranking returned Santana. Consulting the explicit
+        # relation first fixes it without weakening the composer-vs-performer
+        # rule for songs like "My Heart Will Go On".
+        if exclude_mbid:
+            _seed = self._get_recording(
+                exclude_mbid, "recording-rels+artist-credits+releases"
+            )
+            if _seed:
+                _chain = self._resolve_cover_chain(
+                    exclude_mbid, performer, seed_recording=_seed
+                )
+                _chain_artist = str((_chain or {}).get("artist") or "").strip()
+                if _chain_artist and not _same_artist(_chain_artist, performer):
+                    log_unified_safe(
+                        "[COVER_DETECT] explicit cover relation: "
+                        f"{_chain_artist} for work {work_mbid}"
+                    )
+                    return {
+                        **_chain,
+                        "confidence": (_chain or {}).get("confidence") or "high",
+                        "source": "recording_relation",
+                    }
+
         # If the performer (or a band member of the performer) wrote the work
         # and MusicBrainz does NOT explicitly mark this recording as a cover,
         # the performer is the originator (prevents AFI originals covered later
