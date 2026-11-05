@@ -497,25 +497,30 @@ class TestAStoredWorkMustNameTheSameSong:
         The title-search path fetches each candidate WITH releases, so it can
         tell the artist's own single/album from a karaoke/compilation cover.
         """
+        def _own_release(title: str, artist: str) -> dict:
+            return {
+                "title": title,
+                "artist-credit": [{"artist": {"name": artist}}],
+            }
+
         details = {
-            "d-worldstar": {
-                "id": "d-worldstar",
+            "d-jeff": {
+                "id": "d-jeff",
                 "title": "My Heart Will Go On",
-                "artist-credit": [{"artist": {"name": "WorldStar Music"}}],
-                "first-release-date": "1995-01-01",
-                "releases": [{
-                    "artist-credit": [{"artist": {"name": "Various Artists"}}],
-                }],
+                "artist-credit": [{"artist": {"name": "Jeff Leyton"}}],
+                # EARLIER and own-release — the reported "Jeff Leyton" cover.
+                "first-release-date": "1994-01-01",
+                "releases": [_own_release("Songs of the Musicals", "Jeff Leyton")],
             },
             "d-celine": {
                 "id": "d-celine",
                 "title": "My Heart Will Go On",
                 "artist-credit": [{"artist": {"name": "Céline Dion"}}],
                 "first-release-date": "1996-01-01",
-                "releases": [{
-                    "title": "Falling into You",
-                    "artist-credit": [{"artist": {"name": "Céline Dion"}}],
-                }],
+                # The canonical hit: on many releases.
+                "releases": [
+                    _own_release(f"Release {i}", "Céline Dion") for i in range(6)
+                ],
                 "work-relation-list": [{
                     "work": {
                         "artist-relation-list": [
@@ -528,7 +533,7 @@ class TestAStoredWorkMustNameTheSameSong:
 
         class _SearchMB:
             def search_recordings(self, query, limit=15):
-                return [{"id": "d-worldstar"}, {"id": "d-celine"}]
+                return [{"id": "d-jeff"}, {"id": "d-celine"}]
 
             def get_recording(self, mbid, inc=""):
                 return details.get(mbid, {})
@@ -547,8 +552,9 @@ class TestAStoredWorkMustNameTheSameSong:
 
         assert result is not None
         assert result["artist"] == "Céline Dion", (
-            "an earlier karaoke/compilation cover must not beat the artist's own "
-            "release"
+            "the canonical recording (on the most releases) must win over an "
+            "earlier single-release cover like Jeff Leyton; dates and "
+            "own-release alone kept picking those covers"
         )
 
     def test_the_forced_pass_does_not_query_a_work_for_a_different_song(self):

@@ -3581,6 +3581,13 @@ class CoverDetector:
             #: covers only ever appear on Various Artists compilations.
             best_own: dict[str, Any] | None = None
             best_own_year = 9999
+            #: The candidate released on the MOST releases. The canonical/hit
+            #: recording of a huge work appears on hundreds of releases
+            #: (compilations, soundtracks, singles); karaoke/tribute covers
+            #: ("Deja Vu", "WorldStar Music", "Jeff Leyton") on a handful. Dates
+            #: and "owns a release" alone kept picking those covers.
+            best_canonical: dict[str, Any] | None = None
+            best_canonical_count = 0
             _excluded_artists = [str(a or "").strip() for a in (exclude_artists or []) if str(a or "").strip()]
             performer_earliest_year = (
                 int(track_year)
@@ -3638,17 +3645,28 @@ class CoverDetector:
                 writer_names = self._writers_from_recording(details)
                 writer_match = any(names_match(writer, c) for c in writer_names)
 
-                if _excluded_artists and year < best_own_year:
-                    if not any(
-                        _same_artist(rec_artist, name)
-                        for name in _excluded_artists
-                    ) and _recording_has_own_release(details, rec_artist):
+                if _excluded_artists:
+                    _is_writer = any(
+                        _same_artist(rec_artist, name) for name in _excluded_artists
+                    )
+                    _own_release = _recording_has_own_release(details, rec_artist)
+                    if not _is_writer and year < best_own_year and _own_release:
                         best_own_year = year
                         best_own = {
                             "artist": rec_artist,
                             "year": year,
                             "confidence": "medium",
                             "own_release": True,
+                        }
+                    # The canonical recording is the one on the most releases.
+                    _release_count = len(details.get("releases") or [])
+                    if not _is_writer and _release_count > best_canonical_count:
+                        best_canonical_count = _release_count
+                        best_canonical = {
+                            "artist": rec_artist,
+                            "year": year,
+                            "confidence": "medium",
+                            "own_release": _own_release,
                         }
 
                 if writer_match:
@@ -3673,7 +3691,12 @@ class CoverDetector:
             # Dion's 1997 recording often has no writer relation on the
             # recording, while James Horner's 2004 score recording does, so
             # "verified wins" returned the composer as the original artist.
-            if _excluded_artists and best_own is not None:
+            if _excluded_artists and best_canonical is not None and best_canonical_count >= 2:
+                # The recording MusicBrainz lists on the most releases is the
+                # canonical/hit one — Céline Dion, not an obscure cover with one
+                # album even when that cover is dated earlier.
+                best = best_canonical
+            elif _excluded_artists and best_own is not None:
                 # Prefer the artist-owned release over any compilation cover,
                 # even an earlier one ("WorldStar Music"/"Deja Vu").
                 best = best_own
