@@ -395,6 +395,36 @@ class TestAStoredWorkMustNameTheSameSong:
             "wins"
         )
 
+    def test_a_writer_performer_original_beats_a_far_later_cover(self):
+        """The same case with NO explicit cover relation in MusicBrainz.
+
+        MJ's 1987 recording is a "writer recording" and is skipped, so the
+        earliest non-writer recording (Santana, 2010) became the performed
+        original. A writer-performer whose recording predates the earliest
+        other recording by years IS the original; the composer case ("My Heart
+        Will Go On") is contemporaneous and keeps the performer.
+        """
+        mb = _StubMB(
+            work={
+                "title": "Smooth Criminal",
+                "artist-relation-list": [
+                    {"type": "writer", "artist": {"id": "a-mj", "name": "Michael Jackson"}},
+                ],
+            },
+            work_recordings=[
+                _recording("mj", "Smooth Criminal", "Michael Jackson", "1987-08-25"),
+                _recording("santana", "Smooth Criminal", "Santana", "2010-09-21"),
+            ],
+        )
+        det = _detector(mb)
+
+        result = det._detect_via_work_id(
+            "work-sc", performer="Alien Ant Farm", exclude_mbid="rec-aaf"
+        )
+
+        assert result is not None
+        assert result["artist"] == "Michael Jackson"
+
     def test_the_forced_pass_does_not_query_a_work_for_a_different_song(self):
         det = _detector(_StubMB(
             work={"title": "Smooth"},

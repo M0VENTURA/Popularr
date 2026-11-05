@@ -1163,6 +1163,40 @@ class CoverDetector:
                     "work": work_title,
                     "source": "musicbrainz_work",
                 }
+            # ⭐ THE SONGWRITER IS ALSO THE ORIGINAL PERFORMER.
+            #
+            # "Smooth Criminal": Michael Jackson wrote AND sang it, so his 1987
+            # recording is a ``writer_earliest`` and the rule above skips it;
+            # the earliest NON-writer recording of the work — Santana's much
+            # later cover — then became ``performed_original`` and was returned
+            # as the original (the reported "(Santana Cover)"). The writer
+            # lookup itself had found Michael Jackson.
+            #
+            # The split exists so a composer's SCORE recording does not become
+            # the artist ("My Heart Will Go On" → James Horner, 1997, vs Céline
+            # Dion, 1997). Those are CONTEMPORANEOUS; a later cover is years
+            # away. When the writer's own recording predates the earliest
+            # non-writer recording by a meaningful gap, the writer's recording
+            # is the original, not a score.
+            _gap_years = 0
+            if not _undated(writer_earliest_key) and not _undated(earliest_key):
+                try:
+                    _gap_years = int(earliest_key[:4]) - int(writer_earliest_key[:4])
+                except (TypeError, ValueError):
+                    _gap_years = 0
+            if by_writer and writer_earliest is not None and _gap_years >= 2:
+                log_unified_safe(
+                    "[COVER_DETECT] original lookup: writer-performer "
+                    f"{by_writer.get('artist')} ({writer_earliest_key[:4]}) "
+                    f"predates the earliest other recording "
+                    f"({earliest_key[:4]}) — treating it as the original"
+                )
+                return {
+                    **by_writer,
+                    "confidence": "medium",
+                    "work": work_title,
+                    "source": "musicbrainz_work",
+                }
             if performed_original is not None:
                 return {
                     **performed_original,
