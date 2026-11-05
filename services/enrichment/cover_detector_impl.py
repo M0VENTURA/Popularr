@@ -1063,6 +1063,13 @@ class CoverDetector:
         )
         credited = 0
         performer_on_work = False
+        #: Unique non-writer, non-cover performers on the work. Used by the
+        #: huge-work popularity fallback below: page 1 is often all undated
+        #: covers, and Last.fm listeners are the only signal that separates the
+        #: hit's original performer from them.
+        _pop_artists: list[str] = []
+        _pop_seen: set[str] = set()
+        _pop_artist_rids: dict[str, list[str]] = {}
         for rec in recordings:
             if not isinstance(rec, dict) or not rec.get("id"):
                 continue
@@ -1091,8 +1098,6 @@ class CoverDetector:
                 if key < performer_key:
                     performer_key = key
                 continue
-            if _undated(key):
-                continue
             candidate = {
                 "artist": rec_artist,
                 "year": year_from_recording(rec),
@@ -1102,6 +1107,18 @@ class CoverDetector:
                 if key < writer_earliest_key:
                     writer_earliest_key = key
                     writer_earliest = candidate
+                continue
+            # Collect even UNDATED performers: Céline Dion's canonical recording
+            # carries no recording-level date in the work browse (its releases
+            # are the dated part), but she is by far the most-listened performer.
+            if rec_artist not in _pop_seen and len(_pop_artists) < 30:
+                _pop_seen.add(rec_artist)
+                _pop_artists.append(rec_artist)
+            if rec_artist in _pop_seen:
+                _rids = _pop_artist_rids.setdefault(rec_artist, [])
+                if len(_rids) < 3 and rec_id not in _rids:
+                    _rids.append(rec_id)
+            if _undated(key):
                 continue
             # Prefer the earliest recording on the ARTIST'S OWN release (the
             # first commercial single/album) over an earlier karaoke/tribute
@@ -1193,6 +1210,99 @@ class CoverDetector:
                     )
                 break
 
+        _first_page_full = len(recordings) >= 100
+
+        # ⭐ HUGE-WORK POPULARITY FALLBACK.
+        #
+        # On "My Heart Will Go On" page 1 has no dated non-writer original —
+        # Céline's canonical recording carries only release-level dates (the
+        # work browse with ``releases`` times out and falls back to
+        # artist-credits) — and MusicBrainz's title search never surfaces her
+        # (she is not in its top 50). The work's OWN recording list does include
+        # her, so among its performers the most-listened one is the hit's
+        # original: Deja Vu / WorldStar / Davy Spillane all lose to Céline.
+        _earliest_popular = False
+        if (
+            _first_page_full
+            and _pop_artists
+            and not (
+                earliest
+                and (
+                    earliest.get("single_release")
+                    or earliest.get("own_release")
+                )
+            )
+        ):
+            try:
+                from services.popularity.popularity_sources import (
+                    get_lastfm_artist_max_listeners,
+                )
+
+                _pop_counts: dict[str, int] = {}
+                for _pop_name in _pop_artists[:30]:
+                    try:
+                        _pop_counts[_pop_name] = int(
+                            get_lastfm_artist_max_listeners(_pop_name) or 0
+                        )
+                    except Exception:
+                        _pop_counts[_pop_name] = 0
+                _best_pop = ""
+                _best_pop_count = 0
+                for _pop_name, _pop_count in sorted(
+                    _pop_counts.items(), key=lambda item: item[1], reverse=True
+                ):
+                    if _pop_count <= 0:
+                        break
+                    # A famous COVER act must never become the original. The work
+                    # browse was fetched without work-rels, so a MusicBrainz
+                    # cover mark is invisible there; verify the leading
+                    # candidate's own recording before choosing it. This is what
+                    # keeps "Torn" → Ednaswap rather than Natalie Imbruglia.
+                    _same_song = False
+                    _cover_act = False
+                    for _rid in _pop_artist_rids.get(_pop_name, []):
+                        _det = self._get_recording(
+                            _rid, "work-rels+artist-credits"
+                        )
+                        if not _det:
+                            continue
+                        # The work page can contain unrelated recordings (a
+                        # 100 gecs track sits on the "My Heart Will Go On"
+                        # work). Only a recording OF THIS WORK can be the
+                        # original.
+                        if work_mbid not in _all_work_ids(_det):
+                            continue
+                        if _all_cover_work_ids(_det) & {work_mbid}:
+                            _cover_act = True
+                            continue
+                        _same_song = True
+                        _cover_act = False
+                        break
+                    if not _same_song or _cover_act:
+                        continue
+                    _best_pop = _pop_name
+                    _best_pop_count = _pop_count
+                    break
+                if _best_pop and _best_pop_count > 0:
+                    earliest = {
+                        "artist": _best_pop,
+                        "year": None,
+                        "confidence": "medium",
+                    }
+                    earliest_key = "9999-99-99"
+                    _earliest_popular = True
+                    log_unified_safe(
+                        "[COVER_DETECT] original lookup: most-listened artist "
+                        f"{_best_pop} ({_best_pop_count} listeners) "
+                        f"for work {work_mbid}"
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Work popularity fallback failed",
+                    work_mbid=work_mbid,
+                    error=str(exc),
+                )
+
         # A huge work's first page can be mostly covers and a writer's score
         # recording. Scan another page for the earliest PERFORMED original
         # (Céline Dion for "My Heart Will Go On") and let it replace the
@@ -1205,7 +1315,6 @@ class CoverDetector:
         # Deja Vu won. Her dated recording is on a later page — which this scan
         # found, but only in the "no performer candidate" branch. A full page
         # means the candidate set is incomplete, so look further.
-        _first_page_full = len(recordings) >= 100
         if writer_names and (
             earliest is None or earliest is writer_earliest or _first_page_full
         ):
@@ -1236,7 +1345,9 @@ class CoverDetector:
                 # found Céline (own release); replacing her with "WorldStar
                 # Music" (1995, compilation-only) is exactly the regression this
                 # guard prevents.
-                _earliest_own = bool((earliest or {}).get("own_release"))
+                _earliest_own = (
+                    bool((earliest or {}).get("own_release")) or _earliest_popular
+                )
                 _performed_own = bool(_performed_work.get("own_release"))
                 if _performed_own or (
                     not _earliest_own and _performed_key <= earliest_key
@@ -1260,7 +1371,9 @@ class CoverDetector:
 
         # The performer recorded it FIRST (or in the same year when month/day
         # is unknown): they originated the song.
-        if earliest and not _undated(performer_key):
+        # An UNDATED candidate (the popular work performer) cannot prove the
+        # performer came first — only a dated one can.
+        if earliest and not _undated(performer_key) and not _undated(earliest_key):
             if performer_key <= earliest_key or performer_key[:4] < earliest_key[:4]:
                 return {}
             if performer_key[:4] == earliest_key[:4] and performer_key.endswith("-99-99"):
