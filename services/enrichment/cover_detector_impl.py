@@ -495,6 +495,34 @@ def _recording_has_own_release(rec: dict[str, Any], artist: str) -> bool:
     return False
 
 
+def _recording_has_single_release(rec: dict[str, Any], artist: str = "") -> bool:
+    """Is this recording on a release whose release group is a SINGLE?
+
+    ⭐ THE STRONGEST "ORIGINAL" SIGNAL after an explicit cover relation. A cover
+    is normally based on a song that HAD a single release, and that single is
+    the original artist's ("My Heart Will Go On" — Céline Dion, 1997 Single).
+    Deep-cut covers do not have one: Davy Spillane's recording exists only on
+    "The Sea of Dreams" (Album / Compilation); Jeff Leyton's only on his album;
+    Deja Vu / WorldStar Music only on Various Artists compilations.
+
+    When ``artist`` is given, the single must be credited to that artist — a
+    cover artist's own single must not masquerade as the original's.
+    """
+    artist = str(artist or "").strip()
+    for rel in rec.get("releases") or []:
+        if not isinstance(rel, dict):
+            continue
+        group = rel.get("release-group") or {}
+        if str(group.get("primary-type") or "").strip().casefold() != "single":
+            continue
+        if artist:
+            rel_artist = artist_from_credit(rel.get("artist-credit") or [])
+            if rel_artist and not _same_artist(rel_artist, artist):
+                continue
+        return True
+    return False
+
+
 def comparison_artist(track: dict[str, Any], album_artist: str) -> str:
     """The artist this row's cover verdict must be measured AGAINST.
 
@@ -1019,8 +1047,9 @@ class CoverDetector:
 
         earliest: dict[str, Any] | None = None
         earliest_key = "9999-99-99"
-        #: Rank an artist-owned release above an earlier compilation cover.
-        _earliest_rank: tuple[int, str] = (1, "9999-99-99")
+        #: Rank a SINGLE release first (the original song had one), then an
+        #: artist-owned release, then the earliest date.
+        _earliest_rank: tuple[int, int, str] = (1, 1, "9999-99-99")
         #: A writer's own performance (a composer's score recording, e.g. James
         #: Horner's "My Heart Will Go On") is kept SEPARATE from performed
         #: originals. The original ARTIST is the earliest PERFORMER, not the
@@ -1077,11 +1106,20 @@ class CoverDetector:
             # Prefer the earliest recording on the ARTIST'S OWN release (the
             # first commercial single/album) over an earlier karaoke/tribute
             # compilation cover.
+            _single_release = _recording_has_single_release(rec, rec_artist)
             _own_release = _recording_has_own_release(rec, rec_artist)
-            _rank = (0 if _own_release else 1, key)
+            _rank = (
+                0 if _single_release else 1,
+                0 if _own_release else 1,
+                key,
+            )
             if _rank < _earliest_rank:
                 earliest_key = key
-                earliest = {**candidate, "own_release": _own_release}
+                earliest = {
+                    **candidate,
+                    "own_release": _own_release,
+                    "single_release": _single_release,
+                }
                 _earliest_rank = _rank
 
         if earliest is None and writer_earliest is not None:
@@ -1105,6 +1143,7 @@ class CoverDetector:
                     # single/album) and never the work's own writers
                     # ("My Heart Will Go On" → Céline Dion, not Horner/WorldStar).
                     exclude_artists=writer_names,
+                    work_mbid=work_mbid,
                 )
                 if not _searched_original:
                     continue
@@ -3172,9 +3211,9 @@ class CoverDetector:
         """
         best: dict[str, Any] | None = None
         best_key = "9999-99-99"
-        #: Prefer a recording on the artist's OWN release (the first commercial
-        #: single/album) over an earlier karaoke/tribute compilation cover.
-        best_rank: tuple[int, str] = (1, "9999-99-99")
+        #: Prefer a SINGLE release, then the artist's own release, then the
+        #: earliest date — over an earlier karaoke/tribute compilation cover.
+        best_rank: tuple[int, int, str] = (1, 1, "9999-99-99")
         for page in range(max(1, max_pages)):
             try:
                 if page == 0:
@@ -3213,8 +3252,13 @@ class CoverDetector:
                 key = _release_date_key(rec)
                 if _undated(key):
                     continue
+                _single_release = _recording_has_single_release(rec, rec_artist)
                 _own_release = _recording_has_own_release(rec, rec_artist)
-                _rank = (0 if _own_release else 1, key)
+                _rank = (
+                    0 if _single_release else 1,
+                    0 if _own_release else 1,
+                    key,
+                )
                 if _rank < best_rank:
                     best_rank = _rank
                     best_key = key
@@ -3222,6 +3266,7 @@ class CoverDetector:
                         "artist": rec_artist,
                         "year": year_from_recording(rec),
                         "own_release": _own_release,
+                        "single_release": _single_release,
                     }
             if len(recordings) < 100:
                 break
@@ -3556,6 +3601,7 @@ class CoverDetector:
         album_artist: str | None = None,
         track_year: int | None = None,
         exclude_artists: list[str] | None = None,
+        work_mbid: str = "",
     ) -> dict[str, Any] | None:
         """Find the earliest recording of a title credited to the given writer.
 
@@ -3588,6 +3634,19 @@ class CoverDetector:
             #: and "owns a release" alone kept picking those covers.
             best_canonical: dict[str, Any] | None = None
             best_canonical_count = 0
+            #: The most-listened ARTIST among the candidates. For a hit single
+            #: the original is the popular performer (Céline Dion), not the
+            #: obscure/soundtrack performers that MusicBrainz happens to date
+            #: earlier (Davy Spillane, Jeff Leyton, WorldStar Music, Deja Vu).
+            #: Popularity is the only signal that separates a canonical hit from
+            #: a deep-cut cover on a 320-recording work.
+            best_popular: dict[str, Any] | None = None
+            best_popular_count = -1
+            #: Earliest candidate with a SINGLE release (the original song's
+            #: single). This is the strongest signal — see the helper.
+            best_single: dict[str, Any] | None = None
+            best_single_year = 9999
+            _popularity_cache: dict[str, int] = {}
             _excluded_artists = [str(a or "").strip() for a in (exclude_artists or []) if str(a or "").strip()]
             performer_earliest_year = (
                 int(track_year)
@@ -3644,8 +3703,13 @@ class CoverDetector:
 
                 writer_names = self._writers_from_recording(details)
                 writer_match = any(names_match(writer, c) for c in writer_names)
+                # The title search is not work-scoped ("Torn", "Hello", "Hurt"
+                # match many different songs). The popularity/single heuristics
+                # are only sound for recordings of THIS work — never let an
+                # unrelated same-titled song win.
+                _same_work = (not work_mbid) or (work_mbid in _all_work_ids(details))
 
-                if _excluded_artists:
+                if _excluded_artists and _same_work:
                     _is_writer = any(
                         _same_artist(rec_artist, name) for name in _excluded_artists
                     )
@@ -3668,6 +3732,45 @@ class CoverDetector:
                             "confidence": "medium",
                             "own_release": _own_release,
                         }
+                    # A SINGLE release is the original's own single ("My Heart
+                    # Will Go On", 1997). Davy Spillane/Jeff Leyton/Deja Vu have
+                    # albums/compilations only.
+                    if (
+                        not _is_writer
+                        and year < best_single_year
+                        and _recording_has_single_release(details, rec_artist)
+                    ):
+                        best_single_year = year
+                        best_single = {
+                            "artist": rec_artist,
+                            "year": year,
+                            "confidence": "medium",
+                            "own_release": _own_release,
+                            "single_release": True,
+                        }
+                    # The most-LISTENED artist is the hit's original performer.
+                    if not _is_writer:
+                        _pop_key = rec_artist.casefold()
+                        if _pop_key not in _popularity_cache:
+                            try:
+                                from services.popularity.popularity_sources import (
+                                    get_lastfm_artist_max_listeners,
+                                )
+
+                                _popularity_cache[_pop_key] = int(
+                                    get_lastfm_artist_max_listeners(rec_artist) or 0
+                                )
+                            except Exception:
+                                _popularity_cache[_pop_key] = 0
+                        _popularity = _popularity_cache[_pop_key]
+                        if _popularity > best_popular_count:
+                            best_popular_count = _popularity
+                            best_popular = {
+                                "artist": rec_artist,
+                                "year": year,
+                                "confidence": "medium",
+                                "own_release": _own_release,
+                            }
 
                 if writer_match:
                     if year < verified_year:
@@ -3691,7 +3794,17 @@ class CoverDetector:
             # Dion's 1997 recording often has no writer relation on the
             # recording, while James Horner's 2004 score recording does, so
             # "verified wins" returned the composer as the original artist.
-            if _excluded_artists and best_canonical is not None and best_canonical_count >= 2:
+            if _excluded_artists and best_single is not None:
+                # The original song's own SINGLE release — the signal that a
+                # deep-cut cover cannot fake.
+                best = best_single
+            elif _excluded_artists and best_popular is not None and best_popular_count > 0:
+                # The most-listened candidate is the original performer of a
+                # hit. This is what finally separates Céline Dion (millions of
+                # listeners) from Davy Spillane / Jeff Leyton / Deja Vu, whose
+                # MusicBrainz dates and release lists looked just as good.
+                best = best_popular
+            elif _excluded_artists and best_canonical is not None and best_canonical_count >= 2:
                 # The recording MusicBrainz lists on the most releases is the
                 # canonical/hit one — Céline Dion, not an obscure cover with one
                 # album even when that cover is dated earlier.

@@ -490,13 +490,23 @@ class TestAStoredWorkMustNameTheSameSong:
             "Céline Dion's dated original"
         )
 
-    def test_the_title_search_prefers_the_artists_own_release(self):
+    def test_the_title_search_prefers_the_artists_own_release(self, monkeypatch):
         """The page-2 browse falls back to `artist-credits` (no releases), so
         "own release" cannot be computed there — "WorldStar Music" won.
 
         The title-search path fetches each candidate WITH releases, so it can
         tell the artist's own single/album from a karaoke/compilation cover.
+        The final tie-break is artist POPULARITY: the original of a hit is the
+        most-listened candidate (Céline Dion), not Davy Spillane / Jeff Leyton.
         """
+        import services.popularity.popularity_sources as popularity
+
+        monkeypatch.setattr(
+            popularity,
+            "get_lastfm_artist_max_listeners",
+            lambda name, *a, **k: 5_000_000 if "Céline" in str(name) else 1000,
+        )
+
         def _own_release(title: str, artist: str) -> dict:
             return {
                 "title": title,
@@ -555,6 +565,79 @@ class TestAStoredWorkMustNameTheSameSong:
             "the canonical recording (on the most releases) must win over an "
             "earlier single-release cover like Jeff Leyton; dates and "
             "own-release alone kept picking those covers"
+        )
+
+    def test_a_single_release_beats_a_more_popular_soundtrack_performer(
+        self, monkeypatch
+    ):
+        """Davy Spillane (Titanic soundtrack) has NO single release.
+
+        MusicBrainz shows his "My Heart Will Go On" only on "The Sea of Dreams"
+        (Album / Compilation). Céline Dion's is on the 1997 **Single**. "Most
+        covers are based on a song that had a single release", so the artist's
+        own Single must win — even if a soundtrack performer is more popular.
+        """
+        import services.popularity.popularity_sources as popularity
+
+        monkeypatch.setattr(
+            popularity,
+            "get_lastfm_artist_max_listeners",
+            lambda name, *a, **k: 2_000_000 if "Davy" in str(name) else 1000,
+        )
+
+        details = {
+            "d-davy": {
+                "id": "d-davy",
+                "title": "My Heart Will Go On",
+                "artist-credit": [{"artist": {"name": "Davy Spillane"}}],
+                "first-release-date": "1998-12-01",
+                "releases": [{
+                    "artist-credit": [{"artist": {"name": "Davy Spillane"}}],
+                    "release-group": {"primary-type": "Album"},
+                }],
+            },
+            "d-celine": {
+                "id": "d-celine",
+                "title": "My Heart Will Go On",
+                "artist-credit": [{"artist": {"name": "Céline Dion"}}],
+                "first-release-date": "1997-11-24",
+                "releases": [{
+                    "artist-credit": [{"artist": {"name": "Céline Dion"}}],
+                    "release-group": {"primary-type": "Single"},
+                }],
+                "work-relation-list": [{
+                    "work": {
+                        "artist-relation-list": [
+                            {"type": "writer", "artist": {"name": "James Horner"}},
+                        ],
+                    },
+                }],
+            },
+        }
+
+        class _SearchMB:
+            def search_recordings(self, query, limit=15):
+                return [{"id": "d-davy"}, {"id": "d-celine"}]
+
+            def get_recording(self, mbid, inc=""):
+                return details.get(mbid, {})
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
+        det = _detector(_SearchMB())
+
+        result = det._find_original_recording(
+            "My Heart Will Go On",
+            "James Horner",
+            album_artist="DragonForce",
+            exclude_artists=["James Horner", "Will Jennings"],
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion", (
+            "the song's own Single release must beat a more-popular soundtrack "
+            "performer that never had a single"
         )
 
     def test_the_forced_pass_does_not_query_a_work_for_a_different_song(self):
