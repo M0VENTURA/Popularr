@@ -441,9 +441,20 @@ class TestAStoredWorkMustNameTheSameSong:
             _recording("dejavu", "My Heart Will Go On", "Deja Vu", "1998-03-31"),
             _recording("horner", "My Heart Will Go On", "James Horner", "2004-01-01"),
         ]
-        page_two = [
-            _recording("celine", "My Heart Will Go On", "Céline Dion", "1996-01-01"),
-        ]
+        # An EARLIER karaoke/compilation cover on page 2 (the "WorldStar Music"
+        # false positive), versus Céline's own-release recording.
+        worldstar = _recording(
+            "worldstar", "My Heart Will Go On", "WorldStar Music", "1995-01-01"
+        )
+        worldstar["releases"] = [{
+            "artist-credit": [{"artist": {"id": "a-various", "name": "Various Artists"}}],
+        }]
+        celine = _recording("celine", "My Heart Will Go On", "Céline Dion", "1996-01-01")
+        celine["releases"] = [{
+            "title": "Falling into You",
+            "artist-credit": [{"artist": {"id": "a-celine", "name": "Céline Dion"}}],
+        }]
+        page_two = [worldstar, celine]
 
         class _PagedMB:
             def browse_work_recordings(self, work_id, inc="", limit=100, offset=0):
@@ -477,6 +488,67 @@ class TestAStoredWorkMustNameTheSameSong:
         assert result["artist"] == "Céline Dion", (
             "page 1 yields a 1998 cover; a full first page must scan further for "
             "Céline Dion's dated original"
+        )
+
+    def test_the_title_search_prefers_the_artists_own_release(self):
+        """The page-2 browse falls back to `artist-credits` (no releases), so
+        "own release" cannot be computed there — "WorldStar Music" won.
+
+        The title-search path fetches each candidate WITH releases, so it can
+        tell the artist's own single/album from a karaoke/compilation cover.
+        """
+        details = {
+            "d-worldstar": {
+                "id": "d-worldstar",
+                "title": "My Heart Will Go On",
+                "artist-credit": [{"artist": {"name": "WorldStar Music"}}],
+                "first-release-date": "1995-01-01",
+                "releases": [{
+                    "artist-credit": [{"artist": {"name": "Various Artists"}}],
+                }],
+            },
+            "d-celine": {
+                "id": "d-celine",
+                "title": "My Heart Will Go On",
+                "artist-credit": [{"artist": {"name": "Céline Dion"}}],
+                "first-release-date": "1996-01-01",
+                "releases": [{
+                    "title": "Falling into You",
+                    "artist-credit": [{"artist": {"name": "Céline Dion"}}],
+                }],
+                "work-relation-list": [{
+                    "work": {
+                        "artist-relation-list": [
+                            {"type": "writer", "artist": {"name": "James Horner"}},
+                        ],
+                    },
+                }],
+            },
+        }
+
+        class _SearchMB:
+            def search_recordings(self, query, limit=15):
+                return [{"id": "d-worldstar"}, {"id": "d-celine"}]
+
+            def get_recording(self, mbid, inc=""):
+                return details.get(mbid, {})
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
+        det = _detector(_SearchMB())
+
+        result = det._find_original_recording(
+            "My Heart Will Go On",
+            "James Horner",
+            album_artist="DragonForce",
+            exclude_artists=["James Horner", "Will Jennings"],
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion", (
+            "an earlier karaoke/compilation cover must not beat the artist's own "
+            "release"
         )
 
     def test_the_forced_pass_does_not_query_a_work_for_a_different_song(self):

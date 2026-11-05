@@ -467,6 +467,34 @@ def _same_artist(left: str, right: str) -> bool:
 #: drifted from it. One list, one source of truth.
 
 
+def _recording_has_own_release(rec: dict[str, Any], artist: str) -> bool:
+    """Does the recording appear on a release credited to *artist* itself?
+
+    ⭐ THE "FIRST COMMERCIAL RELEASE" SIGNAL. A genuine original is normally on
+    the artist's own single/studio album; karaoke, tribute and Euro-house covers
+    appear only on Various Artists compilations. On a huge work (320 recordings)
+    the earliest DATED recording is routinely one of those covers — "My Heart
+    Will Go On" returned "Deja Vu" (1998, "Mega Hits Dance Party") and then
+    "WorldStar Music" — while Céline Dion's true original sits on her own album.
+    Ranking an artist-owned release above an earlier compilation cover fixes
+    that without weakening the composer-vs-performer rule.
+    """
+    artist = str(artist or "").strip()
+    if not artist or is_track_artist_placeholder(artist):
+        return False
+    for rel in rec.get("releases") or []:
+        if not isinstance(rel, dict):
+            continue
+        rel_artist = artist_from_credit(rel.get("artist-credit") or [])
+        if (
+            rel_artist
+            and not is_track_artist_placeholder(rel_artist)
+            and _same_artist(rel_artist, artist)
+        ):
+            return True
+    return False
+
+
 def comparison_artist(track: dict[str, Any], album_artist: str) -> str:
     """The artist this row's cover verdict must be measured AGAINST.
 
@@ -991,6 +1019,8 @@ class CoverDetector:
 
         earliest: dict[str, Any] | None = None
         earliest_key = "9999-99-99"
+        #: Rank an artist-owned release above an earlier compilation cover.
+        _earliest_rank: tuple[int, str] = (1, "9999-99-99")
         #: A writer's own performance (a composer's score recording, e.g. James
         #: Horner's "My Heart Will Go On") is kept SEPARATE from performed
         #: originals. The original ARTIST is the earliest PERFORMER, not the
@@ -1044,9 +1074,15 @@ class CoverDetector:
                     writer_earliest_key = key
                     writer_earliest = candidate
                 continue
-            if key < earliest_key:
+            # Prefer the earliest recording on the ARTIST'S OWN release (the
+            # first commercial single/album) over an earlier karaoke/tribute
+            # compilation cover.
+            _own_release = _recording_has_own_release(rec, rec_artist)
+            _rank = (0 if _own_release else 1, key)
+            if _rank < _earliest_rank:
                 earliest_key = key
-                earliest = candidate
+                earliest = {**candidate, "own_release": _own_release}
+                _earliest_rank = _rank
 
         if earliest is None and writer_earliest is not None:
             # No performer recording at all — fall back to the writer's own.
@@ -1065,6 +1101,10 @@ class CoverDetector:
                     _writer_name,
                     album_artist=performer,
                     track_year=track_year,
+                    # Prefer the first COMMERCIAL release (artist-owned
+                    # single/album) and never the work's own writers
+                    # ("My Heart Will Go On" → Céline Dion, not Horner/WorldStar).
+                    exclude_artists=writer_names,
                 )
                 if not _searched_original:
                     continue
@@ -1082,11 +1122,15 @@ class CoverDetector:
                     if isinstance(_searched_year, int)
                     else "9999-99-99"
                 )
-                if _searched_key <= earliest_key:
+                if (
+                    _searched_key <= earliest_key
+                    or bool(_searched_original.get("own_release"))
+                ):
                     earliest = {
                         "artist": _searched_artist,
                         "year": _searched_year,
                         "confidence": "medium",
+                        "own_release": bool(_searched_original.get("own_release")),
                     }
                     earliest_key = _searched_key
                     log_unified_safe(
@@ -1127,11 +1171,27 @@ class CoverDetector:
                     if isinstance(_performed_year, int)
                     else "9999-99-99"
                 )
-                if _performed_key <= earliest_key:
+                # An artist-owned release (the first commercial single/album)
+                # wins even when an earlier karaoke/tribute compilation cover
+                # exists — the "WorldStar Music" / "Deja Vu" false positives.
+                #
+                # ⚠️ NEVER let a later non-own candidate replace an own-release
+                # one. The page-2+ browse can fall back to ``artist-credits``
+                # (no releases), so ``own_release`` is False there even for the
+                # true original. The title search earlier in this method already
+                # found Céline (own release); replacing her with "WorldStar
+                # Music" (1995, compilation-only) is exactly the regression this
+                # guard prevents.
+                _earliest_own = bool((earliest or {}).get("own_release"))
+                _performed_own = bool(_performed_work.get("own_release"))
+                if _performed_own or (
+                    not _earliest_own and _performed_key <= earliest_key
+                ):
                     earliest = {
                         "artist": _performed_work["artist"],
                         "year": _performed_year,
                         "confidence": "medium",
+                        "own_release": bool(_performed_work.get("own_release")),
                     }
                     earliest_key = _performed_key
                     log_unified_safe(
@@ -3112,6 +3172,9 @@ class CoverDetector:
         """
         best: dict[str, Any] | None = None
         best_key = "9999-99-99"
+        #: Prefer a recording on the artist's OWN release (the first commercial
+        #: single/album) over an earlier karaoke/tribute compilation cover.
+        best_rank: tuple[int, str] = (1, "9999-99-99")
         for page in range(max(1, max_pages)):
             try:
                 if page == 0:
@@ -3148,10 +3211,18 @@ class CoverDetector:
                 if any(_same_artist(rec_artist, name) for name in writer_names if name):
                     continue
                 key = _release_date_key(rec)
-                if _undated(key) or key >= best_key:
+                if _undated(key):
                     continue
-                best_key = key
-                best = {"artist": rec_artist, "year": year_from_recording(rec)}
+                _own_release = _recording_has_own_release(rec, rec_artist)
+                _rank = (0 if _own_release else 1, key)
+                if _rank < best_rank:
+                    best_rank = _rank
+                    best_key = key
+                    best = {
+                        "artist": rec_artist,
+                        "year": year_from_recording(rec),
+                        "own_release": _own_release,
+                    }
             if len(recordings) < 100:
                 break
         return best
@@ -3484,6 +3555,7 @@ class CoverDetector:
         writer: str,
         album_artist: str | None = None,
         track_year: int | None = None,
+        exclude_artists: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """Find the earliest recording of a title credited to the given writer.
 
@@ -3503,6 +3575,13 @@ class CoverDetector:
             verified_year = 9999
             unverified: dict[str, Any] | None = None
             unverified_year = 9999
+            #: Earliest candidate on the ARTIST'S OWN release (a single/studio
+            #: album), excluding the work's writers. This is the "first
+            #: commercial release" the user asked for: karaoke/tribute/huge-work
+            #: covers only ever appear on Various Artists compilations.
+            best_own: dict[str, Any] | None = None
+            best_own_year = 9999
+            _excluded_artists = [str(a or "").strip() for a in (exclude_artists or []) if str(a or "").strip()]
             performer_earliest_year = (
                 int(track_year)
                 if isinstance(track_year, int) and 1900 <= track_year <= 2100
@@ -3559,6 +3638,19 @@ class CoverDetector:
                 writer_names = self._writers_from_recording(details)
                 writer_match = any(names_match(writer, c) for c in writer_names)
 
+                if _excluded_artists and year < best_own_year:
+                    if not any(
+                        _same_artist(rec_artist, name)
+                        for name in _excluded_artists
+                    ) and _recording_has_own_release(details, rec_artist):
+                        best_own_year = year
+                        best_own = {
+                            "artist": rec_artist,
+                            "year": year,
+                            "confidence": "medium",
+                            "own_release": True,
+                        }
+
                 if writer_match:
                     if year < verified_year:
                         verified_year = year
@@ -3581,7 +3673,11 @@ class CoverDetector:
             # Dion's 1997 recording often has no writer relation on the
             # recording, while James Horner's 2004 score recording does, so
             # "verified wins" returned the composer as the original artist.
-            if verified and unverified:
+            if _excluded_artists and best_own is not None:
+                # Prefer the artist-owned release over any compilation cover,
+                # even an earlier one ("WorldStar Music"/"Deja Vu").
+                best = best_own
+            elif verified and unverified:
                 best = unverified if unverified_year < verified_year else verified
             else:
                 best = verified or unverified
