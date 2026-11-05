@@ -134,7 +134,11 @@ def year_from_recording(rec: dict[str, Any]) -> int | None:
             return int(date_str[:4])
         except (ValueError, TypeError):
             pass
-    for rel in rec.get("release-list") or []:
+    # A lookup with inc=releases returns ``releases``; only the relation-wrapped
+    # shape uses ``release-list``. Reading just one shape meant a recording with
+    # no ``first-release-date`` (Céline Dion's "My Heart Will Go On") looked
+    # undated and was skipped, even though its releases carry 1997.
+    for rel in (rec.get("release-list") or []) + (rec.get("releases") or []):
         if isinstance(rel, dict):
             rel_date = str(rel.get("date") or "").strip()
             if len(rel_date) >= 4 and rel_date[:4].isdigit():

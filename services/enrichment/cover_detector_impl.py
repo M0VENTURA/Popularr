@@ -1132,7 +1132,14 @@ class CoverDetector:
         # a writer-verified PERFORMER original and prefer it when it is at
         # least as early. This is what finds Céline Dion rather than a later
         # cover or James Horner's score recording.
-        if earliest is not None and writer_earliest is not None and writer_names:
+        # ⭐ Run the ranked title search whenever the work HAS writers — not only
+        # when page 1 already produced a dated candidate. On a huge work page 1
+        # can be entirely undated recordings, so both ``earliest`` and
+        # ``writer_earliest`` are None; the old guard skipped the only lookup
+        # that fetches dated, single-bearing candidates (Céline Dion) and the
+        # extra-page fallback then returned an intermediate cover
+        # ("WorldStar Music") instead.
+        if writer_names:
             for _writer_name in writer_names[:2]:
                 _searched_original = self._find_original_recording(
                     work_title or "",
@@ -3399,6 +3406,25 @@ class CoverDetector:
                 # recording performs someone else's composition. Do not let the
                 # writer/title heuristics override a resolved recording.
                 return {}
+
+            # ⭐ Route the COVER WORK through the RANKED work path first.
+            #
+            # The cover-work heuristics below (earliest performed / earliest
+            # across pages) never consult the Single-release/popularity
+            # ranking, so a VA compilation's cover resolved to an intermediate
+            # cover ("WorldStar Music", confidence high) instead of the original
+            # song's own Single (Céline Dion). `_detect_via_work_id` now prefers
+            # that Single, so try it before the older cover-work heuristics.
+            for _cover_work_id in sorted(cover_work_ids):
+                _ranked = self._detect_via_work_id(
+                    work_mbid=_cover_work_id,
+                    performer=performer,
+                    exclude_mbid=recording_mbid,
+                    track_year=track_year,
+                    allow_writer_check=True,
+                )
+                if _ranked is not None:
+                    return _ranked
 
             from_work = self._original_from_cover_work(
                 cover_work_ids,
