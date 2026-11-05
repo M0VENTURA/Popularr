@@ -1140,6 +1140,10 @@ class CoverDetector:
         # extra-page fallback then returned an intermediate cover
         # ("WorldStar Music") instead.
         if writer_names:
+            log_unified_safe(
+                "[COVER_DETECT] original lookup: ranked title search for work "
+                f"{work_mbid}"
+            )
             for _writer_name in writer_names[:2]:
                 _searched_original = self._find_original_recording(
                     work_title or "",
@@ -1153,6 +1157,10 @@ class CoverDetector:
                     work_mbid=work_mbid,
                 )
                 if not _searched_original:
+                    log_unified_safe(
+                        "[COVER_DETECT] original lookup: ranked title search "
+                        f"found no usable original for work {work_mbid}"
+                    )
                     continue
                 _searched_artist = str(_searched_original.get("artist") or "").strip()
                 if not _searched_artist:
@@ -3843,6 +3851,16 @@ class CoverDetector:
                 best = unverified if unverified_year < verified_year else verified
             else:
                 best = verified or unverified
+            if _excluded_artists:
+                log_unified_safe(
+                    "[COVER_DETECT] original lookup: title search results="
+                    f"{len(recordings)} inspected={inspected} "
+                    f"single={(best_single or {}).get('artist') or '-'} "
+                    f"popular={(best_popular or {}).get('artist') or '-'} "
+                    f"own={(best_own or {}).get('artist') or '-'} "
+                    f"canonical={(best_canonical or {}).get('artist') or '-'} "
+                    f"| result={(best or {}).get('artist') or '-'}"
+                )
             if best and best.get("year") and performer_earliest_year <= best["year"]:
                 return None
             return best
