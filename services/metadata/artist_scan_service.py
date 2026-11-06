@@ -288,7 +288,7 @@ def _build_missing_release_items(
 
         category = _categorize_release(rg)
 
-        if category == "Single" and include_singles_current_year_only:
+        if category == "single" and include_singles_current_year_only:
             first_release = (rg.get("first-release-date") or rg.get("first_release_date") or "")
             try:
                 release_year = int(first_release.split("-")[0])
@@ -298,7 +298,7 @@ def _build_missing_release_items(
                 continue
 
         # A single whose track is already on a library album is not missing.
-        if category == "Single" and norm_title in library_tracks:
+        if category == "single" and norm_title in library_tracks:
             continue
 
         dedupe_key = (norm_title, category)

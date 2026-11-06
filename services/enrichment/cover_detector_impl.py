@@ -1070,6 +1070,10 @@ class CoverDetector:
         _pop_artists: list[str] = []
         _pop_seen: set[str] = set()
         _pop_artist_rids: dict[str, list[str]] = {}
+        #: (date_key, artist, recording_id) for title-matching performances, used
+        #: to find the earliest recording whose work relation is NOT flagged
+        #: ``cover`` — the principled "original" signal.
+        _dated_performers: list[tuple[str, str, str]] = []
         for rec in recordings:
             if not isinstance(rec, dict) or not rec.get("id"):
                 continue
@@ -1090,6 +1094,15 @@ class CoverDetector:
                 artist_from_credit(rec.get("artist-credit", []) or []) or ""
             ).strip()
             if not rec_artist:
+                continue
+            # MusicBrainz attaches remixes/mashups/medleys to the SAME work. The
+            # 100 gecs "Appalachian Spring … / My Heart Will Go On (100 gecs
+            # remix)" is one, and its huge Last.fm audience made it win the
+            # popularity fallback. Only an actual performance of the song has
+            # the song's canonical title.
+            if work_title and not _titles_match_exact(
+                str(rec.get("title") or ""), work_title
+            ):
                 continue
             credited += 1
             key = _release_date_key(rec)
@@ -1116,8 +1129,10 @@ class CoverDetector:
                 _pop_artists.append(rec_artist)
             if rec_artist in _pop_seen:
                 _rids = _pop_artist_rids.setdefault(rec_artist, [])
-                if len(_rids) < 3 and rec_id not in _rids:
+                if len(_rids) < 10 and rec_id not in _rids:
                     _rids.append(rec_id)
+            if not _undated(key):
+                _dated_performers.append((key, rec_artist, rec_id))
             if _undated(key):
                 continue
             # Prefer the earliest recording on the ARTIST'S OWN release (the
@@ -1149,6 +1164,36 @@ class CoverDetector:
         # a writer-verified PERFORMER original and prefer it when it is at
         # least as early. This is what finds Céline Dion rather than a later
         # cover or James Horner's score recording.
+        # ⭐ MusicBrainz marks COVERS on the recording→work performance relation
+        # with the ``cover`` attribute; the ORIGINAL is the same relation
+        # WITHOUT it. The work browse drops work-rels (it times out with
+        # releases), so the flag is invisible on page 1 — fetch details for the
+        # earliest dated candidates in date order and take the first one not
+        # flagged as a cover. Deja Vu (1998-03-31) is flagged cover; Céline
+        # (1998) is not, so she becomes the earliest original.
+        _earliest_authoritative = False
+        if _dated_performers:
+            for _key, _name, _rid in sorted(_dated_performers)[:20]:
+                _det = self._get_recording(_rid, "work-rels+artist-credits")
+                if not _det:
+                    continue
+                if work_mbid not in _all_work_ids(_det):
+                    continue
+                if _all_cover_work_ids(_det) & {work_mbid}:
+                    continue
+                earliest = {
+                    "artist": _name,
+                    "year": year_from_recording(_det),
+                    "confidence": "medium",
+                }
+                earliest_key = _key
+                _earliest_authoritative = True
+                log_unified_safe(
+                    "[COVER_DETECT] original lookup: earliest non-cover "
+                    f"{_name} ({_key[:4]}) for work {work_mbid}"
+                )
+                break
+
         # ⭐ Run the ranked title search whenever the work HAS writers — not only
         # when page 1 already produced a dated candidate. On a huge work page 1
         # can be entirely undated recordings, so both ``earliest`` and
@@ -1156,7 +1201,7 @@ class CoverDetector:
         # that fetches dated, single-bearing candidates (Céline Dion) and the
         # extra-page fallback then returned an intermediate cover
         # ("WorldStar Music") instead.
-        if writer_names:
+        if writer_names and not _earliest_authoritative:
             log_unified_safe(
                 "[COVER_DETECT] original lookup: ranked title search for work "
                 f"{work_mbid}"
@@ -1194,7 +1239,8 @@ class CoverDetector:
                     else "9999-99-99"
                 )
                 if (
-                    _searched_key <= earliest_key
+                    _searched_key < earliest_key
+                    or earliest is writer_earliest
                     or bool(_searched_original.get("own_release"))
                 ):
                     earliest = {
@@ -1225,6 +1271,7 @@ class CoverDetector:
         if (
             _first_page_full
             and _pop_artists
+            and not _earliest_authoritative
             and not (
                 earliest
                 and (
@@ -1284,13 +1331,21 @@ class CoverDetector:
                     _best_pop_count = _pop_count
                     break
                 if _best_pop and _best_pop_count > 0:
-                    earliest = {
-                        "artist": _best_pop,
-                        "year": None,
-                        "confidence": "medium",
-                    }
-                    earliest_key = "9999-99-99"
-                    _earliest_popular = True
+                    if earliest and _same_artist(
+                        _best_pop, str(earliest.get("artist") or "")
+                    ):
+                        # The page-1 date pick already IS the most-listened
+                        # artist — keep its dated candidate (and year) and just
+                        # protect it from the extra-page scan.
+                        _earliest_popular = True
+                    else:
+                        earliest = {
+                            "artist": _best_pop,
+                            "year": None,
+                            "confidence": "medium",
+                        }
+                        earliest_key = "9999-99-99"
+                        _earliest_popular = True
                     log_unified_safe(
                         "[COVER_DETECT] original lookup: most-listened artist "
                         f"{_best_pop} ({_best_pop_count} listeners) "
@@ -1315,7 +1370,7 @@ class CoverDetector:
         # Deja Vu won. Her dated recording is on a later page — which this scan
         # found, but only in the "no performer candidate" branch. A full page
         # means the candidate set is incomplete, so look further.
-        if writer_names and (
+        if writer_names and not _earliest_authoritative and (
             earliest is None or earliest is writer_earliest or _first_page_full
         ):
             _performed_work = self._earliest_performed_recording(
@@ -1349,8 +1404,16 @@ class CoverDetector:
                     bool((earliest or {}).get("own_release")) or _earliest_popular
                 )
                 _performed_own = bool(_performed_work.get("own_release"))
+                # Equal dates must NOT replace a genuine performer: page 1's
+                # Céline (1998) was being replaced by WorldStar (also 1998)
+                # purely because both keys were "1998-99-99". A composer's
+                # score recording may still be replaced on an equal date.
+                _performed_is_better = _performed_key < earliest_key or (
+                    earliest is writer_earliest
+                    and _performed_key <= earliest_key
+                )
                 if _performed_own or (
-                    not _earliest_own and _performed_key <= earliest_key
+                    not _earliest_own and _performed_is_better
                 ):
                     earliest = {
                         "artist": _performed_work["artist"],
