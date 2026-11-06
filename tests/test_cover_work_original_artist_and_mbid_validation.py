@@ -229,6 +229,208 @@ class TestTheOriginalArtistIsNotTheComposer:
         assert result["artist"] == "Céline Dion"
 
 
+class TestAnUnflaggedCompilationCoverDoesNotWin:
+    """Reported: "My Heart Will Go On (100 gecs Cover)" corrected to Deja Vu.
+
+    MusicBrainz does NOT flag Deja Vu's 1998-03-31 recordings as covers — the
+    ``cover`` attribute is user-contributed and frequently missing (verified
+    against the live API). The "earliest non-cover" probe therefore treated a
+    Euro-house cover that only appears on a Various Artists compilation as
+    authoritative and vetoed the title search that finds Céline Dion. A
+    candidate is only authoritative when it is corroborated by a commercial
+    release of its own; otherwise the canonical/popular ranking must win.
+    """
+
+    def test_the_canonical_original_beats_a_compilation_only_cover(
+        self, monkeypatch
+    ) -> None:
+        import services.popularity.popularity_sources as popularity
+
+        monkeypatch.setattr(
+            popularity,
+            "get_lastfm_artist_max_listeners",
+            lambda name, *a, **k: 0,
+        )
+
+        def _visual(rec_id, artist, date, releases):
+            return {
+                "id": rec_id,
+                "title": "My Heart Will Go On",
+                "artist-credit": [
+                    {"artist": {"id": "a-" + rec_id, "name": artist}}
+                ],
+                "first-release-date": date,
+                "work-relation-list": [
+                    {"type": "performance", "work": {"id": MY_HEART_WORK}}
+                ],
+                "releases": releases,
+            }
+
+        va_only = [{"artist-credit": [{"artist": {"name": "Various Artists"}}]}]
+        dejavu = _visual("rec-dejavu", "Deja Vu", "1998-03-31", va_only)
+        # Céline's early recording is compilation-only in this payload, so only
+        # the CANONICAL-release signal (she is on many releases) can pick her.
+        celine = _visual(
+            "rec-celine",
+            "Céline Dion",
+            "1998",
+            [
+                {"artist-credit": [{"artist": {"name": "Various Artists"}}]}
+                for _ in range(6)
+            ],
+        )
+        horner = _visual("rec-horner", "James Horner", "2004-01-01", va_only)
+        filler = [
+            _visual(f"f{i}", f"Filler {i}", "2010-01-01", va_only)
+            for i in range(97)
+        ]
+        page_one = [dejavu, celine, horner] + filler
+        assert len(page_one) == 100
+
+        class _MB:
+            def browse_work_recordings(
+                self, work_id, inc="", limit=100, offset=0
+            ):
+                return list(page_one) if offset == 0 else []
+
+            def get_work(self, work_id, inc=None):
+                return {
+                    "id": work_id,
+                    "title": "My Heart Will Go On",
+                    "artist-relation-list": [
+                        {
+                            "type": "composer",
+                            "artist": {"id": "a-h", "name": "James Horner"},
+                        },
+                        {
+                            "type": "writer",
+                            "artist": {"id": "a-j", "name": "Will Jennings"},
+                        },
+                    ],
+                }
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
+            def get_recording(self, mbid, inc=""):
+                return {
+                    "rec-dejavu": dejavu,
+                    "rec-celine": celine,
+                    "rec-horner": horner,
+                }.get(mbid, {})
+
+            def search_recordings(self, query, limit=15):
+                return [{"id": "rec-celine"}]
+
+        det = _detector(_MB())
+        result = det._detect_via_work_id(
+            MY_HEART_WORK, performer="DragonForce", track_year=2019
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion", (
+            "a compilation-only 1998 cover must not veto the canonical original"
+        )
+
+    def test_a_title_search_soundtrack_candidate_does_not_block_popularity(
+        self, monkeypatch
+    ) -> None:
+        """MusicBrainz's top-10 title search does not surface Céline.
+
+        It returns Deja Vu, Davy Spillane (Titanic soundtrack, artist-owned
+        album) and other covers. The title search may therefore pick Davy, but
+        his artist-owned release must NOT veto the work-wide popularity
+        fallback — the work's own recording list DOES contain Céline, and she
+        is the hit's original performer.
+        """
+        import services.popularity.popularity_sources as popularity
+
+        monkeypatch.setattr(
+            popularity,
+            "get_lastfm_artist_max_listeners",
+            lambda name, *a, **k: (
+                5_000_000 if "Céline" in str(name) else 1000
+            ),
+        )
+
+        def _visual(rec_id, artist, date):
+            return {
+                "id": rec_id,
+                "title": "My Heart Will Go On",
+                "artist-credit": [
+                    {"artist": {"id": "a-" + rec_id, "name": artist}}
+                ],
+                "first-release-date": date,
+                "work-relation-list": [
+                    {"type": "performance", "work": {"id": MY_HEART_WORK}}
+                ],
+                "releases": [
+                    {"artist-credit": [{"artist": {"name": "Various Artists"}}]}
+                ],
+            }
+
+        dejavu = _visual("rec-dejavu", "Deja Vu", "1998-03-31")
+        celine = _visual("rec-celine", "Céline Dion", "1999")
+        filler = [
+            _visual(f"f{i}", f"Filler {i}", "2010-01-01") for i in range(98)
+        ]
+        page_one = [dejavu, celine] + filler
+
+        class _MB:
+            def browse_work_recordings(
+                self, work_id, inc="", limit=100, offset=0
+            ):
+                return list(page_one) if offset == 0 else []
+
+            def get_work(self, work_id, inc=None):
+                return {
+                    "id": work_id,
+                    "title": "My Heart Will Go On",
+                    "artist-relation-list": [
+                        {
+                            "type": "composer",
+                            "artist": {"id": "a-h", "name": "James Horner"},
+                        },
+                        {
+                            "type": "writer",
+                            "artist": {"id": "a-j", "name": "Will Jennings"},
+                        },
+                    ],
+                }
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
+            def get_recording(self, mbid, inc=""):
+                return {
+                    "rec-dejavu": dejavu,
+                    "rec-celine": celine,
+                }.get(mbid, {})
+
+            def search_recordings(self, query, limit=15):
+                return []
+
+        det = _detector(_MB())
+        # The real title search picks an artist-owned soundtrack performer
+        # because Céline is absent from MusicBrainz's top results.
+        det._find_original_recording = lambda *a, **k: {
+            "artist": "Davy Spillane",
+            "year": 1998,
+            "confidence": "medium",
+            "own_release": True,
+        }
+
+        result = det._detect_via_work_id(
+            MY_HEART_WORK, performer="DragonForce", track_year=2019
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion", (
+            "a title-search soundtrack candidate must not suppress the "
+            "work-wide popularity fallback"
+        )
+
+
 class _Row:
     def __init__(self, mapping):
         self._mapping = mapping

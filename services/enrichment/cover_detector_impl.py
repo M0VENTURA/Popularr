@@ -1169,30 +1169,66 @@ class CoverDetector:
         # WITHOUT it. The work browse drops work-rels (it times out with
         # releases), so the flag is invisible on page 1 — fetch details for the
         # earliest dated candidates in date order and take the first one not
-        # flagged as a cover. Deja Vu (1998-03-31) is flagged cover; Céline
-        # (1998) is not, so she becomes the earliest original.
+        # flagged as a cover.
+        #
+        # ⚠️ "NOT flagged as a cover" is NOT by itself proof of being the
+        # original: the flag is user-contributed and frequently missing. The
+        # reported "My Heart Will Go On (Deja Vu Cover)": Deja Vu's 1998-03-31
+        # recordings carry NO cover attribute (checked against the live API),
+        # so this probe selected a Euro-house cover that only ever appears on a
+        # Various Artists compilation and then vetoed the title search and the
+        # popularity fallback that would have found Céline Dion. A candidate is
+        # authoritative only when it is corroborated by a commercial release of
+        # its OWN (an artist-owned release or the song's single); otherwise the
+        # ranked evidence below is allowed to outrank it.
         _earliest_authoritative = False
         if _dated_performers:
             for _key, _name, _rid in sorted(_dated_performers)[:20]:
-                _det = self._get_recording(_rid, "work-rels+artist-credits")
+                _det = self._get_recording(
+                    _rid, "work-rels+artist-credits+releases+release-groups"
+                )
                 if not _det:
                     continue
                 if work_mbid not in _all_work_ids(_det):
                     continue
                 if _all_cover_work_ids(_det) & {work_mbid}:
                     continue
-                earliest = {
-                    "artist": _name,
-                    "year": year_from_recording(_det),
-                    "confidence": "medium",
-                }
-                earliest_key = _key
-                _earliest_authoritative = True
+                _own_release = _recording_has_own_release(_det, _name)
+                _single_release = _recording_has_single_release(_det, _name)
+                _rank = (
+                    0 if _single_release else 1,
+                    0 if _own_release else 1,
+                    _key,
+                )
+                if earliest is None or _rank < _earliest_rank:
+                    earliest = {
+                        "artist": _name,
+                        "year": year_from_recording(_det),
+                        "confidence": "medium",
+                        "own_release": _own_release,
+                        "single_release": _single_release,
+                    }
+                    earliest_key = _key
+                    _earliest_rank = _rank
+                # ONE request: the first non-cover candidate is the answer this
+                # probe is qualified to give. A candidate corroborated by a
+                # commercial release of its own ends the search; otherwise the
+                # title search and extra-page scan below are allowed to improve
+                # on it (they fetch releases/popularity themselves).
+                _earliest_authoritative = bool(_own_release or _single_release)
+                if _earliest_authoritative:
+                    log_unified_safe(
+                        "[COVER_DETECT] original lookup: earliest non-cover "
+                        f"{_name} ({_key[:4]}) for work {work_mbid}"
+                    )
+                break
+            if not _earliest_authoritative and earliest is not None:
                 log_unified_safe(
                     "[COVER_DETECT] original lookup: earliest non-cover "
-                    f"{_name} ({_key[:4]}) for work {work_mbid}"
+                    f"{earliest.get('artist')} ({str(earliest_key)[:4]}) has no "
+                    "artist-owned/single release — ranking by commercial release "
+                    f"and popularity for work {work_mbid}"
                 )
-                break
 
         # ⭐ Run the ranked title search whenever the work HAS writers — not only
         # when page 1 already produced a dated candidate. On a huge work page 1
@@ -1238,16 +1274,41 @@ class CoverDetector:
                     if isinstance(_searched_year, int)
                     else "9999-99-99"
                 )
+                # A candidate corroborated by a commercial release — the
+                # song's own single, the artist's own album, or the canonical
+                # recording on the most releases — outranks an earlier
+                # compilation-only appearance even when the dates tie or the
+                # compilation is dated marginally sooner. That is what keeps
+                # Deja Vu (Mega Hits Dance Party) from beating Céline Dion.
+                _earliest_commercial = bool(
+                    (earliest or {}).get("own_release")
+                    or (earliest or {}).get("single_release")
+                    or (earliest or {}).get("canonical")
+                )
+                _searched_commercial = bool(
+                    _searched_original.get("own_release")
+                    or _searched_original.get("single_release")
+                    or _searched_original.get("canonical")
+                )
                 if (
                     _searched_key < earliest_key
                     or earliest is writer_earliest
-                    or bool(_searched_original.get("own_release"))
+                    or (_searched_commercial and not _earliest_commercial)
                 ):
                     earliest = {
                         "artist": _searched_artist,
                         "year": _searched_year,
                         "confidence": "medium",
                         "own_release": bool(_searched_original.get("own_release")),
+                        "single_release": bool(
+                            _searched_original.get("single_release")
+                        ),
+                        "canonical": bool(_searched_original.get("canonical")),
+                        # Marks where the pick came from, so the popularity
+                        # fallback below knows this artist-owned release was
+                        # seen only in MusicBrainz's TOP SEARCH RESULTS — not in
+                        # the work's full recording list — and must not veto it.
+                        "from_title_search": True,
                     }
                     earliest_key = _searched_key
                     log_unified_safe(
@@ -1276,7 +1337,17 @@ class CoverDetector:
                 earliest
                 and (
                     earliest.get("single_release")
-                    or earliest.get("own_release")
+                    # An artist-owned release found by the TITLE SEARCH does not
+                    # veto this fallback: that search only sees MusicBrainz's
+                    # top hits, which for a huge work are the wrong performers
+                    # (Davy Spillane's soundtrack album, not Céline Dion). The
+                    # work page DOES contain Céline, so popularity must still
+                    # get its say there. A single release — the original song's
+                    # own single — remains conclusive.
+                    or (
+                        earliest.get("own_release")
+                        and not earliest.get("from_title_search")
+                    )
                 )
             )
         ):
@@ -1401,7 +1472,14 @@ class CoverDetector:
                 # Music" (1995, compilation-only) is exactly the regression this
                 # guard prevents.
                 _earliest_own = (
-                    bool((earliest or {}).get("own_release")) or _earliest_popular
+                    bool((earliest or {}).get("own_release"))
+                    # The title search may have established the canonical
+                    # recording (or the song's single) without an artist-owned
+                    # release in the payload; that is equally protective, so an
+                    # earlier compilation-only cover cannot displace it.
+                    or bool((earliest or {}).get("single_release"))
+                    or bool((earliest or {}).get("canonical"))
+                    or _earliest_popular
                 )
                 _performed_own = bool(_performed_work.get("own_release"))
                 # Equal dates must NOT replace a genuine performer: page 1's
@@ -3941,6 +4019,7 @@ class CoverDetector:
                             "year": year,
                             "confidence": "medium",
                             "own_release": _own_release,
+                            "canonical": True,
                         }
                     # A SINGLE release is the original's own single ("My Heart
                     # Will Go On", 1997). Davy Spillane/Jeff Leyton/Deja Vu have
