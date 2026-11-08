@@ -431,6 +431,200 @@ class TestAnUnflaggedCompilationCoverDoesNotWin:
         )
 
 
+class TestTheUndatedCanonicalPerformerIsStillConsidered:
+    def test_popularity_includes_an_undated_performer(self, monkeypatch) -> None:
+        """Céline's canonical recording is UNDATED in the work browse.
+
+        Sorting candidates by date would drop her from the popularity
+        tie-break — the exact regression the old code fought.
+        """
+        import services.popularity.popularity_sources as popularity
+
+        monkeypatch.setattr(
+            popularity,
+            "get_lastfm_artist_max_listeners",
+            lambda name, *a, **k: (
+                5_000_000 if "Céline" in str(name) else 1000
+            ),
+        )
+
+        work = "work-my-heart"
+
+        def _visual(rec_id, artist, date):
+            return {
+                "id": rec_id,
+                "title": "My Heart Will Go On",
+                "artist-credit": [
+                    {"artist": {"id": "a-" + rec_id, "name": artist}}
+                ],
+                "first-release-date": date,
+                "work-relation-list": [
+                    {"type": "performance", "work": {"id": work}}
+                ],
+                "releases": [
+                    {"artist-credit": [{"artist": {"name": "Various Artists"}}]}
+                ],
+            }
+
+        early = [
+            _visual(f"early{i}", f"Early Artist {i}", "1998-01-01")
+            for i in range(8)
+        ]
+        celine = _visual("rec-celine", "Céline Dion", "")
+        filler = [
+            _visual(f"f{i}", f"Filler {i}", "2010-01-01") for i in range(91)
+        ]
+        page_one = early + [celine] + filler
+        assert len(page_one) == 100
+
+        details = {rec["id"]: rec for rec in page_one}
+
+        class _MB:
+            def browse_work_recordings(
+                self, work_id, inc="", limit=100, offset=0
+            ):
+                return list(page_one) if offset == 0 else []
+
+            def get_work(self, work_id, inc=None):
+                return {
+                    "id": work_id,
+                    "title": "My Heart Will Go On",
+                    "artist-relation-list": [
+                        {
+                            "type": "composer",
+                            "artist": {"id": "a-h", "name": "James Horner"},
+                        },
+                    ],
+                }
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
+            def get_recording(self, mbid, inc=""):
+                return details.get(mbid, {})
+
+            def search_recordings(self, query, limit=15):
+                return []
+
+        det = _detector(_MB())
+        result = det._detect_via_work_id(
+            work, performer="DragonForce", track_year=2019
+        )
+
+        assert result is not None
+        assert result["artist"] == "Céline Dion", (
+            "the undated, most-listened performer must not be dropped"
+        )
+
+
+class TestTheSongwriterPerformerIsTheOriginal:
+    """Reported: "Imagine by A Perfect Circle isn't being detected as a cover."
+
+    MusicBrainz flags every early non-writer recording of Lennon's work as a
+    cover (Nana Mouskouri 1973, Randy Crawford 1982, …); only John Lennon's own
+    writer recording is UNFLAGGED. The performer's own recordings are undated in
+    the work browse, so the undated-performer guard returned "not a cover"
+    before the writer lookup could answer. The cover marks decide it.
+    """
+
+    WORK = "work-imagine"
+
+    def test_an_unflagged_writer_recording_is_the_original(self) -> None:
+        def _rec(rid, artist, date):
+            return {
+                "id": rid,
+                "title": "Imagine",
+                "artist-credit": [
+                    {"artist": {"id": rid + "-a", "name": artist}}
+                ],
+                "first-release-date": date,
+            }
+
+        nana = _rec("nana", "Nana Mouskouri", "1973")
+        lennon = _rec("lennon", "John Lennon", "1990")
+        # The performing band's own recording is UNDATED in the browse — the
+        # condition that used to end detection with a conclusive negative.
+        apc = _rec("apc", "A Perfect Circle", "")
+        page = [nana, lennon, apc]
+
+        def _work_rel(cover: bool):
+            rel = {"type": "performance", "work": {"id": self.WORK}}
+            if cover:
+                rel["attributes"] = ["cover"]
+            return {"work-relation-list": [rel]}
+
+        details = {
+            "nana": {**nana, **_work_rel(True)},
+            "lennon": {**lennon, **_work_rel(False)},
+            "apc": {**apc, **_work_rel(True)},
+        }
+
+        class _MB:
+            def browse_work_recordings(
+                self, work_id, inc="", limit=100, offset=0
+            ):
+                return list(page) if offset == 0 else []
+
+            def get_work(self, work_id, inc=None):
+                return {
+                    "id": work_id,
+                    "title": "Imagine",
+                    "artist-relation-list": [
+                        {
+                            "type": "composer",
+                            "artist": {"id": "lennon-a", "name": "John Lennon"},
+                        },
+                        {
+                            "type": "lyricist",
+                            "artist": {"id": "ono-a", "name": "Yoko Ono"},
+                        },
+                    ],
+                }
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
+            def get_recording(self, mbid, inc=""):
+                return details.get(mbid, {})
+
+            def search_recordings(self, query, limit=15):
+                return []
+
+        det = _detector(_MB())
+        result = det._detect_via_work_id(
+            self.WORK, performer="A Perfect Circle"
+        )
+
+        assert result is not None, (
+            "the unflagged writer recording is the only non-cover performance"
+        )
+        assert result["artist"] == "John Lennon"
+
+
+class TestTitleSearchStaysOnTheWork:
+    def test_a_different_song_with_the_same_title_is_not_returned(self) -> None:
+        """Reported: the "Imagine" lookup answered "Moondog", a different song."""
+        det = _detector(_StubMB())
+        det._search_recordings_by_title = lambda *a, **k: [{"id": "moondog"}]
+        det._get_recording = lambda rid, inc: {
+            "id": "moondog",
+            "title": "Imagine",
+            "artist-credit": [{"artist": {"name": "Moondog"}}],
+            "first-release-date": "1969",
+            "work-relation-list": [
+                {"type": "performance", "work": {"id": "other-work"}}
+            ],
+        }
+
+        result = det._find_original_recording(
+            "Imagine", "John Lennon", work_mbid="imagine-work"
+        )
+
+        assert result is None, (
+            "a recording of a different work must never answer for this one"
+        )
+
+
 class _Row:
     def __init__(self, mapping):
         self._mapping = mapping

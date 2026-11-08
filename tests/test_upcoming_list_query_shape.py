@@ -104,6 +104,9 @@ def seeded(monkeypatch, tmp_path):
     today = date.today()
     inside = (today + timedelta(days=3)).isoformat()
     outside = (today + timedelta(days=400)).isoformat()
+    # A year-only MusicBrainz date ("2026") in the SAME year as ``inside``.
+    # It must sort AFTER the dated releases, not before them.
+    inside_year = str((today + timedelta(days=3)).year)
 
     engine = create_engine(f"sqlite:///{tmp_path / 'upcoming.db'}")
 
@@ -130,9 +133,10 @@ def seeded(monkeypatch, tmp_path):
                 "('Queued Artist', 'Queued Album', 'MusicBrainz Daily Collection', :d),"
                 "('Absent Artist', 'Absent Album', 'MusicBrainz Daily Collection', :d),"
                 "('Old Artist',    'Old Album',    'MusicBrainz Daily Collection', :o),"
-                "('Wiki Artist',   'Wiki Album',   'Wikipedia 2026',              :d)"
+                "('Wiki Artist',   'Wiki Album',   'Wikipedia 2026',              :d),"
+                "('TBA Artist',    'TBA Album',    'MusicBrainz Daily Collection', :y)"
             ),
-            {"d": inside, "o": outside},
+            {"d": inside, "o": outside, "y": inside_year},
         )
 
         # ── library ───────────────────────────────────────────────────────
@@ -245,6 +249,22 @@ class TestHideInLibrarySemantics:
         data = await response.get_json()
 
         assert data["total"] == len(data["releases"])
+
+
+class TestPartialDateOrdering:
+    """A year-only date must not crowd the near-term months off page 1."""
+
+    @pytest.mark.asyncio
+    async def test_year_only_date_sorts_after_dated_releases(self, seeded, client):
+        response = await client.get("/api/upcoming-releases")
+        data = await response.get_json()
+        names = [r["artist_name"] for r in data["releases"]]
+
+        assert "TBA Artist" in names
+        assert names.index("Absent Artist") < names.index("TBA Artist"), (
+            "a year-only date sorted BEFORE a dated release of the same year, "
+            "so a page of TBA rows hides the current months"
+        )
 
 
 class TestQueueAnnotationSemantics:

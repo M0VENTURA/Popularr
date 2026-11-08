@@ -183,10 +183,61 @@ def _quality_filter_config() -> dict[str, Any]:
     }
 
 
+def _quality_filter_signature(cfg: dict[str, Any]) -> str:
+    """Stable identity of the active quality policy."""
+    return repr((
+        cfg.get("enabled"),
+        cfg.get("reject_others"),
+        cfg.get("bitrate_tolerance"),
+        cfg.get("priorities"),
+    ))
+
+
+#: file path -> (mtime_ns, size, policy signature, ok, reason)
+_QUALITY_FILTER_CACHE: dict[str, tuple[int, int, str, bool, str | None]] = {}
+_QUALITY_FILTER_CACHE_MAX = 4000
+#: (path, mtime_ns, size, policy signature) already logged as a rejection.
+_QUALITY_FILTER_LOGGED: set[tuple] = set()
+
+
+def _quality_filter_reject_key(file_path: str) -> tuple | None:
+    """Cache key for the rejection LOG, so an unchanged file logs once.
+
+    The same rejected ``SKZ2020/...m4a`` was re-logged on every discovery cycle
+    because nothing remembered that this exact (file, size, mtime, policy) had
+    already been evaluated.
+    """
+    cfg = _quality_filter_config()
+    if not cfg["enabled"] or not cfg["priorities"]:
+        return None
+    try:
+        st = os.stat(file_path)
+    except OSError:
+        return None
+    return (
+        file_path,
+        st.st_mtime_ns,
+        st.st_size,
+        _quality_filter_signature(cfg),
+    )
+
+
 def _matches_quality_filter(file_path: str) -> tuple[bool, str | None]:
     cfg = _quality_filter_config()
     if not cfg["enabled"] or not cfg["priorities"]:
         return True, None
+
+    # Cached against (size, mtime, policy): a rejected file is NOT re-probed
+    # every discovery cycle, and a changed file or changed settings re-evaluates.
+    try:
+        st = os.stat(file_path)
+        cache_key = (st.st_mtime_ns, st.st_size, _quality_filter_signature(cfg))
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _QUALITY_FILTER_CACHE.get(file_path)
+        if cached is not None and cached[:3] == cache_key:
+            return cached[3], cached[4]
 
     ext = os.path.splitext(file_path)[1].lower().lstrip(".")
     bitrate: int | None = None
@@ -198,20 +249,35 @@ def _matches_quality_filter(file_path: str) -> tuple[bool, str | None]:
         bitrate = None
 
     tolerance = cfg["bitrate_tolerance"]
+    ok = False
+    reason: str | None = None
     for priority in cfg["priorities"]:
         if ext != str(priority.get("format") or "").lower():
             continue
         want = priority.get("bitrate_kbps")
         if want in (None, ""):
-            return True, None
+            ok, reason = True, None
+            break
         try:
             want = int(want)
         except (TypeError, ValueError):
-            return True, None
+            ok, reason = True, None
+            break
         if bitrate is None or abs(bitrate - want) <= tolerance:
-            return True, None
+            ok, reason = True, None
+            break
+    else:
+        ok = False
+        reason = f"{ext or 'unknown'} @ {bitrate or '?'}kbps doesn't match quality priorities"
 
-    return False, f"{ext or 'unknown'} @ {bitrate or '?'}kbps doesn't match quality priorities"
+    if cache_key is not None:
+        _QUALITY_FILTER_CACHE[file_path] = (*cache_key, ok, reason)
+        while len(_QUALITY_FILTER_CACHE) > _QUALITY_FILTER_CACHE_MAX:
+            try:
+                _QUALITY_FILTER_CACHE.pop(next(iter(_QUALITY_FILTER_CACHE)))
+            except (StopIteration, KeyError):
+                break
+    return ok, reason
 
 
 def _queue_has_active_match(meta: dict[str, Any]) -> bool:
@@ -259,7 +325,14 @@ def enqueue_discovered_files(files: list[DiscoveredFile]) -> dict[str, int]:
         if not matches_qf:
             if quality_filter["reject_others"]:
                 quality_skipped += 1
-                logger.info("Skipped file due to quality filter", file_path=f.full_path, reason=qf_reason)
+                # Log an unchanged rejection ONCE, not on every scan.
+                _reject_key = _quality_filter_reject_key(f.full_path)
+                if _reject_key is None or _reject_key not in _QUALITY_FILTER_LOGGED:
+                    logger.info("Skipped file due to quality filter", file_path=f.full_path, reason=qf_reason)
+                    if _reject_key is not None:
+                        _QUALITY_FILTER_LOGGED.add(_reject_key)
+                        if len(_QUALITY_FILTER_LOGGED) > _QUALITY_FILTER_CACHE_MAX:
+                            _QUALITY_FILTER_LOGGED.clear()
                 continue
             logger.debug("Non-priority file kept", file_path=f.full_path, reason=qf_reason)
 

@@ -179,6 +179,46 @@
     return dateText <= new Date().toISOString().slice(0, 10);
   }
 
+  // ── Partial release dates ────────────────────────────────────────────────
+  // MusicBrainz stores a release group's date at whatever precision is known:
+  // YYYY, YYYY-MM or YYYY-MM-DD. An upcoming release is often announced with
+  // the YEAR only ("2026"). The old grouping did `substring(0, 7)` on that,
+  // got "2026", then built `new Date("2026-01")` — so every year-only release
+  // was filed under JANUARY 2026. A year is not a month; keep it in its own
+  // bucket and say so.
+  function releaseDateGroup(release) {
+    var raw = String(release.release_date || '').trim();
+    var match = /^(\d{4})(?:-(\d{2}))?/.exec(raw);
+    if (!match) {
+      return { key: 'unknown', sort: '9999-99', yearOnly: false };
+    }
+    if (match[2]) {
+      var key = match[1] + '-' + match[2];
+      return { key: key, sort: key, yearOnly: false };
+    }
+    // Year-only: sort AFTER the known months of that year, before next year.
+    return { key: match[1], sort: match[1] + '-13', yearOnly: true };
+  }
+
+  function releaseDateGroupLabel(key) {
+    if (key === 'unknown') return 'Unknown Date';
+    if (/^\d{4}$/.test(key)) return key + ' (date TBA)';
+    var parts = key.split('-');
+    var monthDate = new Date(Number(parts[0]), Number(parts[1]) - 1, 1);
+    if (isNaN(monthDate.getTime())) return key;
+    return monthDate.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long'
+    });
+  }
+
+  function formatReleaseDate(value) {
+    var raw = String(value || '').trim();
+    if (!raw) return 'TBA';
+    if (/^\d{4}$/.test(raw)) return raw + ' (TBA)';
+    return raw;
+  }
+
   // ── Artwork ─────────────────────────────────────────────────────────────
   // The ONLY place the archive host is named. Every artwork URL has to come
   // through here, so the two sources below stay in one priority order.
@@ -240,7 +280,7 @@
   }
 
   function renderReleaseRow(release) {
-    var releaseDate = release.release_date || 'TBA';
+    var releaseDate = formatReleaseDate(release.release_date);
     var dateBadge = isReleased(release)
       ? '<span class="badge bg-primary">Out now</span>'
       : '<span class="badge bg-success">Upcoming</span>';
@@ -340,20 +380,30 @@
     }
 
     var grouped = {};
+    var groupSort = {};
     releases.forEach(function (r) {
-      var month = (r.release_date || 'Unknown Date').substring(0, 7);
-      if (!grouped[month]) grouped[month] = [];
-      grouped[month].push(r);
+      var group = releaseDateGroup(r);
+      if (!grouped[group.key]) {
+        grouped[group.key] = [];
+        groupSort[group.key] = group.sort;
+      }
+      grouped[group.key].push(r);
     });
-    var sortedMonths = Object.keys(grouped).sort();
+    var sortedMonths = Object.keys(grouped).sort(function (a, b) {
+      if (groupSort[a] === groupSort[b]) return 0;
+      return groupSort[a] < groupSort[b] ? -1 : 1;
+    });
 
     var todayMonth = new Date().toISOString().slice(0, 7);
-    var defaultOpenMonth = sortedMonths.indexOf(todayMonth) >= 0 ? todayMonth : sortedMonths[0];
+    var todayYear = todayMonth.slice(0, 4);
+    var defaultOpenMonth = sortedMonths.indexOf(todayMonth) >= 0
+      ? todayMonth
+      : (sortedMonths.indexOf(todayYear) >= 0 ? todayYear : sortedMonths[0]);
 
     var html = '<div class="accordion" id="upcomingReleaseAccordion">';
     sortedMonths.forEach(function (month, idx) {
       var monthReleases = grouped[month];
-      var monthLabel = new Date(month + '-01').toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+      var monthLabel = releaseDateGroupLabel(month);
       var open = month === defaultOpenMonth;
       html += '<div id="upcomingMonthCard' + idx + '" class="accordion-item">' +
         '<h2 class="accordion-header">' +

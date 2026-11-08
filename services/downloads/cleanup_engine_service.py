@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
 import structlog
 
@@ -53,28 +53,64 @@ _discovery_last_run_at: float = 0.0
 # PUBLIC BUSINESS LOGIC
 # ==============================================================================
 
-def cleanup_stale_downloads() -> dict[str, int]:
-    """Clean up stale/orphaned download entries."""
+def cleanup_stale_downloads() -> dict[str, Any]:
+    """Clean up stale/orphaned download entries.
+
+    ⚠️ STAGE TIMINGS are returned in ``timings_ms`` and logged at INFO when a
+    pass takes >= 5 s. This hook is the other one that hit the 120 s
+    maintenance timeout: ``discover_files`` rescans and re-probes every audio
+    file, and the reason was previously invisible.
+    """
     global _discovery_last_run_at
 
+    started = time.monotonic()
+    timings: dict[str, float] = {}
     now = time.time()
+    result: Any = []
+    scanned = 0
+    queued = 0
+    already_in_queue = 0
+
     if now - _discovery_last_run_at >= _CLEANUP_DISCOVERY_MIN_INTERVAL_SECONDS:
         _discovery_last_run_at = now
+        _t = time.monotonic()
         from services.downloads.download_scan_service import discover_files
         result = discover_files()
+        timings["discovery_ms"] = round((time.monotonic() - _t) * 1000.0, 1)
+        if isinstance(result, dict):
+            _stats = result.get("stats") or {}
+            scanned = int(_stats.get("scanned") or 0)
+            queued = int(_stats.get("queued") or 0)
+            already_in_queue = int(_stats.get("already_in_queue") or 0)
+        elif isinstance(result, list):
+            scanned = len(result)
     else:
-        result = []
+        timings["discovery_ms"] = 0.0
 
     auto_deleted = 0
+    _t = time.monotonic()
     try:
         from services.downloads.download_folder_service import auto_delete_imported_folders
         auto_deleted = auto_delete_imported_folders()
     except Exception as exc:
         logger.debug("Auto-delete imported folders failed", error=str(exc))
-        
+    timings["auto_delete_ms"] = round((time.monotonic() - _t) * 1000.0, 1)
+    timings["total_ms"] = round((time.monotonic() - started) * 1000.0, 1)
+
+    if timings["total_ms"] >= 5000:
+        logger.info(
+            "cleanup_stale_downloads stage timings",
+            scanned=scanned,
+            queued=queued,
+            **timings,
+        )
+
     return {
-        "scanned": len(result) if isinstance(result, (list, dict)) else 1,
+        "scanned": scanned,
         "folders_deleted": auto_deleted,
+        "queued": queued,
+        "already_in_queue": already_in_queue,
+        "timings_ms": timings,
     }
 
 

@@ -71,80 +71,180 @@ def reset_abandoned_items() -> dict[str, int]:
         return {"abandoned_reset": 0, "error": str(exc)}
 
 
+_STUCK_COLUMNS = (
+    "id, status, updated_at, found_filename, slskd_transfer_id, "
+    "retry_count, failure_reason"
+)
+
+
+def _stuck_rows(session: Any, where_sql: str, params: dict[str, Any]) -> list[Any]:
+    """Read the rows an UPDATE is about to touch, so the log can name them."""
+    result = session.execute(
+        text(f"SELECT {_STUCK_COLUMNS} FROM download_queue WHERE {where_sql}"),
+        params,
+    )
+    fetch = getattr(result, "fetchall", None)
+    if not callable(fetch):
+        return []
+    return fetch() or []
+
+
+def _log_stuck_resets(
+    rows: list[Any],
+    *,
+    old_status: str,
+    new_status: str,
+    reason: str,
+) -> None:
+    """Log one line PER ITEM — counts alone made the reset untraceable.
+
+    The old message was ``Reset stuck queue items ... downloading=1`` with no
+    queue id, so there was no way to tell which item was reset or whether the
+    next search was the reset row or a waiting one.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for row in rows:
+        mapping = getattr(row, "_mapping", None)
+        value = mapping if mapping is not None else {}
+        updated_at = value.get("updated_at")
+        try:
+            age_seconds = int((now - updated_at).total_seconds())
+        except Exception:
+            age_seconds = None
+        logger.warning(
+            "Reset stuck queue item",
+            queue_id=value.get("id"),
+            old_status=old_status,
+            new_status=new_status,
+            transfer_id=value.get("slskd_transfer_id"),
+            found_filename=value.get("found_filename"),
+            age_seconds=age_seconds,
+            last_progress_at=str(updated_at) if updated_at else None,
+            retry_count=value.get("retry_count"),
+            reset_reason=reason,
+        )
+
+
 def cleanup_stuck_items() -> dict[str, Any]:
     """Reset queue items stuck in 'searching'/'downloading'/'moving'."""
     searching_reset = 0
     downloading_reset = 0
     processing_reset = 0
     moving_reset = 0
-    
+
     try:
+        # ── searching ────────────────────────────────────────────────────
+        where = (
+            "status = 'searching' AND file_path IS NULL "
+            "AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)"
+        )
+        params = {"seconds": _STUCK_SEARCH_SECONDS}
         with db_session() as session:
+            rows = _stuck_rows(session, where, params)
             result = session.execute(
-                text("""
-                    UPDATE download_queue
-                    SET status = 'queued',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE status = 'searching'
-                      AND file_path IS NULL
-                      AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)
-                """),
-                {"seconds": _STUCK_SEARCH_SECONDS},
+                text(
+                    "UPDATE download_queue SET status = 'queued', "
+                    "updated_at = CURRENT_TIMESTAMP WHERE " + where
+                ),
+                params,
             )
             searching_reset = int(result.rowcount or 0)
+            if searching_reset:
+                _log_stuck_resets(
+                    rows,
+                    old_status="searching",
+                    new_status="queued",
+                    reason=f"searching for more than {_STUCK_SEARCH_SECONDS}s",
+                )
 
+        # ── processing ───────────────────────────────────────────────────
+        where = (
+            "status = 'processing' AND file_path IS NULL "
+            "AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)"
+        )
+        params = {"seconds": _STUCK_SEARCH_SECONDS}
         with db_session() as session:
+            rows = _stuck_rows(session, where, params)
             result = session.execute(
-                text("""
-                    UPDATE download_queue
-                    SET status = 'queued',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE status = 'processing'
-                      AND file_path IS NULL
-                      AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)
-                """),
-                {"seconds": _STUCK_SEARCH_SECONDS},
+                text(
+                    "UPDATE download_queue SET status = 'queued', "
+                    "updated_at = CURRENT_TIMESTAMP WHERE " + where
+                ),
+                params,
             )
             processing_reset = int(result.rowcount or 0)
+            if processing_reset:
+                _log_stuck_resets(
+                    rows,
+                    old_status="processing",
+                    new_status="queued",
+                    reason=f"processing for more than {_STUCK_SEARCH_SECONDS}s",
+                )
 
+        # ── downloading ──────────────────────────────────────────────────
+        where = (
+            "status = 'downloading' "
+            "AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)"
+        )
+        select_params = {"seconds": _STUCK_DOWNLOAD_SECONDS}
+        update_params = {
+            "seconds": _STUCK_DOWNLOAD_SECONDS,
+            "delay": _retry_delay_minutes(),
+            # ``next_retry_at`` is an explicit UTC wall clock everywhere else;
+            # the session's CURRENT_TIMESTAMP is not assumed.
+            "now_utc": datetime.now(timezone.utc).replace(tzinfo=None),
+        }
         with db_session() as session:
+            rows = _stuck_rows(session, where, select_params)
             result = session.execute(
-                text("""
-                    UPDATE download_queue
-                    SET status = 'failed',
-                        failure_reason = 'Stuck in downloading state',
-                        -- A hung transfer IS an attempt. Without counting it the
-                        -- row was re-queued and hung again every 6 hours forever.
-                        retry_count = COALESCE(retry_count, 0) + 1,
-                        -- Wait before the auto-retry picks it up, instead of
-                        -- re-queuing it on the very next cycle.
-                        next_retry_at = :now_utc + make_interval(mins => :delay),
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE status = 'downloading'
-                      AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)
-                """),
-                {
-                    "seconds": _STUCK_DOWNLOAD_SECONDS,
-                    "delay": _retry_delay_minutes(),
-                    # ``next_retry_at`` is an explicit UTC wall clock everywhere
-                    # else; the session's CURRENT_TIMESTAMP is not assumed.
-                    "now_utc": datetime.now(timezone.utc).replace(tzinfo=None),
-                },
+                text(
+                    "UPDATE download_queue SET status = 'failed', "
+                    "failure_reason = 'Stuck in downloading state', "
+                    # A hung transfer IS an attempt. Without counting it the
+                    # row was re-queued and hung again every 6 hours forever.
+                    "retry_count = COALESCE(retry_count, 0) + 1, "
+                    # Wait before the auto-retry picks it up, instead of
+                    # re-queuing it on the very next cycle.
+                    "next_retry_at = :now_utc + make_interval(mins => :delay), "
+                    "updated_at = CURRENT_TIMESTAMP WHERE " + where
+                ),
+                update_params,
             )
             downloading_reset = int(result.rowcount or 0)
+            if downloading_reset:
+                _log_stuck_resets(
+                    rows,
+                    old_status="downloading",
+                    new_status="failed",
+                    reason=(
+                        "downloading for more than "
+                        f"{_STUCK_DOWNLOAD_SECONDS // 3600}h; queued for retry"
+                    ),
+                )
 
+        # ── moving ───────────────────────────────────────────────────────
+        where = (
+            "status = 'moving' "
+            "AND updated_at < CURRENT_TIMESTAMP - make_interval(mins => :minutes)"
+        )
+        params = {"minutes": _STUCK_MOVING_MINUTES}
         with db_session() as session:
+            rows = _stuck_rows(session, where, params)
             result = session.execute(
-                text("""
-                    UPDATE download_queue
-                    SET status = 'downloading',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE status = 'moving'
-                      AND updated_at < CURRENT_TIMESTAMP - make_interval(mins => :minutes)
-                """),
-                {"minutes": _STUCK_MOVING_MINUTES},
+                text(
+                    "UPDATE download_queue SET status = 'downloading', "
+                    "updated_at = CURRENT_TIMESTAMP WHERE " + where
+                ),
+                params,
             )
             moving_reset = int(result.rowcount or 0)
+            if moving_reset:
+                _log_stuck_resets(
+                    rows,
+                    old_status="moving",
+                    new_status="downloading",
+                    reason=f"moving for more than {_STUCK_MOVING_MINUTES}m",
+                )
 
         if searching_reset or downloading_reset or processing_reset or moving_reset:
             logger.warning(
@@ -154,7 +254,7 @@ def cleanup_stuck_items() -> dict[str, Any]:
                 downloading=downloading_reset,
                 moving=moving_reset,
             )
-            
+
         return {
             "searching_reset": searching_reset,
             "processing_reset": processing_reset,

@@ -226,23 +226,48 @@ class TestHugeWorkTitleSearch:
         assert result is not None
         assert result["artist"] == "Céline Dion"
 
-    def test_a_writer_linked_band_beats_a_misdated_earlier_cover(self):
-        """Kidz Bop's misdated 2000 Hey Ya entry must not beat OutKast."""
+    def test_a_misdated_cover_act_does_not_protect_itself(self):
+        """Kidz Bop's misdated 2000 "Hey Ya!" is itself a FLAGGED COVER.
+
+        The performer's own recording must not be used to prove "we came first"
+        when MusicBrainz marks that recording as a cover of the work.
+        """
+        kidz = _recording("kidz", "Kidz Bop", year="2000", title="Hey Ya!")
+        outkast = _recording("outkast", "OutKast", year="2003", title="Hey Ya!")
+        details = {
+            "kidz": {
+                **kidz,
+                "work-relation-list": [{
+                    "type": "performance",
+                    "attributes": ["cover"],
+                    "work": {"id": "hey-work"},
+                }],
+            },
+            "outkast": {
+                **outkast,
+                "work-relation-list": [{
+                    "type": "performance",
+                    "work": {"id": "hey-work"},
+                }],
+            },
+        }
+
+        class _MB:
+            def get_recording(self, mbid, inc=""):
+                return details.get(mbid, {})
+
+            def get_artist(self, artist_id, inc=None):
+                return {"id": artist_id, "artist-relation-list": []}
+
         detector = CoverDetector()
-        detector.mb = type("FakeMB", (), {})()
+        detector.mb = _MB()
         detector._work_base_cache["hey-work"] = []
-        detector._work_recordings = lambda work_id, limit=100: [
-            _recording("kidz", "Kidz Bop", year="2000", title="Hey Ya!"),
-            _recording("outkast", "OutKast", year="2003", title="Hey Ya!"),
-        ]
+        detector._work_recordings = lambda work_id, limit=100: [kidz, outkast]
         detector._work_writers = lambda work_id: (
             "Hey Ya!",
             [{"id": "andre", "name": "André Benjamin"}],
         )
         detector._performer_wrote_work = lambda *a, **k: False
-        detector._original_by_writer = lambda *a, **k: {
-            "artist": "OutKast", "year": 2003, "confidence": "medium",
-        }
 
         result = detector._detect_via_work_id(
             "hey-work", "Kidz Bop", exclude_mbid="track-rec",
@@ -295,22 +320,30 @@ class TestHugeWorkTitleSearch:
         }
         assert detector._suffix_repair_update(track) is None
 
-    def test_title_search_finds_the_performed_original(self):
+    def test_the_performed_original_wins_over_a_writer_score(self):
+        """The work page itself carries the answer; no title search is needed.
+
+        Céline's recording is on her own release; the writer's (Horner's) and
+        Deja Vu's are compilation-only. The one-pass resolver inspects the work
+        page and picks her.
+        """
         detector = CoverDetector()
         detector.mb = type("FakeMB", (), {})()
         detector._work_base_cache["mh-work"] = []
+        title = "My Heart Will Go On"
+        celine = _recording("celine", "Céline Dion", year="1997", title=title)
+        celine["releases"] = [
+            {"artist-credit": [{"artist": {"name": "Céline Dion"}}]}
+        ]
         detector._work_recordings = lambda work_id, limit=100: [
-            _recording("james", "James Horner", year="2004"),
-            _recording("deja", "Deja Vu", year="2004"),
+            _recording("james", "James Horner", year="2004", title=title),
+            _recording("deja", "Deja Vu", year="2004", title=title),
+            celine,
         ]
         detector._work_writers = lambda work_id: (
             "My Heart Will Go On",
             [{"id": "jh", "name": "James Horner"}, {"id": "wj", "name": "Will Jennings"}],
         )
-        detector._find_original_recording = lambda *a, **k: {
-            "artist": "Céline Dion", "year": 1997, "confidence": "medium"
-        }
-        detector._original_by_writer = lambda *a, **k: None
 
         result = detector._detect_via_work_id(
             "mh-work", "DragonForce", exclude_mbid="dragon-rec",

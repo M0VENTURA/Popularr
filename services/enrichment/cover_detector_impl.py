@@ -730,6 +730,26 @@ class CoverDetector:
             logger.debug("Recording fetch failed", mbid=mbid, error=str(exc))
             return {}
 
+    def _recording_is_unflagged_performance(
+        self, recording_mbid: str, work_mbid: str
+    ) -> bool:
+        """Is this a performance of the work that MusicBrainz does NOT flag as a cover?
+
+        Used to tell a singer-songwriter's ORIGINAL recording (John Lennon's
+        "Imagine", unflagged) from a composer's score recording and from the
+        work's many covers (all flagged). A missing detail or a recording that
+        is not of this work is NOT evidence — callers treat ``False`` as
+        "unknown", never as proof.
+        """
+        if not recording_mbid or not work_mbid:
+            return False
+        detail = self._get_recording(recording_mbid, "work-rels+artist-credits")
+        if not detail:
+            return False
+        if work_mbid not in _all_work_ids(detail):
+            return False
+        return not bool(_all_cover_work_ids(detail) & {work_mbid})
+
     @staticmethod
     def _result(
         track_id: str,
@@ -977,631 +997,478 @@ class CoverDetector:
                                 "source": "musicbrainz_work_based_on",
                             }
 
-        recordings = self._work_recordings(work_mbid)
+        # ⭐ ONE PRINCIPLED PASS over the work's recordings.
+        #
+        # The old implementation ran six independent strategies here — an
+        # "earliest non-cover" probe, a ranked title search, a Last.fm
+        # popularity fallback, an extra-page scan and two writer heuristics —
+        # and let a chain of guards decide which answer won. Each guard fixed
+        # one reported case and broke another (Deja Vu, Moondog, Imagine).
+        #
+        # The replacement makes ONE decision:
+        #
+        #   1. inspect a bounded set of the work's recordings — the earliest by
+        #      date, every writer-linked performance, and one representative per
+        #      distinct performer;
+        #   2. keep only performances of THIS work that MusicBrainz does NOT
+        #      flag as covers;
+        #   3. rank the survivors: writer-performer release > the song's own
+        #      single > most-listened artist (huge works only) > artist-owned
+        #      release > canonical release count > earliest date.
+        #
+        # Cover flags are the primary evidence; dates and popularity only order
+        # the recordings that are not covers. When nothing can be inspected the
+        # answer is INCONCLUSIVE (``None``) — never a guess.
+        return self._resolve_original_for_work(
+            work_mbid,
+            performer,
+            exclude_mbid,
+            track_year,
+            allow_writer_check=allow_writer_check,
+        )
+
+    #: Earliest recordings inspected per work, in date order.
+    _WORK_CANDIDATE_INSPECTIONS = 8
+    #: Writer-linked performances always inspected, even if later.
+    _WORK_WRITER_INSPECTIONS = 6
+    #: One representative recording per distinct performer, to catch UNDATED
+    #: canonical recordings (Céline Dion's "My Heart Will Go On").
+    _WORK_DISTINCT_ARTISTS = 12
+    #: Pages of a work's recordings browsed (100 each).
+    _WORK_MAX_PAGES = 2
+    #: Distinct performers considered for the popularity tie-break.
+    _WORK_POPULARITY_CANDIDATES = 20
+
+    def _resolve_original_for_work(
+        self,
+        work_mbid: str,
+        performer: str,
+        exclude_mbid: str = "",
+        track_year: int | None = None,
+        *,
+        allow_writer_check: bool = True,
+    ) -> dict[str, Any] | None:
+        """The original artist of *work_mbid* from MusicBrainz.
+
+        Tri-state contract (the caller distinguishes them):
+          ``dict`` — a cover; the returned artist is the original.
+          ``{}``   — conclusive negative: the performer originated/wrote it.
+          ``None`` — inconclusive: no usable evidence; the caller falls through.
+        """
+        work_mbid = str(work_mbid or "").strip()
+        performer = str(performer or "").strip()
+        if not work_mbid or not performer or is_track_artist_placeholder(performer):
+            return None
+
+        work_title, writers = self._work_writers(work_mbid)
+
+        # If the performer wrote the work they are the originator, not a cover.
+        if allow_writer_check and self._performer_wrote_work(work_mbid, performer):
+            return {}
+
+        writer_candidate_names = [
+            str(name or "").strip()
+            for _aid, name in self._ranked_writer_candidates(writers)
+            if str(name or "").strip()
+        ]
+
+        recordings = self._collect_work_recordings(work_mbid)
         if not recordings:
             return None
 
-        # Check whether the track's own recording on the work page is explicitly
-        # flagged by MusicBrainz as a cover performance of this work.
-        own_recording_flagged_cover = False
-        if exclude_mbid:
-            for rec in recordings:
-                if isinstance(rec, dict) and str(rec.get("id") or "").strip() == exclude_mbid:
-                    if _all_cover_work_ids(rec) & {work_mbid}:
-                        own_recording_flagged_cover = True
-                    break
-
-        # ⭐ AN EXPLICIT COVER RELATION IS THE MOST AUTHORITATIVE ANSWER.
-        #
-        # MusicBrainz models "this recording is a cover of THAT recording" as a
-        # forward ``cover`` recording relation. When the track's own recording
-        # carries one, the target IS the original — no title/date ranking should
-        # second-guess it.
-        #
-        # The ranking below CANNOT handle the case where the songwriter is the
-        # original performer: Michael Jackson wrote AND sang "Smooth Criminal",
-        # so his earliest recording is classified as a "writer recording"
-        # (``writer_earliest``) and skipped, and the earliest NON-writer
-        # recording — a later cover — is returned. That is exactly the reported
-        # "Smooth Criminal (Santana Cover)": the writer lookup found Michael
-        # Jackson, but the work ranking returned Santana. Consulting the explicit
-        # relation first fixes it without weakening the composer-vs-performer
-        # rule for songs like "My Heart Will Go On".
-        if exclude_mbid:
-            _seed = self._get_recording(
-                exclude_mbid, "recording-rels+artist-credits+releases"
-            )
-            if _seed:
-                _chain = self._resolve_cover_chain(
-                    exclude_mbid, performer, seed_recording=_seed
-                )
-                _chain_artist = str((_chain or {}).get("artist") or "").strip()
-                if _chain_artist and not _same_artist(_chain_artist, performer):
-                    log_unified_safe(
-                        "[COVER_DETECT] explicit cover relation: "
-                        f"{_chain_artist} for work {work_mbid}"
-                    )
-                    return {
-                        **_chain,
-                        "confidence": (_chain or {}).get("confidence") or "high",
-                        "source": "recording_relation",
-                    }
-
-        # If the performer (or a band member of the performer) wrote the work
-        # and MusicBrainz does NOT explicitly mark this recording as a cover,
-        # the performer is the originator (prevents AFI originals covered later
-        # by The Offspring or Punk Goes 8-Bit from flipping backwards).
-        if allow_writer_check and not own_recording_flagged_cover:
-            if self._performer_wrote_work(work_mbid, performer):
-                return {}
-
-        work_title, writers = self._work_writers(work_mbid)
-        writer_names = [
-            str(w.get("name") or "").strip()
-            for w in writers
-            if str(w.get("name") or "").strip()
-        ]
-
-        def _is_work_writer(name: str) -> bool:
-            return any(_same_artist(name, writer_name) for writer_name in writer_names)
-
-        earliest: dict[str, Any] | None = None
-        earliest_key = "9999-99-99"
-        #: Rank a SINGLE release first (the original song had one), then an
-        #: artist-owned release, then the earliest date.
-        _earliest_rank: tuple[int, int, str] = (1, 1, "9999-99-99")
-        #: A writer's own performance (a composer's score recording, e.g. James
-        #: Horner's "My Heart Will Go On") is kept SEPARATE from performed
-        #: originals. The original ARTIST is the earliest PERFORMER, not the
-        #: person who wrote it; writers stay in the ``writer`` column.
-        writer_earliest: dict[str, Any] | None = None
-        writer_earliest_key = "9999-99-99"
         performer_key = (
             f"{int(track_year):04d}-99-99"
             if isinstance(track_year, int) and 1900 <= track_year <= 2100
             else "9999-99-99"
         )
-        credited = 0
         performer_on_work = False
-        #: Unique non-writer, non-cover performers on the work. Used by the
-        #: huge-work popularity fallback below: page 1 is often all undated
-        #: covers, and Last.fm listeners are the only signal that separates the
-        #: hit's original performer from them.
-        _pop_artists: list[str] = []
-        _pop_seen: set[str] = set()
-        _pop_artist_rids: dict[str, list[str]] = {}
-        #: (date_key, artist, recording_id) for title-matching performances, used
-        #: to find the earliest recording whose work relation is NOT flagged
-        #: ``cover`` — the principled "original" signal.
-        _dated_performers: list[tuple[str, str, str]] = []
+        performer_records: list[str] = []
+        candidates: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
         for rec in recordings:
             if not isinstance(rec, dict) or not rec.get("id"):
                 continue
             rec_id = str(rec.get("id") or "").strip()
-            if rec_id and rec_id == exclude_mbid:
-                performer_on_work = True
-                key = _release_date_key(rec)
-                if key < performer_key:
-                    performer_key = key
-                continue
-            if _has_cover_annotation(str(rec.get("title") or "")):
-                continue
-            # Never treat a candidate recording that MusicBrainz itself marks
-            # as a cover of this work as the original recording!
-            if _all_cover_work_ids(rec) & {work_mbid}:
-                continue
             rec_artist = str(
                 artist_from_credit(rec.get("artist-credit", []) or []) or ""
             ).strip()
-            if not rec_artist:
+            rec_key = _release_date_key(rec)
+
+            if rec_id == exclude_mbid or (
+                rec_artist and _same_artist(rec_artist, performer)
+            ):
+                performer_on_work = True
+                if rec_key < performer_key:
+                    performer_key = rec_key
+                if rec_id != exclude_mbid:
+                    performer_records.append(rec_id)
                 continue
-            # MusicBrainz attaches remixes/mashups/medleys to the SAME work. The
-            # 100 gecs "Appalachian Spring … / My Heart Will Go On (100 gecs
-            # remix)" is one, and its huge Last.fm audience made it win the
-            # popularity fallback. Only an actual performance of the song has
-            # the song's canonical title.
+
+            if not rec_artist or is_track_artist_placeholder(rec_artist):
+                continue
+            if _has_cover_annotation(str(rec.get("title") or "")):
+                continue
+            if _all_cover_work_ids(rec) & {work_mbid}:
+                continue
             if work_title and not _titles_match_exact(
                 str(rec.get("title") or ""), work_title
             ):
                 continue
-            credited += 1
-            key = _release_date_key(rec)
-            if _same_artist(rec_artist, performer):
-                performer_on_work = True
-                if key < performer_key:
-                    performer_key = key
+            if rec_id in seen_ids:
                 continue
-            candidate = {
-                "artist": rec_artist,
-                "year": year_from_recording(rec),
-                "confidence": "medium",
-            }
-            if _is_work_writer(rec_artist):
-                if key < writer_earliest_key:
-                    writer_earliest_key = key
-                    writer_earliest = candidate
-                continue
-            # Collect even UNDATED performers: Céline Dion's canonical recording
-            # carries no recording-level date in the work browse (its releases
-            # are the dated part), but she is by far the most-listened performer.
-            if rec_artist not in _pop_seen and len(_pop_artists) < 30:
-                _pop_seen.add(rec_artist)
-                _pop_artists.append(rec_artist)
-            if rec_artist in _pop_seen:
-                _rids = _pop_artist_rids.setdefault(rec_artist, [])
-                if len(_rids) < 10 and rec_id not in _rids:
-                    _rids.append(rec_id)
-            if not _undated(key):
-                _dated_performers.append((key, rec_artist, rec_id))
-            if _undated(key):
-                continue
-            # Prefer the earliest recording on the ARTIST'S OWN release (the
-            # first commercial single/album) over an earlier karaoke/tribute
-            # compilation cover.
-            _single_release = _recording_has_single_release(rec, rec_artist)
-            _own_release = _recording_has_own_release(rec, rec_artist)
-            _rank = (
-                0 if _single_release else 1,
-                0 if _own_release else 1,
-                key,
-            )
-            if _rank < _earliest_rank:
-                earliest_key = key
-                earliest = {
-                    **candidate,
-                    "own_release": _own_release,
-                    "single_release": _single_release,
+            seen_ids.add(rec_id)
+            candidates.append(
+                {
+                    "id": rec_id,
+                    "artist": rec_artist,
+                    "key": rec_key,
+                    "recording": rec,
+                    "is_writer": any(
+                        _same_artist(rec_artist, name)
+                        for name in writer_candidate_names
+                    ),
                 }
-                _earliest_rank = _rank
-
-        if earliest is None and writer_earliest is not None:
-            # No performer recording at all — fall back to the writer's own.
-            earliest = writer_earliest
-            earliest_key = writer_earliest_key
-
-        # A huge work (e.g. "My Heart Will Go On") cannot be paged in full. If
-        # the first page gave us a writer's own recording, search the title for
-        # a writer-verified PERFORMER original and prefer it when it is at
-        # least as early. This is what finds Céline Dion rather than a later
-        # cover or James Horner's score recording.
-        # ⭐ MusicBrainz marks COVERS on the recording→work performance relation
-        # with the ``cover`` attribute; the ORIGINAL is the same relation
-        # WITHOUT it. The work browse drops work-rels (it times out with
-        # releases), so the flag is invisible on page 1 — fetch details for the
-        # earliest dated candidates in date order and take the first one not
-        # flagged as a cover.
-        #
-        # ⚠️ "NOT flagged as a cover" is NOT by itself proof of being the
-        # original: the flag is user-contributed and frequently missing. The
-        # reported "My Heart Will Go On (Deja Vu Cover)": Deja Vu's 1998-03-31
-        # recordings carry NO cover attribute (checked against the live API),
-        # so this probe selected a Euro-house cover that only ever appears on a
-        # Various Artists compilation and then vetoed the title search and the
-        # popularity fallback that would have found Céline Dion. A candidate is
-        # authoritative only when it is corroborated by a commercial release of
-        # its OWN (an artist-owned release or the song's single); otherwise the
-        # ranked evidence below is allowed to outrank it.
-        _earliest_authoritative = False
-        if _dated_performers:
-            for _key, _name, _rid in sorted(_dated_performers)[:20]:
-                _det = self._get_recording(
-                    _rid, "work-rels+artist-credits+releases+release-groups"
-                )
-                if not _det:
-                    continue
-                if work_mbid not in _all_work_ids(_det):
-                    continue
-                if _all_cover_work_ids(_det) & {work_mbid}:
-                    continue
-                _own_release = _recording_has_own_release(_det, _name)
-                _single_release = _recording_has_single_release(_det, _name)
-                _rank = (
-                    0 if _single_release else 1,
-                    0 if _own_release else 1,
-                    _key,
-                )
-                if earliest is None or _rank < _earliest_rank:
-                    earliest = {
-                        "artist": _name,
-                        "year": year_from_recording(_det),
-                        "confidence": "medium",
-                        "own_release": _own_release,
-                        "single_release": _single_release,
-                    }
-                    earliest_key = _key
-                    _earliest_rank = _rank
-                # ONE request: the first non-cover candidate is the answer this
-                # probe is qualified to give. A candidate corroborated by a
-                # commercial release of its own ends the search; otherwise the
-                # title search and extra-page scan below are allowed to improve
-                # on it (they fetch releases/popularity themselves).
-                _earliest_authoritative = bool(_own_release or _single_release)
-                if _earliest_authoritative:
-                    log_unified_safe(
-                        "[COVER_DETECT] original lookup: earliest non-cover "
-                        f"{_name} ({_key[:4]}) for work {work_mbid}"
-                    )
-                break
-            if not _earliest_authoritative and earliest is not None:
-                log_unified_safe(
-                    "[COVER_DETECT] original lookup: earliest non-cover "
-                    f"{earliest.get('artist')} ({str(earliest_key)[:4]}) has no "
-                    "artist-owned/single release — ranking by commercial release "
-                    f"and popularity for work {work_mbid}"
-                )
-
-        # ⭐ Run the ranked title search whenever the work HAS writers — not only
-        # when page 1 already produced a dated candidate. On a huge work page 1
-        # can be entirely undated recordings, so both ``earliest`` and
-        # ``writer_earliest`` are None; the old guard skipped the only lookup
-        # that fetches dated, single-bearing candidates (Céline Dion) and the
-        # extra-page fallback then returned an intermediate cover
-        # ("WorldStar Music") instead.
-        if writer_names and not _earliest_authoritative:
-            log_unified_safe(
-                "[COVER_DETECT] original lookup: ranked title search for work "
-                f"{work_mbid}"
             )
-            for _writer_name in writer_names[:2]:
-                _searched_original = self._find_original_recording(
-                    work_title or "",
-                    _writer_name,
-                    album_artist=performer,
-                    track_year=track_year,
-                    # Prefer the first COMMERCIAL release (artist-owned
-                    # single/album) and never the work's own writers
-                    # ("My Heart Will Go On" → Céline Dion, not Horner/WorldStar).
-                    exclude_artists=writer_names,
-                    work_mbid=work_mbid,
-                )
-                if not _searched_original:
-                    log_unified_safe(
-                        "[COVER_DETECT] original lookup: ranked title search "
-                        f"found no usable original for work {work_mbid}"
-                    )
-                    continue
-                _searched_artist = str(_searched_original.get("artist") or "").strip()
-                if not _searched_artist:
-                    continue
-                if _same_artist(_searched_artist, performer):
-                    continue
-                if _is_work_writer(_searched_artist):
-                    # A writer's score recording is not the performed original.
-                    continue
-                _searched_year = _searched_original.get("year")
-                _searched_key = (
-                    f"{int(_searched_year):04d}-99-99"
-                    if isinstance(_searched_year, int)
-                    else "9999-99-99"
-                )
-                # A candidate corroborated by a commercial release — the
-                # song's own single, the artist's own album, or the canonical
-                # recording on the most releases — outranks an earlier
-                # compilation-only appearance even when the dates tie or the
-                # compilation is dated marginally sooner. That is what keeps
-                # Deja Vu (Mega Hits Dance Party) from beating Céline Dion.
-                _earliest_commercial = bool(
-                    (earliest or {}).get("own_release")
-                    or (earliest or {}).get("single_release")
-                    or (earliest or {}).get("canonical")
-                )
-                _searched_commercial = bool(
-                    _searched_original.get("own_release")
-                    or _searched_original.get("single_release")
-                    or _searched_original.get("canonical")
-                )
-                if (
-                    _searched_key < earliest_key
-                    or earliest is writer_earliest
-                    or (_searched_commercial and not _earliest_commercial)
-                ):
-                    earliest = {
-                        "artist": _searched_artist,
-                        "year": _searched_year,
-                        "confidence": "medium",
-                        "own_release": bool(_searched_original.get("own_release")),
-                        "single_release": bool(
-                            _searched_original.get("single_release")
-                        ),
-                        "canonical": bool(_searched_original.get("canonical")),
-                        # Marks where the pick came from, so the popularity
-                        # fallback below knows this artist-owned release was
-                        # seen only in MusicBrainz's TOP SEARCH RESULTS — not in
-                        # the work's full recording list — and must not veto it.
-                        "from_title_search": True,
-                    }
-                    earliest_key = _searched_key
-                    log_unified_safe(
-                        "[COVER_DETECT] original lookup: title search found "
-                        f"{_searched_artist} for work {work_mbid}"
-                    )
+
+        if not candidates:
+            # Only the performer's own recordings (or nothing usable) are on
+            # the work: a conclusive negative if the performer is present.
+            return {} if performer_on_work else None
+
+        # A performer whose OWN recording on the work is itself a flagged cover
+        # must not get the "they came first" protection from its (often
+        # misdated) date: Kidz Bop's misdated 2000 "Hey Ya!" is a cover.
+        performer_is_cover_act = False
+        for prec_id in performer_records[:3]:
+            detail = self._get_recording(prec_id, "work-rels+artist-credits")
+            if detail and _all_cover_work_ids(detail) & {work_mbid}:
+                performer_is_cover_act = True
                 break
 
-        _first_page_full = len(recordings) >= 100
+        inspect = self._select_inspection_set(candidates)
 
-        # ⭐ HUGE-WORK POPULARITY FALLBACK.
-        #
-        # On "My Heart Will Go On" page 1 has no dated non-writer original —
-        # Céline's canonical recording carries only release-level dates (the
-        # work browse with ``releases`` times out and falls back to
-        # artist-credits) — and MusicBrainz's title search never surfaces her
-        # (she is not in its top 50). The work's OWN recording list does include
-        # her, so among its performers the most-listened one is the hit's
-        # original: Deja Vu / WorldStar / Davy Spillane all lose to Céline.
-        _earliest_popular = False
+        unflagged: list[dict[str, Any]] = []
+        detail_available = False
+        for cand in inspect:
+            detail = self._get_recording(
+                cand["id"],
+                "work-rels+artist-credits+releases+release-groups",
+            )
+            if not detail:
+                continue
+            detail_available = True
+            if work_mbid not in _all_work_ids(detail):
+                continue
+            if _all_cover_work_ids(detail) & {work_mbid}:
+                continue
+            artist = str(
+                artist_from_credit(detail.get("artist-credit", []) or [])
+                or cand["artist"]
+            ).strip()
+            if not artist or is_track_artist_placeholder(artist):
+                continue
+            if _same_artist(artist, performer):
+                continue
+            unflagged.append(
+                {
+                    "id": cand["id"],
+                    "artist": artist,
+                    "key": _release_date_key(detail),
+                    "year": year_from_recording(detail),
+                    "own_release": _recording_has_own_release(detail, artist),
+                    "single_release": _recording_has_single_release(detail, artist),
+                    "release_count": len(detail.get("releases") or []),
+                    "is_writer": any(
+                        _same_artist(artist, name)
+                        for name in writer_candidate_names
+                    ),
+                }
+            )
+
+        if detail_available:
+            if not unflagged:
+                # Every inspected recording is a flagged cover. Without a
+                # genuine performance to name, do not guess.
+                return None
+            best = self._best_unflagged_candidate(
+                unflagged, use_popularity=len(recordings) >= 100
+            )
+        else:
+            # The recording-detail endpoint returned nothing for every
+            # candidate (outage/fake client): fall back to the browse payload.
+            best = self._best_browse_candidate(candidates)
+
+        if best is None:
+            return None
+
+        best_key = str(best.get("key") or "9999-99-99")
+        # The performer's own dated recording is not later than the best
+        # candidate: the performer originated the song.
         if (
-            _first_page_full
-            and _pop_artists
-            and not _earliest_authoritative
-            and not (
-                earliest
-                and (
-                    earliest.get("single_release")
-                    # An artist-owned release found by the TITLE SEARCH does not
-                    # veto this fallback: that search only sees MusicBrainz's
-                    # top hits, which for a huge work are the wrong performers
-                    # (Davy Spillane's soundtrack album, not Céline Dion). The
-                    # work page DOES contain Céline, so popularity must still
-                    # get its say there. A single release — the original song's
-                    # own single — remains conclusive.
-                    or (
-                        earliest.get("own_release")
-                        and not earliest.get("from_title_search")
-                    )
-                )
-            )
+            performer_on_work
+            and not performer_is_cover_act
+            and not _undated(performer_key)
+            and not _undated(best_key)
         ):
-            try:
-                from services.popularity.popularity_sources import (
-                    get_lastfm_artist_max_listeners,
-                )
-
-                _pop_counts: dict[str, int] = {}
-                for _pop_name in _pop_artists[:30]:
-                    try:
-                        _pop_counts[_pop_name] = int(
-                            get_lastfm_artist_max_listeners(_pop_name) or 0
-                        )
-                    except Exception:
-                        _pop_counts[_pop_name] = 0
-                _best_pop = ""
-                _best_pop_count = 0
-                for _pop_name, _pop_count in sorted(
-                    _pop_counts.items(), key=lambda item: item[1], reverse=True
-                ):
-                    if _pop_count <= 0:
-                        break
-                    # A famous COVER act must never become the original. The work
-                    # browse was fetched without work-rels, so a MusicBrainz
-                    # cover mark is invisible there; verify the leading
-                    # candidate's own recording before choosing it. This is what
-                    # keeps "Torn" → Ednaswap rather than Natalie Imbruglia.
-                    _same_song = False
-                    _cover_act = False
-                    for _rid in _pop_artist_rids.get(_pop_name, []):
-                        _det = self._get_recording(
-                            _rid, "work-rels+artist-credits"
-                        )
-                        if not _det:
-                            continue
-                        # The work page can contain unrelated recordings (a
-                        # 100 gecs track sits on the "My Heart Will Go On"
-                        # work). Only a recording OF THIS WORK can be the
-                        # original.
-                        if work_mbid not in _all_work_ids(_det):
-                            continue
-                        if _all_cover_work_ids(_det) & {work_mbid}:
-                            _cover_act = True
-                            continue
-                        _same_song = True
-                        _cover_act = False
-                        break
-                    if not _same_song or _cover_act:
-                        continue
-                    _best_pop = _pop_name
-                    _best_pop_count = _pop_count
-                    break
-                if _best_pop and _best_pop_count > 0:
-                    if earliest and _same_artist(
-                        _best_pop, str(earliest.get("artist") or "")
-                    ):
-                        # The page-1 date pick already IS the most-listened
-                        # artist — keep its dated candidate (and year) and just
-                        # protect it from the extra-page scan.
-                        _earliest_popular = True
-                    else:
-                        earliest = {
-                            "artist": _best_pop,
-                            "year": None,
-                            "confidence": "medium",
-                        }
-                        earliest_key = "9999-99-99"
-                        _earliest_popular = True
-                    log_unified_safe(
-                        "[COVER_DETECT] original lookup: most-listened artist "
-                        f"{_best_pop} ({_best_pop_count} listeners) "
-                        f"for work {work_mbid}"
-                    )
-            except Exception as exc:
-                logger.debug(
-                    "Work popularity fallback failed",
-                    work_mbid=work_mbid,
-                    error=str(exc),
-                )
-
-        # A huge work's first page can be mostly covers and a writer's score
-        # recording. Scan another page for the earliest PERFORMED original
-        # (Céline Dion for "My Heart Will Go On") and let it replace the
-        # writer-score fallback. Writers are excluded by the helper.
-        #
-        # ⭐ ALSO scan the extra page when the first page was FULL, even though a
-        # non-writer candidate was found. "My Heart Will Go On" has 320
-        # recordings; page 1 contains a 1998 Euro-house cover by "Deja Vu" and
-        # only Céline's UNDATED compilation recording, so she was skipped and
-        # Deja Vu won. Her dated recording is on a later page — which this scan
-        # found, but only in the "no performer candidate" branch. A full page
-        # means the candidate set is incomplete, so look further.
-        if writer_names and not _earliest_authoritative and (
-            earliest is None or earliest is writer_earliest or _first_page_full
+            if performer_key <= best_key:
+                return {}
+            if (
+                performer_key[:4] == best_key[:4]
+                and performer_key.endswith("-99-99")
+            ):
+                return {}
+        if (
+            performer_on_work
+            and not performer_is_cover_act
+            and _undated(performer_key)
+            and _undated(best_key)
         ):
-            _performed_work = self._earliest_performed_recording(
-                work_mbid,
-                performer,
-                writer_names,
-                # "My Heart Will Go On" has 320 recordings; cover the whole set
-                # (4 pages x 100) so a dated Céline recording past page 1 is
-                # found instead of a 1998 Euro-house cover on page 1.
-                max_pages=4,
-            )
-            if _performed_work:
-                _performed_year = _performed_work.get("year")
-                _performed_key = (
-                    f"{int(_performed_year):04d}-99-99"
-                    if isinstance(_performed_year, int)
-                    else "9999-99-99"
-                )
-                # An artist-owned release (the first commercial single/album)
-                # wins even when an earlier karaoke/tribute compilation cover
-                # exists — the "WorldStar Music" / "Deja Vu" false positives.
-                #
-                # ⚠️ NEVER let a later non-own candidate replace an own-release
-                # one. The page-2+ browse can fall back to ``artist-credits``
-                # (no releases), so ``own_release`` is False there even for the
-                # true original. The title search earlier in this method already
-                # found Céline (own release); replacing her with "WorldStar
-                # Music" (1995, compilation-only) is exactly the regression this
-                # guard prevents.
-                _earliest_own = (
-                    bool((earliest or {}).get("own_release"))
-                    # The title search may have established the canonical
-                    # recording (or the song's single) without an artist-owned
-                    # release in the payload; that is equally protective, so an
-                    # earlier compilation-only cover cannot displace it.
-                    or bool((earliest or {}).get("single_release"))
-                    or bool((earliest or {}).get("canonical"))
-                    or _earliest_popular
-                )
-                _performed_own = bool(_performed_work.get("own_release"))
-                # Equal dates must NOT replace a genuine performer: page 1's
-                # Céline (1998) was being replaced by WorldStar (also 1998)
-                # purely because both keys were "1998-99-99". A composer's
-                # score recording may still be replaced on an equal date.
-                _performed_is_better = _performed_key < earliest_key or (
-                    earliest is writer_earliest
-                    and _performed_key <= earliest_key
-                )
-                if _performed_own or (
-                    not _earliest_own and _performed_is_better
-                ):
-                    earliest = {
-                        "artist": _performed_work["artist"],
-                        "year": _performed_year,
-                        "confidence": "medium",
-                        "own_release": bool(_performed_work.get("own_release")),
-                    }
-                    earliest_key = _performed_key
-                    log_unified_safe(
-                        "[COVER_DETECT] original lookup: performed recording "
-                        f"{_performed_work['artist']} for work {work_mbid}"
-                    )
+            # Both undated: nothing proves the other recording came first.
+            return None
 
-        # ⭐ Did we find a PERFORMED original? If so it IS the original artist;
-        # the writer-linked fallback below must not replace it with the person
-        # who composed the song.
-        performed_original = earliest if earliest is not writer_earliest else None
-
-        # The performer recorded it FIRST (or in the same year when month/day
-        # is unknown): they originated the song.
-        # An UNDATED candidate (the popular work performer) cannot prove the
-        # performer came first — only a dated one can.
-        if earliest and not _undated(performer_key) and not _undated(earliest_key):
-            if performer_key <= earliest_key or performer_key[:4] < earliest_key[:4]:
-                return {}
-            if performer_key[:4] == earliest_key[:4] and performer_key.endswith("-99-99"):
-                return {}
-        elif earliest and performer_on_work and _undated(performer_key):
-            # The performer's own recording IS on the work but carries no date;
-            # nothing proves the other recording came first. Do not invent a
-            # cover from an undated comparison.
+        best_artist = str(best.get("artist") or "").strip()
+        if not best_artist or _same_artist(best_artist, performer):
             return {}
 
-        if earliest:
-            by_writer = self._original_by_writer(
-                {work_mbid}, performer=performer, exclude_mbid=exclude_mbid,
-            )
-            if by_writer == {}:
-                # _original_by_writer determined the performer is the writer/originator
-                return {}
-            # ⭐ A writer-linked PERFORMER/BAND is stronger evidence than an
-            # arbitrary earlier recording with the same title. "Hey Ya!" has a
-            # misdated Kidz Bop recording from 2000 in the work page; OutKast
-            # (via André 3000 -> the writer's band) is the actual original.
-            if by_writer and not _is_work_writer(
-                str(by_writer.get("artist") or "")
-            ):
-                return {
-                    **by_writer,
-                    "confidence": "medium",
-                    "work": work_title,
-                    "source": "musicbrainz_work",
-                }
-            # ⭐ THE SONGWRITER IS ALSO THE ORIGINAL PERFORMER.
-            #
-            # "Smooth Criminal": Michael Jackson wrote AND sang it, so his 1987
-            # recording is a ``writer_earliest`` and the rule above skips it;
-            # the earliest NON-writer recording of the work — Santana's much
-            # later cover — then became ``performed_original`` and was returned
-            # as the original (the reported "(Santana Cover)"). The writer
-            # lookup itself had found Michael Jackson.
-            #
-            # The split exists so a composer's SCORE recording does not become
-            # the artist ("My Heart Will Go On" → James Horner, 1997, vs Céline
-            # Dion, 1997). Those are CONTEMPORANEOUS; a later cover is years
-            # away. When the writer's own recording predates the earliest
-            # non-writer recording by a meaningful gap, the writer's recording
-            # is the original, not a score.
-            _gap_years = 0
-            if not _undated(writer_earliest_key) and not _undated(earliest_key):
-                try:
-                    _gap_years = int(earliest_key[:4]) - int(writer_earliest_key[:4])
-                except (TypeError, ValueError):
-                    _gap_years = 0
-            if by_writer and writer_earliest is not None and _gap_years >= 2:
-                log_unified_safe(
-                    "[COVER_DETECT] original lookup: writer-performer "
-                    f"{by_writer.get('artist')} ({writer_earliest_key[:4]}) "
-                    f"predates the earliest other recording "
-                    f"({earliest_key[:4]}) — treating it as the original"
+        return {
+            "artist": best_artist,
+            "year": best.get("year"),
+            "confidence": "medium",
+            "work": work_title,
+            "source": "musicbrainz_work",
+        }
+
+    def _collect_work_recordings(self, work_mbid: str) -> list[dict[str, Any]]:
+        """Up to ``_WORK_MAX_PAGES`` pages of a work's recordings."""
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for page in range(self._WORK_MAX_PAGES):
+            try:
+                if page == 0:
+                    page_recs = self._work_recordings(work_mbid)
+                else:
+                    page_recs = self.mb.browse_work_recordings(
+                        work_mbid,
+                        inc="artist-credits",
+                        limit=100,
+                        offset=page * 100,
+                    ) or []
+            except TypeError:
+                break
+            except Exception as exc:
+                logger.debug(
+                    "Work recording page failed",
+                    work_mbid=work_mbid,
+                    page=page,
+                    error=str(exc),
                 )
-                return {
-                    **by_writer,
-                    "confidence": "medium",
-                    "work": work_title,
-                    "source": "musicbrainz_work",
-                }
-            if performed_original is not None:
-                return {
-                    **performed_original,
-                    "confidence": "medium",
-                    "work": work_title,
-                    "source": "musicbrainz_work",
-                }
-            if by_writer:
-                return {
-                    **by_writer,
-                    "confidence": "medium",
-                    "work": work_title,
-                    "source": "musicbrainz_work",
-                }
-            return {
-                **earliest,
-                "confidence": "medium",
-                "work": work_title,
-                "source": "musicbrainz_work",
-            }
-        # The work HAS recordings bearing a credit and none of them differs
-        # from the performer — the performer originated the song.
-        return {} if credited else None
+                break
+            if not page_recs:
+                break
+            for rec in page_recs:
+                if not isinstance(rec, dict):
+                    continue
+                rid = str(rec.get("id") or "").strip()
+                if rid and rid in seen:
+                    continue
+                if rid:
+                    seen.add(rid)
+                collected.append(rec)
+            if len(page_recs) < 100:
+                break
+        return collected
+
+    def _select_inspection_set(
+        self, candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Choose which candidate recordings to fetch details for.
+
+        Three groups, bounded: every writer-linked performance, the earliest
+        recordings by date, and one representative per distinct performer. The
+        last group is what catches an UNDATED canonical recording — Céline
+        Dion's "My Heart Will Go On" carries no recording-level date in the
+        work browse, so a date-only window never sees her.
+        """
+        inspect: list[dict[str, Any]] = []
+        inspect_ids: set[str] = set()
+
+        def _add(cand: dict[str, Any]) -> None:
+            if cand["id"] not in inspect_ids:
+                inspect_ids.add(cand["id"])
+                inspect.append(cand)
+
+        writer_count = 0
+        for cand in candidates:
+            if not cand.get("is_writer"):
+                continue
+            if writer_count >= self._WORK_WRITER_INSPECTIONS:
+                break
+            _add(cand)
+            writer_count += 1
+
+        for cand in sorted(candidates, key=lambda c: (c["key"], c["artist"])):
+            if len(inspect) >= self._WORK_CANDIDATE_INSPECTIONS:
+                break
+            _add(cand)
+
+        distinct: set[str] = set()
+        for cand in candidates:
+            if len(distinct) >= self._WORK_DISTINCT_ARTISTS:
+                break
+            artist = cand["artist"]
+            if artist in distinct:
+                continue
+            distinct.add(artist)
+            _add(cand)
+
+        return inspect
+
+    def _best_unflagged_candidate(
+        self,
+        unflagged: list[dict[str, Any]],
+        *,
+        use_popularity: bool,
+    ) -> dict[str, Any] | None:
+        """Rank recordings MusicBrainz does NOT flag as covers.
+
+        Order: a writer performing their own song on an artist-owned release or
+        single (Lennon's "Imagine"), then the song's own single, then the
+        most-listened performer (huge works only — dates are unreliable there),
+        then an artist-owned release, then the canonical release count, then the
+        earliest date.
+        """
+        if not unflagged:
+            return None
+
+        writer_originals = [
+            c
+            for c in unflagged
+            if c.get("is_writer")
+            and (c.get("own_release") or c.get("single_release"))
+        ]
+        if writer_originals:
+            return min(
+                writer_originals,
+                key=lambda c: (
+                    0 if c.get("single_release") else 1,
+                    0 if c.get("own_release") else 1,
+                    c.get("key") or "9999-99-99",
+                ),
+            )
+
+        singles = [c for c in unflagged if c.get("single_release")]
+        if singles:
+            return min(singles, key=lambda c: c.get("key") or "9999-99-99")
+
+        if use_popularity:
+            best_popular = self._most_listened_candidate(unflagged)
+            if best_popular is not None:
+                return best_popular
+
+        owned = [c for c in unflagged if c.get("own_release")]
+        if owned:
+            return min(owned, key=lambda c: c.get("key") or "9999-99-99")
+
+        canonical = [c for c in unflagged if int(c.get("release_count") or 0) >= 2]
+        if canonical:
+            return min(
+                canonical,
+                key=lambda c: (
+                    -int(c.get("release_count") or 0),
+                    c.get("key") or "9999-99-99",
+                ),
+            )
+
+        return min(unflagged, key=lambda c: c.get("key") or "9999-99-99")
+
+    def _most_listened_candidate(
+        self, candidates: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """The most-listened performer among the candidates, if a key exists."""
+        if len(candidates) < 2:
+            return None
+        try:
+            from services.popularity.popularity_sources import (
+                get_lastfm_artist_max_listeners,
+            )
+        except Exception:
+            return None
+
+        # Consider EVERY inspected performer, not the earliest by date: the
+        # canonical recording of a huge work is often UNDATED in the browse
+        # (Céline Dion's "My Heart Will Go On" sorts last by date), and a
+        # date-ordered window would drop exactly the artist we need.
+        by_artist: dict[str, dict[str, Any]] = {}
+        for cand in candidates:
+            artist = str(cand.get("artist") or "")
+            if not artist or artist in by_artist:
+                continue
+            if len(by_artist) >= self._WORK_POPULARITY_CANDIDATES:
+                break
+            by_artist[artist] = cand
+
+        if not by_artist:
+            return None
+
+        counts: dict[str, int] = {}
+        for artist in by_artist:
+            try:
+                counts[artist] = int(get_lastfm_artist_max_listeners(artist) or 0)
+            except Exception:
+                counts[artist] = 0
+        artist, count = max(counts.items(), key=lambda item: item[1])
+        if count <= 0:
+            return None
+        return by_artist.get(artist)
+
+    def _best_browse_candidate(
+        self, candidates: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Best-effort ranking from browse data when details are unavailable.
+
+        Keeps only rules that need no network: a writer-performer who clearly
+        predates every non-writer recording is the original; otherwise prefer a
+        single/artist-owned release present in the browse payload, then the
+        earliest date.
+        """
+        dated = [
+            c for c in candidates if not _undated(c.get("key") or "9999-99-99")
+        ]
+        if not dated:
+            return None
+
+        writers = [c for c in dated if c.get("is_writer")]
+        others = [c for c in dated if not c.get("is_writer")]
+        earliest_writer = min(writers, key=lambda c: c["key"]) if writers else None
+        earliest_other = min(others, key=lambda c: c["key"]) if others else None
+
+        if earliest_writer is not None and (
+            earliest_other is None
+            or int(earliest_other["key"][:4]) - int(earliest_writer["key"][:4]) >= 2
+        ):
+            return self._as_candidate(earliest_writer)
+
+        if others:
+            def _rank(c: dict[str, Any]) -> tuple:
+                rec = c.get("recording") or {}
+                return (
+                    0 if _recording_has_single_release(rec, c["artist"]) else 1,
+                    0 if _recording_has_own_release(rec, c["artist"]) else 1,
+                    c["key"],
+                )
+
+            return self._as_candidate(min(others, key=_rank))
+        if earliest_writer is not None:
+            return self._as_candidate(earliest_writer)
+        return None
+
+    @staticmethod
+    def _as_candidate(cand: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "artist": cand.get("artist", ""),
+            "year": year_from_recording(cand.get("recording") or {}),
+            "key": cand.get("key") or "9999-99-99",
+        }
 
     # -- album entry point ------------------------------------------------
 
@@ -3996,6 +3863,17 @@ class CoverDetector:
                 # are only sound for recordings of THIS work — never let an
                 # unrelated same-titled song win.
                 _same_work = (not work_mbid) or (work_mbid in _all_work_ids(details))
+                # ⚠️ The comment above was only enforced INSIDE the buckets
+                # below, so when no same-work candidate had a single/popular/
+                # own/canonical release the fallback still returned a
+                # ``verified``/``unverified`` hit from a DIFFERENT song with the
+                # same title. Reported on "Imagine": the title search answered
+                # "Moondog" — a different "Imagine" — for John Lennon's work.
+                # When the work is known, a candidate that is not a performance
+                # of it is never the original.
+                if work_mbid and not _same_work:
+                    logger.debug("Skipping candidate: different work", mbid=rid)
+                    continue
 
                 if _excluded_artists and _same_work:
                     _is_writer = any(

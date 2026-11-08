@@ -1478,11 +1478,17 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 if _track_artist.casefold() not in _generic_artists
                 else "unknown"
             )
+            # Same separator in EVERY log line and in ``found_filename``; a
+            # selection line with backslashes and a download line with forward
+            # slashes made the same candidate look like two different files.
+            _candidate_filename = (
+                str(best.get("filename") or "").replace("\\", "/").strip()
+            )
             log_activity(
                 "selection",
                 f"Match selected: {expected_artist or _performer} – {expected_title}",
                 queue_id=queue_id,
-                candidate_id=f"{best.get('username') or ''}:{best.get('filename') or ''}",
+                candidate_id=f"{best.get('username') or ''}:{_candidate_filename}",
                 score=best.get("_match_score"),
                 album_artist=_album_artist or "unknown",
                 requested_track_artist=_performer,
@@ -1502,7 +1508,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 "download",
                 "Download requested.",
                 queue_id=queue_id,
-                candidate_id=f"{best.get('username') or ''}:{best.get('filename') or ''}",
+                candidate_id=f"{best.get('username') or ''}:{_candidate_filename}",
             )
         except Exception:
             pass
@@ -1529,13 +1535,18 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
             try:
                 from helpers.logging_config import log_activity
 
+                _chosen_filename = (
+                    str(chosen.get("filename") or "").replace("\\", "/").strip()
+                    if chosen
+                    else ""
+                )
                 log_activity(
                     "failure",
                     f"Download rejected: {fail_reason}",
                     level="warning",
                     queue_id=queue_id,
                     candidate_id=(
-                        f"{chosen.get('username') or ''}:{chosen.get('filename') or ''}"
+                        f"{chosen.get('username') or ''}:{_chosen_filename}"
                         if chosen
                         else None
                     ),

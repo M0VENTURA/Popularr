@@ -546,6 +546,34 @@ async function checkForUpdates() {
   await refreshUpcomingReleases();
 }
 
+// MusicBrainz dates can be YYYY, YYYY-MM or YYYY-MM-DD. An upcoming release
+// announced with the YEAR only must not be filed under January: `substring`
+// produced "2026", `new Date("2026-01")` made that January 2026.
+function upcomingDateGroup(release) {
+  const raw = String(release.release_date || '').trim();
+  const match = /^(\d{4})(?:-(\d{2}))?/.exec(raw);
+  if (!match) return { key: 'unknown', sort: '9999-99' };
+  if (match[2]) return { key: `${match[1]}-${match[2]}`, sort: `${match[1]}-${match[2]}` };
+  return { key: match[1], sort: `${match[1]}-13` };
+}
+
+function upcomingDateGroupLabel(key) {
+  if (key === 'unknown') return 'Unknown Date';
+  if (/^\d{4}$/.test(key)) return `${key} (date TBA)`;
+  const parts = key.split('-');
+  const parsed = new Date(Number(parts[0]), Number(parts[1]) - 1, 1);
+  return isNaN(parsed.getTime())
+    ? key
+    : parsed.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+}
+
+function formatUpcomingDate(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 'TBA';
+  if (/^\d{4}$/.test(raw)) return `${raw} (TBA)`;
+  return raw;
+}
+
 async function refreshUpcomingReleases() {
   const container = document.getElementById('upcomingReleases');
   if (!container) return;
@@ -571,23 +599,25 @@ async function refreshUpcomingReleases() {
     }
 
     const grouped = {};
+    const groupSort = {};
     releases.forEach(release => {
-      const month = (release.release_date || 'Unknown Date').substring(0, 7);
-      if (!grouped[month]) grouped[month] = [];
-      grouped[month].push(release);
+      const group = upcomingDateGroup(release);
+      if (!grouped[group.key]) {
+        grouped[group.key] = [];
+        groupSort[group.key] = group.sort;
+      }
+      grouped[group.key].push(release);
     });
 
-    const sortedMonths = Object.keys(grouped).sort();
+    const sortedMonths = Object.keys(grouped).sort((a, b) => {
+      if (groupSort[a] === groupSort[b]) return 0;
+      return groupSort[a] < groupSort[b] ? -1 : 1;
+    });
     let html = '<div class="accordion" id="releaseAccordion">';
 
     sortedMonths.forEach((month, idx) => {
       const monthReleases = grouped[month];
-      // A month key of "Unknown" produces an Invalid Date, which rendered as
-      // the literal string "Invalid Date" in the accordion header.
-      const parsed = new Date(month + '-01');
-      const monthLabel = isNaN(parsed.getTime())
-        ? 'Unknown Date'
-        : parsed.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+      const monthLabel = upcomingDateGroupLabel(month);
 
       html += `
         <div class="accordion-item">
@@ -617,7 +647,7 @@ async function refreshUpcomingReleases() {
           <tr>
             <td data-label="Artist">${escapeHtml(release.artist_name)}${artistStatus}</td>
             <td data-label="Album">${escapeHtml(release.album_name)}${albumStatus}</td>
-            <td data-label="Date"><small>${escapeHtml(release.release_date || 'TBA')}</small></td>
+            <td data-label="Date"><small>${escapeHtml(formatUpcomingDate(release.release_date))}</small></td>
             <td data-label="Action">
               <button type="button" class="btn btn-sm btn-outline-primary" title="Search on MusicBrainz" onclick='searchMusicBrainzRelease(event, ${artistArg}, ${albumArg})'>
                 <i class="bi bi-search"></i> Search

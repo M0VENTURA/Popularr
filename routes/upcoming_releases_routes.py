@@ -221,7 +221,20 @@ def api_upcoming_releases() -> Any:
             result = session.execute(
                 text(
                     f"SELECT * FROM upcoming_releases{where_sql} "
-                    "ORDER BY release_date ASC NULLS LAST, id ASC LIMIT :limit OFFSET :offset"
+                    # ⚠️ A year-only date ("2026") is a TEXT prefix, so plain
+                    # ``release_date ASC`` sorts it BEFORE every dated release
+                    # of that year ("2026" < "2026-01-01"). A page of 40
+                    # year-only rows then fills the first page and hides the
+                    # near-term months entirely ("no November, only early
+                    # October"). Sort by YEAR first, then dated releases
+                    # chronologically, then the year-only/TBA rows at the END
+                    # of their year.
+                    "ORDER BY "
+                    "SUBSTR(release_date, 1, 4) ASC NULLS LAST, "
+                    "CASE WHEN LENGTH(release_date) = 4 THEN 1 ELSE 0 END ASC, "
+                    "release_date ASC NULLS LAST, "
+                    "id ASC "
+                    "LIMIT :limit OFFSET :offset"
                 ),
                 {**params, "limit": limit + 1, "offset": (page - 1) * limit},
             )

@@ -485,7 +485,12 @@ class TestCleanupStuckMoving:
         result = qcs.cleanup_stuck_items()
         assert result["moving_reset"] == 1
 
-        moving_sql = next(s for s in executed if "status = 'moving'" in s)
+        # The cleanup now SELECTs the affected rows first (so the log can name
+        # them) and then UPDATEs. Assert on the UPDATE, not the pre-read.
+        moving_sql = next(
+            s for s in executed
+            if "status = 'moving'" in s and "UPDATE" in s
+        )
         assert "status = 'downloading'" in moving_sql
         assert "CURRENT_TIMESTAMP" in moving_sql
         assert "make_interval(mins => :minutes)" in moving_sql

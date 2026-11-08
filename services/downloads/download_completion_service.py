@@ -168,22 +168,40 @@ def _monitored_downloads_dir() -> str:
 
 
 def _resolve_walk_roots(downloads_dir: str) -> set[str]:
-    """Return the set of valid download/torrent root directories to scan."""
+    """Return the set of valid download/torrent root directories to scan.
+
+    The sibling candidates ("torrents"/"Torrents"/"TORRENTS") are the SAME
+    directory on a case-insensitive filesystem. They are deduped by
+    ``os.path.normcase`` so the walk is deterministic and the returned path
+    keeps the first (canonical, usually lowercase) spelling.
+    """
     roots: set[str] = set()
-    if downloads_dir and downloads_dir != "?" and os.path.isdir(downloads_dir):
-        roots.add(downloads_dir)
+    seen: set[str] = set()
+
+    def _add(path: str | None) -> None:
+        if not path:
+            return
+        try:
+            if not os.path.isdir(path):
+                return
+            key = os.path.normcase(os.path.normpath(path))
+        except Exception:
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        roots.add(path)
+
+    if downloads_dir and downloads_dir != "?":
+        _add(downloads_dir)
         try:
             from services.downloads.download_scan_service import resolve_torrents_dir
-            t_dir = resolve_torrents_dir()
-            if t_dir and os.path.isdir(t_dir):
-                roots.add(t_dir)
+            _add(resolve_torrents_dir())
         except Exception:
             pass
         _parent = os.path.dirname(os.path.normpath(downloads_dir))
         for _cand in ("torrents", "Torrents", "TORRENTS"):
-            _sibling = os.path.join(_parent, _cand)
-            if os.path.isdir(_sibling):
-                roots.add(_sibling)
+            _add(os.path.join(_parent, _cand))
     return roots
 
 
@@ -255,7 +273,29 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
         if _found and not _found.startswith("/"):
             candidates.append(os.path.join(monitored, _found))
     if local_file_path:
-        candidates.append(str(local_file_path).replace("\\", "/"))
+        _raw_local = str(local_file_path)
+        candidates.append(_raw_local)
+        _normalised_local = _raw_local.replace("\\", "/")
+        if _normalised_local != _raw_local:
+            candidates.append(_normalised_local)
+
+    def _first_existing(paths: list[str]) -> Optional[str]:
+        for path in paths:
+            try:
+                if path and os.path.isfile(path):
+                    return path
+            except Exception:
+                pass
+        return None
+
+    # ⚠️ CHECK THE O(1) CANDIDATES FIRST. The old function walked the whole
+    # archive root AND every download root before looking at any path — even
+    # when slskd's ``localFilePath`` already pointed at an existing file. With
+    # several transfers completing per pass those walks ran repeatedly inside
+    # the 120 s maintenance budget.
+    found = _first_existing(candidates)
+    if found:
+        return found
 
     try:
         from services.infrastructure.filesystem_service import resolve_original_archive_dir
@@ -267,6 +307,10 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
                     break
     except Exception:
         pass
+
+    found = _first_existing(candidates)
+    if found:
+        return found
 
     def _norm_key(name: str) -> str:
         n = _ud.normalize("NFC", name)
@@ -308,12 +352,9 @@ def _wait_for_transfer_file(found_filename: str, local_file_path: str) -> Option
         return None
 
     for _attempt in range(max(1, _FILE_ARRIVAL_POLLS)):
-        for path in candidates:
-            try:
-                if path and os.path.isfile(path):
-                    return path
-            except Exception:
-                pass
+        found = _first_existing(candidates)
+        if found:
+            return found
         if _FILE_ARRIVAL_POLL_SECONDS > 0 and _attempt < _FILE_ARRIVAL_POLLS - 1:
             _time.sleep(_FILE_ARRIVAL_POLL_SECONDS)
     return None
@@ -1964,13 +2005,48 @@ def _reconcile_transfer_state(
 # MODULAR HELPERS FOR check_completed_downloads (ISSUE #6)
 # =============================================================================
 
-def _collect_slskd_completed_map(slskd: Any, downloads_dir: str) -> dict[str, str]:
+def _basename_lookup_index(fs_files: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """(exact, punctuation-stripped, track-prefix-stripped) basename -> path.
+
+    Built ONCE per completion pass. The old ``_collect_slskd_completed_map``
+    walked every download root once PER completed transfer, which is O(transfers
+    x files); on a large downloads tree with a long transfer history that alone
+    blew the 120 s maintenance budget.
+    """
+    exact: dict[str, str] = {}
+    punct: dict[str, str] = {}
+    prefix: dict[str, str] = {}
+    for f in fs_files or []:
+        full = str(f.get("full_path") or "")
+        if not full:
+            continue
+        base = os.path.basename(full)
+        if not base:
+            continue
+        exact.setdefault(_ud.normalize("NFC", base).lower(), full)
+        _punct = _punctuation_stripped_key(base)
+        if _punct:
+            punct.setdefault(_punct, full)
+        _pfx = _track_prefix_stripped_key(base)
+        if _pfx:
+            prefix.setdefault(_pfx, full)
+    return exact, punct, prefix
+
+
+def _collect_slskd_completed_map(
+    slskd: Any,
+    downloads_dir: str,
+    fs_files: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
     """Build a lookup map of normalized remote/local keys -> resolved on-disk path."""
     slskd_completed: dict[str, str] = {}
     if slskd is None:
         return slskd_completed
 
-    search_roots = _resolve_walk_roots(downloads_dir)
+    if fs_files is None:
+        fs_files = _scan_download_filesystem(downloads_dir)
+    exact_index, punct_index, prefix_index = _basename_lookup_index(fs_files)
+
     try:
         for transfer in slskd.get_completed_transfers():
             local = str(transfer.get("localFilePath") or "").replace("\\", "/").strip()
@@ -1988,24 +2064,12 @@ def _collect_slskd_completed_map(slskd: Any, downloads_dir: str) -> dict[str, st
                         _base_key = _ud.normalize("NFC", _cand_base).lower()
                         _base_punct = _punctuation_stripped_key(_cand_base)
                         _base_pfx = _track_prefix_stripped_key(_cand_base)
-                        for _sr in search_roots:
-                            for _root, _dirs, _files in os.walk(_sr):
-                                _dirs[:] = [
-                                    d for d in _dirs
-                                    if not d.startswith(".") and not d.startswith("__")
-                                    and d.lower() != "original"
-                                ]
-                                for _fname in _files:
-                                    _fn_key = _ud.normalize("NFC", _fname).lower()
-                                    if (
-                                        _fn_key == _base_key
-                                        or (_base_punct and _punctuation_stripped_key(_fname) == _base_punct)
-                                        or (_base_pfx and _track_prefix_stripped_key(_fname) == _base_pfx)
-                                    ):
-                                        resolved_local = os.path.join(_root, _fname)
-                                        break
-                                if resolved_local and os.path.isfile(resolved_local):
-                                    break
+                        resolved_local = (
+                            exact_index.get(_base_key)
+                            or (punct_index.get(_base_punct) if _base_punct else None)
+                            or (prefix_index.get(_base_pfx) if _base_pfx else None)
+                            or ""
+                        )
 
             if resolved_local and os.path.isfile(resolved_local):
                 if remote_norm:
@@ -2477,6 +2541,19 @@ def _process_single_downloading_item(
 # =============================================================================
 
 def check_completed_downloads() -> dict[str, Any]:
+    """Reconcile ``downloading`` queue rows against slskd and the filesystem.
+
+    ⚠️ STAGE TIMINGS are recorded in ``stats["timings_ms"]`` and logged at INFO
+    when the pass takes >= 5 s. The 120 s maintenance timeout used to fire with
+    no indication of which stage was responsible; the two pathological ones were
+    ``_collect_slskd_completed_map`` (walked every download root once PER
+    completed transfer) and ``_wait_for_transfer_file`` (walked every root
+    before checking the O(1) candidate paths). Both are now bounded.
+    """
+    import time as _time
+
+    started = _time.monotonic()
+    timings: dict[str, float] = {}
     stats: dict[str, Any] = {
         "success": True,
         "downloading_items": 0,
@@ -2486,19 +2563,39 @@ def check_completed_downloads() -> dict[str, Any]:
         "errors": 0,
     }
 
+    def _mark(name: str, since: float) -> None:
+        timings[f"{name}_ms"] = round((_time.monotonic() - since) * 1000.0, 1)
+
+    def _finalize() -> dict[str, Any]:
+        timings["total_ms"] = round((_time.monotonic() - started) * 1000.0, 1)
+        stats["timings_ms"] = timings
+        if timings["total_ms"] >= 5000:
+            logger.info(
+                "check_completed_downloads stage timings",
+                **stats["timings_ms"],
+                downloading_items=stats.get("downloading_items", 0),
+            )
+        return stats
+
+    t = _time.monotonic()
     try:
         moving_stats = _reconcile_stale_moving()
         stats["imported"] += moving_stats.get("imported", 0)
     except Exception:
         pass
+    _mark("reconcile_moving", t)
 
+    t = _time.monotonic()
     db_now = _db_now_naive()
+    _mark("db_now", t)
 
     try:
         from db.repositories.queue import get_queue_status_counts
+        t = _time.monotonic()
         downloading_count = get_queue_status_counts().get("downloading", 0)
+        _mark("queue_counts", t)
         if not downloading_count:
-            return stats
+            return _finalize()
         stats["downloading_items"] = downloading_count
     except Exception:
         pass
@@ -2512,16 +2609,30 @@ def check_completed_downloads() -> dict[str, Any]:
         slskd = SlskdService(http_client=slskd_client) if slskd_client is not None else None
         downloads_dir = resolve_downloads_dir()
 
-        slskd_completed = _collect_slskd_completed_map(slskd, downloads_dir)
+        # ⚠️ ONE filesystem walk per pass, then index it. The completed-transfer
+        # map used to walk the tree again for every transfer.
+        t = _time.monotonic()
         fs_files = _scan_download_filesystem(downloads_dir)
+        _mark("fs_scan", t)
+
+        t = _time.monotonic()
         fs_index = _build_download_index(fs_files) if fs_files else {
             "by_rel_norm": {},
             "by_basename": {},
             "by_punct": {},
             "by_token": {},
         }
-        claimed_files = _load_claimed_files()
+        _mark("fs_index", t)
 
+        t = _time.monotonic()
+        slskd_completed = _collect_slskd_completed_map(slskd, downloads_dir, fs_files)
+        _mark("slskd_completed_map", t)
+
+        t = _time.monotonic()
+        claimed_files = _load_claimed_files()
+        _mark("claimed_files", t)
+
+        t = _time.monotonic()
         try:
             with db_session() as session:
                 rows = session.execute(
@@ -2530,8 +2641,10 @@ def check_completed_downloads() -> dict[str, Any]:
                 downloading = [dict(r._mapping) for r in rows]
         except Exception:
             stats["errors"] += 1
-            return stats
+            return _finalize()
+        _mark("queue_rows", t)
 
+        t = _time.monotonic()
         active_transfers: list[dict[str, Any]] = []
         if slskd is not None and downloading:
             try:
@@ -2540,7 +2653,9 @@ def check_completed_downloads() -> dict[str, Any]:
                 pass
             if active_transfers:
                 _sync_download_progress(active_transfers, downloading)
+        _mark("active_transfers", t)
 
+        t = _time.monotonic()
         for item in downloading:
             try:
                 _process_single_downloading_item(
@@ -2557,9 +2672,12 @@ def check_completed_downloads() -> dict[str, Any]:
                 )
             except Exception:
                 stats["errors"] += 1
+        _mark("items", t)
 
-        return stats
+        return _finalize()
 
     except Exception as exc:
         logger.error("check_completed_downloads failed", error=str(exc))
-        return {"success": False, "error": str(exc), **stats}
+        stats["success"] = False
+        stats["error"] = str(exc)
+        return _finalize()

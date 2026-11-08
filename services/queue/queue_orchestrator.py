@@ -150,6 +150,30 @@ _MAINTENANCE_HOOK_RETRY_SECONDS = float(
 )
 _STUCK_MAINTENANCE_HOOKS: dict[str, float] = {}
 
+#: hook name -> the still-running Future of a previous attempt.
+#:
+#: A timed-out hook CANNOT be cancelled: ``Future.cancel()`` only stops work
+#: that has not started, and ``executor.shutdown(wait=False)`` leaves the
+#: running thread alive. The old code created a fresh executor per hook, so a
+#: hung hook both leaked a thread and could be started AGAIN on the next cycle
+#: while its previous run was still scanning the filesystem. Track the future
+#: and skip the hook until it actually finishes.
+_RUNNING_MAINTENANCE_HOOKS: dict[str, Any] = {}
+_MAINTENANCE_EXECUTOR: Any = None
+
+
+def _maintenance_executor() -> Any:
+    """One shared executor; timing out a hook must not leak its pool."""
+    global _MAINTENANCE_EXECUTOR
+    if _MAINTENANCE_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _MAINTENANCE_EXECUTOR = ThreadPoolExecutor(
+            max_workers=max(1, len(MAINTENANCE_CANDIDATES)),
+            thread_name_prefix="queue-maint",
+        )
+    return _MAINTENANCE_EXECUTOR
+
 
 def is_db_outage_error(error: Any) -> bool:
     """True when ``error`` (exception or message) looks like a lost database."""
@@ -733,11 +757,26 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
     results: list[dict[str, Any]] = []
     db_outage = False
 
-    from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FuturesTimeoutError
 
     for hook in _iter_maintenance_hooks():
         hook_name = f"{hook.__module__}.{hook.__name__}"
+
+        # A previous attempt that timed out may STILL be running — a running
+        # Future cannot be cancelled. Never start a second copy of the same
+        # hook while it is alive: that is how timed-out scans overlapped.
+        _running = _RUNNING_MAINTENANCE_HOOKS.get(hook_name)
+        if _running is not None:
+            if not _running.done():
+                results.append({
+                    "hook": hook_name,
+                    "status_code": 504,
+                    "success": False,
+                    "error": "skipped: previous run is still active",
+                })
+                continue
+            _RUNNING_MAINTENANCE_HOOKS.pop(hook_name, None)
+
         _retry_at = _STUCK_MAINTENANCE_HOOKS.get(hook_name, 0.0)
         if _retry_at > time.monotonic():
             results.append({
@@ -750,12 +789,11 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
                 ),
             })
             continue
-        executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="queue-maint"
-        )
-        future = executor.submit(hook)
+        future = _maintenance_executor().submit(hook)
+        _RUNNING_MAINTENANCE_HOOKS[hook_name] = future
         try:
             result = future.result(timeout=_MAINTENANCE_HOOK_TIMEOUT_SECONDS)
+            _RUNNING_MAINTENANCE_HOOKS.pop(hook_name, None)
             _STUCK_MAINTENANCE_HOOKS.pop(hook_name, None)
             payload, status = normalise_result(result)
             error = payload.get("error")
@@ -770,8 +808,9 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
                 break
         except FuturesTimeoutError:
             # ⚠️ Do NOT wait for the hook: it is why the cycle lock was stuck.
-            # The worker may still be running, but it no longer blocks the
-            # queue batch or the other queue driver.
+            # The worker may still be running, so it stays in
+            # _RUNNING_MAINTENANCE_HOOKS and a later cycle will skip it until
+            # it actually finishes.
             _STUCK_MAINTENANCE_HOOKS[hook_name] = (
                 time.monotonic() + _MAINTENANCE_HOOK_RETRY_SECONDS
             )
@@ -779,6 +818,7 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
                 "Maintenance hook timed out — continuing with the queue batch",
                 hook=hook_name,
                 timeout_seconds=_MAINTENANCE_HOOK_TIMEOUT_SECONDS,
+                still_running=True,
             )
             results.append({
                 "hook": hook_name,
@@ -787,6 +827,7 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
                 "error": f"timed out after {_MAINTENANCE_HOOK_TIMEOUT_SECONDS:.0f}s",
             })
         except Exception as exc:
+            _RUNNING_MAINTENANCE_HOOKS.pop(hook_name, None)
             _STUCK_MAINTENANCE_HOOKS.pop(hook_name, None)
             if is_db_outage_error(exc):
                 logger.warning("Maintenance hook hit a database outage", hook=hook_name)
@@ -801,9 +842,6 @@ def run_maintenance() -> tuple[dict[str, Any], int]:
             })
             if db_outage:
                 break
-        finally:
-            # ``wait=False`` is the point: a hung hook must not be joined.
-            executor.shutdown(wait=False, cancel_futures=True)
 
     failures = [row for row in results if not row.get("success")]
 
