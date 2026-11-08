@@ -52,7 +52,7 @@
 
     {"id": "metal", "display": "Metal", "parent": "rock", "specificity": 0, "family": "metal"},
     {"id": "heavy_metal", "display": "Heavy Metal", "parent": "metal", "specificity": 1},
-    {"id": "alternative_metal", "display": "Alternative Metal", "parent": "metal", "specificity": 2, "aliases": ["alt metal", "alt. metal", "alt-metal"]},
+    {"id": "alternative_metal", "display": "Alternative Metal", "parents": ["metal", "alternative_rock"], "specificity": 2, "family": "metal", "aliases": ["alt metal", "alt. metal", "alt-metal"]},
     {"id": "nu_metal", "display": "Nu Metal", "parent": "alternative_metal", "specificity": 2, "aliases": ["nu-metal", "nü metal"]},
     {"id": "thrash_metal", "display": "Thrash Metal", "parent": "heavy_metal", "specificity": 2, "aliases": ["thrash"]},
     {"id": "speed_metal", "display": "Speed Metal", "parent": "heavy_metal", "specificity": 2},

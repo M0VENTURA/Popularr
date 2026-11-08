@@ -47,6 +47,7 @@ SETTINGS = gs.SelectionSettings(
     entity_weights=gs.DEFAULT_ENTITY_WEIGHTS,
     keep_together=gs.DEFAULT_KEEP_TOGETHER,
     conditional_keep=gs.DEFAULT_CONDITIONAL_KEEP,
+    mutually_exclusive=gs.DEFAULT_MUTUALLY_EXCLUSIVE,
 )
 
 
@@ -466,11 +467,11 @@ class TestCondensation:
         "a,b",
         [
             # ⚠️ ONLY the pairs where the hierarchy actually nests one under the
-            # other. The rest of the report's "usually keep both" list
-            # (alternative metal + alternative rock, shoegaze + dream pop,
-            # folk metal + power metal, …) is already safe because those are
-            # SIBLINGS — listing them there documents intent, but a test using
-            # them would pass with the exception switched off.
+            # other. The rest of the "usually keep both" list (shoegaze + dream
+            # pop, folk metal + power metal, …) is already safe because those
+            # are SIBLINGS. ``alternative metal`` + ``alternative rock`` is
+            # deliberately NOT here: alternative metal descends from alternative
+            # rock, so the more specific one replaces it.
             ("hard rock", "blues rock"),
             ("nu metal", "alternative metal"),
             ("progressive metal", "djent"),
@@ -495,6 +496,29 @@ class TestCondensation:
             "listenbrainz@track": ["folk metal", "power metal"],
         })
         assert len(result) == 2, result
+
+    def test_alternative_metal_replaces_alternative_rock(self) -> None:
+        """REPORTED: "Alternative Rock, Alternative Metal, Cover" on one track.
+
+        ``alternative_metal`` is a descendant of ``alternative_rock`` in the
+        vocabulary, so the ancestor rule keeps only the more specific
+        "Alternative *" identity.
+        """
+        result = select({
+            "lastfm@track": ["alternative metal", "alternative rock"],
+            "musicbrainz@album": ["alternative metal", "alternative rock"],
+            "listenbrainz@track": ["alternative metal"],
+        })
+        assert result == ["Alternative Metal"], result
+
+    def test_the_exclusive_pair_collapses_even_when_rock_has_more_sources(self) -> None:
+        """The pair is ``mutually_exclusive``, not just ancestor-condensed."""
+        result = select({
+            "lastfm@track": ["alternative metal", "alternative rock"],
+            "musicbrainz@album": ["alternative metal", "alternative rock"],
+            "discogs@album": ["alternative rock"],
+        })
+        assert result == ["Alternative Metal"], result
 
     def test_a_conditional_pair_collapses_without_support(self) -> None:
         """``hard_rock`` + ``heavy_metal`` collapse when the narrower one has no

@@ -296,6 +296,39 @@ class TestConsensusThreshold:
 
 
 # ---------------------------------------------------------------------------
+# One "Alternative *" identity per track
+# ---------------------------------------------------------------------------
+
+class TestAlternativeRockAndMetalAreMutuallyExclusive:
+    """REPORTED: a track showed both "Alternative Rock" and "Alternative Metal".
+
+    ``alternative_metal`` descends from ``alternative_rock`` in the vocabulary,
+    so the ancestor condensation keeps the more specific one in BOTH engines.
+    """
+
+    def test_canonical_engine_keeps_only_the_specific_genre(self, cfg):
+        cfg(min_weight=0.0)
+        result = gas.aggregate_genres({
+            "lastfm@track": ["alternative metal", "alternative rock"],
+            "musicbrainz@album": ["alternative metal", "alternative rock"],
+            "listenbrainz@track": ["alternative metal"],
+        }, max_genres=3)
+        lowered = _lower(result)
+        assert "alternative metal" in lowered
+        assert "alternative rock" not in lowered, lowered
+
+    def test_legacy_engine_also_drops_the_ancestor(self, cfg, legacy_engine):
+        cfg(min_weight=0.0)
+        result = gas.aggregate_genres({
+            "lastfm": ["alternative metal", "alternative rock"],
+            "musicbrainz": ["alternative metal", "alternative rock"],
+        }, max_genres=3)
+        lowered = _lower(result)
+        assert "alternative metal" in lowered
+        assert "alternative rock" not in lowered, lowered
+
+
+# ---------------------------------------------------------------------------
 # Junk tag can never reach a playlist name
 # ---------------------------------------------------------------------------
 

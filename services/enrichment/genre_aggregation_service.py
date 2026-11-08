@@ -87,6 +87,10 @@ _SPECIFIC_TO_GENERIC: dict[str, list[str]] = {
     "electronic rock": ["electronic", "rock"],
     "indie rock": ["rock", "alternative"],
     "alternative rock": ["rock", "alternative"],
+    # A track keeps ONE "Alternative *" genre. Alternative Metal is the more
+    # specific identity; keeping its Alternative Rock ancestor spends a slot on
+    # a broader statement (reported as "Alternative Rock, Alternative Metal").
+    "alternative metal": ["alternative rock"],
 }
 
 _GENERIC_ROOTS: dict[str, frozenset[str]] = {

@@ -179,6 +179,9 @@ class SelectionSettings:
     keep_together: frozenset[tuple[str, str]] = frozenset()
     #: Pairs collapsed to the broader one ONLY when the narrower is unsupported.
     conditional_keep: frozenset[tuple[str, str]] = frozenset()
+    #: Pairs that must NEVER both survive. The broader ancestor is dropped even
+    #: when it scores higher, so a track carries ONE identity from the pair.
+    mutually_exclusive: frozenset[tuple[str, str]] = frozenset()
     #: A more specific descendant replaces its ancestor only when it reaches
     #: this fraction of the ancestor's score. A weaker ``synthpop`` must not
     #: delete the better-supported ``pop`` tag.
@@ -211,11 +214,16 @@ DEFAULT_ENTITY_WEIGHTS: dict[str, float] = {
     ENTITY_ARTIST: 0.35,
 }
 
-#: The report's "usually keep both" list. These pairs are NOT parent/child
-#: duplicates — they describe different aspects of a sound — so the ancestor
-#: rule must not collapse them even where the hierarchy makes one a parent.
+#: Pairs that describe different aspects of a sound, so the ancestor rule must
+#: not collapse them even where the hierarchy makes one a parent.
+#:
+#: ⚠️ ``alternative_metal`` + ``alternative_rock`` is deliberately NOT here.
+#: ``alternative_metal`` descends from BOTH ``metal`` and ``alternative_rock``,
+#: and the pair is ``mutually_exclusive``, so a track keeps ONE "Alternative *"
+#: genre: the more specific alternative metal replaces its alternative-rock
+#: ancestor even when the rock tag scores higher. The reported "Alternative
+#: Rock, Alternative Metal, Cover" is the regression this prevents.
 DEFAULT_KEEP_TOGETHER: frozenset[tuple[str, str]] = frozenset({
-    ("alternative_metal", "alternative_rock"),
     ("gothic_rock", "gothic_metal"),
     ("industrial", "industrial_metal"),
     ("pop_punk", "emo"),
@@ -233,6 +241,14 @@ DEFAULT_KEEP_TOGETHER: frozenset[tuple[str, str]] = frozenset({
 DEFAULT_CONDITIONAL_KEEP: frozenset[tuple[str, str]] = frozenset({
     ("hard_rock", "heavy_metal"),
     ("metalcore", "hardcore_punk"),
+})
+
+#: Pairs where only ONE may appear on a track. ``alternative_metal`` descends
+#: from ``alternative_rock``, so the ancestor is dropped UNCONDITIONALLY: a
+#: track must not carry both "Alternative Rock" and "Alternative Metal" even
+#: when the rock tag has more sources (the reported regression).
+DEFAULT_MUTUALLY_EXCLUSIVE: frozenset[tuple[str, str]] = frozenset({
+    ("alternative_metal", "alternative_rock"),
 })
 
 
@@ -325,6 +341,9 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
         keep_together=_pairs("keep_together", DEFAULT_KEEP_TOGETHER),
         conditional_keep=_pairs("conditional_keep", DEFAULT_CONDITIONAL_KEEP),
+        mutually_exclusive=_pairs(
+            "mutually_exclusive", DEFAULT_MUTUALLY_EXCLUSIVE
+        ),
     )
 
 
@@ -491,12 +510,14 @@ def remove_redundant_ancestors(
     the ancestor unless it adds meaningful independent information." ``rock``
     beside ``melodic death metal`` spends a slot on nothing.
 
-    Two exceptions, both from the report:
+    Exceptions:
 
-    * ``keep_together`` — pairs that are NOT simple parent/child duplicates
-      (``alternative metal`` + ``alternative rock`` describe different aspects).
+    * ``keep_together`` — pairs that are NOT simple parent/child duplicates.
     * ``conditional_keep`` — collapse only when the narrower genre has no
       track/album evidence of its own.
+    * ``mutually_exclusive`` — pairs where only ONE identity may survive. The
+      broader ancestor is dropped even when it scores HIGHER, so a track never
+      carries both ``alternative rock`` and ``alternative metal``.
     """
     vocab = vocab or get_vocabulary()
     settings = settings or _settings_from_config(None)
@@ -508,6 +529,13 @@ def remove_redundant_ancestors(
                 continue
             if not _is_ancestor(candidate.genre_id, other.genre_id, vocab):
                 continue
+            if _pair_is_kept(
+                candidate.genre_id, other.genre_id, settings.mutually_exclusive
+            ):
+                # Unconditional: the exclusive pair must not co-exist, even
+                # when the broader ancestor has more support.
+                drop.add(candidate.genre_id)
+                break
             if _pair_is_kept(candidate.genre_id, other.genre_id, settings.keep_together):
                 continue
             if _pair_is_kept(candidate.genre_id, other.genre_id, settings.conditional_keep):
