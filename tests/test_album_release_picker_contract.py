@@ -56,6 +56,58 @@ class TestReleaseFormatPreference:
         assert mbs._release_format_preference(releases[1]) == 2
         assert mbs._release_format_preference(releases[0]) == 1
 
+    def test_single_disc_beats_multi_disc_on_an_equal_tracklist(self, monkeypatch):
+        """REPORTED: a 2-disc repackaging and a 1-disc digital edition expose
+        the same tracks. The one-disc edition is the practical target."""
+        from services.enrichment import musicbrainz_service as mbs
+
+        releases = [
+            {
+                "id": "multi", "title": "The Album", "date": "2024-01-01",
+                "status": "Official", "track_count": 10, "disc_count": 2,
+                "formats": ["Digital Media"],
+            },
+            {
+                "id": "single", "title": "The Album", "date": "2024-01-01",
+                "status": "Official", "track_count": 10, "disc_count": 1,
+                "formats": ["Digital Media"],
+            },
+        ]
+        monkeypatch.setattr(mbs, "_browse_group_releases", lambda *a, **k: releases)
+        monkeypatch.setattr(mbs, "_get_local_track_count", lambda *a, **k: 10)
+
+        result = mbs.get_musicbrainz_best_release(
+            "Artist", "The Album", "single-disc-rg"
+        )
+
+        assert result["best_release"]["id"] == "single"
+
+    def test_a_more_complete_multi_disc_edition_still_wins(self, monkeypatch):
+        """CONTROL — the one-disc bonus is below one track, so a genuinely
+        longer edition is never discarded (the double-CD report)."""
+        from services.enrichment import musicbrainz_service as mbs
+
+        releases = [
+            {
+                "id": "single", "title": "The Album", "date": "2024-01-01",
+                "status": "Official", "track_count": 10, "disc_count": 1,
+                "formats": ["Digital Media"],
+            },
+            {
+                "id": "multi", "title": "The Album", "date": "2024-01-01",
+                "status": "Official", "track_count": 20, "disc_count": 2,
+                "formats": ["Digital Media"],
+            },
+        ]
+        monkeypatch.setattr(mbs, "_browse_group_releases", lambda *a, **k: releases)
+        monkeypatch.setattr(mbs, "_get_local_track_count", lambda *a, **k: 10)
+
+        result = mbs.get_musicbrainz_best_release(
+            "Artist", "The Album", "complete-edition-rg"
+        )
+
+        assert result["best_release"]["id"] == "multi"
+
 
 class TestReleaseGroupReleasesNormalization:
     def test_returns_normalized_release_shape(self, monkeypatch):

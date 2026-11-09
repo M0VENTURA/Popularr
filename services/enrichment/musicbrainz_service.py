@@ -2640,6 +2640,21 @@ def get_musicbrainz_best_release(
             # then vinyl. The count term above still dominates, so this never
             # prefers an incomplete edition over a complete one.
             value += _release_format_preference(item) * 5.0
+            # ── ONE DISC WINS OVER MULTI-DISC ON THE SAME TRACKLIST ────────
+            # A 2-disc repackaging and a 1-disc digital edition can expose the
+            # same total number of tracks with the same names. The one-disc
+            # edition is the practical target: the multi-disc one is usually a
+            # reissue that splits the same album across media (and its disc
+            # numbers are meaningless for a single-folder rip).
+            #
+            # +100 is deliberately BELOW one track (1000), so it can never
+            # override a genuinely more complete edition — it only breaks an
+            # equal-track-count tie.
+            disc_count = _as_int(item.get("disc_count"), 0)
+            if disc_count == 1:
+                value += 100.0
+            elif disc_count > 1:
+                value -= 10.0 * (disc_count - 1)
             return value
 
         best = max(releases, key=score)

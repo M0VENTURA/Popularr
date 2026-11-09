@@ -128,7 +128,8 @@ def reap_stalled_transfers() -> dict[str, int]:
             if username and filename:
                 _record_peer_stall(username, filename)
                 logger.warning(
-                    "Blocked peer after stalled transfer",
+                    "Blocked peer/file combination after stalled transfer",
+                    scope="peer_track_cooldown",
                     username=username,
                     filename=filename,
                     progress=progress,

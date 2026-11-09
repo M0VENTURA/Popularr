@@ -462,79 +462,235 @@ def _filename_title_candidates(filename: str) -> list[str]:
     return candidates
 
 
+#: Two files are only considered the same track when their durations agree
+#: within this many seconds. An UNKNOWN duration means "not a duplicate".
+_DEDUPE_DURATION_TOLERANCE_SECONDS = 2.0
+#: The loser is RENAMED to this suffix, never removed. It is no longer an audio
+#: extension, so neither the scanner nor a player will pick it up again.
+_DEDUPE_QUARANTINE_SUFFIX = ".duplicate"
+
+
+def _dedupe_tag_value(tags: Any, *keys: str) -> str:
+    """First non-empty tag value, for both MP3 frames and Vorbis comments."""
+    for key in keys:
+        try:
+            value = tags.get(key)
+        except Exception:
+            value = None
+        if not value:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else ""
+        text_value = str(value).strip()
+        if text_value:
+            return text_value
+    return ""
+
+
+def _read_dedupe_metadata(path: str) -> tuple[str, str, float, int, int]:
+    """``(artist, title, duration_seconds, size_bytes, quality_score)``."""
+    lossless = os.path.splitext(path)[1].lower() in {
+        ".flac", ".wav", ".alac", ".aiff", ".ape", ".wv"
+    }
+    score = 100000 if lossless else 0
+    artist = title = ""
+    duration = 0.0
+    try:
+        size = int(os.path.getsize(path))
+    except OSError:
+        size = 0
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(path)
+        if audio is not None:
+            info = getattr(audio, "info", None)
+            if info is not None:
+                score += int(getattr(info, "bitrate", 0) or 0) // 1000
+                score += int(getattr(info, "sample_rate", 0) or 0) // 100
+                duration = float(getattr(info, "length", 0) or 0)
+            tags = getattr(audio, "tags", None)
+            if tags:
+                artist = _dedupe_tag_value(tags, "TPE1", "artist", "ARTIST")
+                title = _dedupe_tag_value(tags, "TIT2", "title", "TITLE")
+    except Exception:
+        pass
+    return artist, title, duration, size, score
+
+
+def _dedupe_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def _quarantine_duplicate(path: str) -> str | None:
+    """Rename the duplicate out of the audio namespace. NEVER deletes it."""
+    target = path + _DEDUPE_QUARANTINE_SUFFIX
+    counter = 1
+    while os.path.exists(target):
+        target = f"{path}{_DEDUPE_QUARANTINE_SUFFIX}.{counter}"
+        counter += 1
+    try:
+        os.replace(path, target)
+        return target
+    except Exception as exc:
+        logger.debug("Failed to quarantine duplicate", path=path, error=str(exc))
+        return None
+
+
 def dedupe_library_folder(folder_path: str, keep_path: str | None = None) -> dict[str, Any]:
-    """Safe library folder deduplication. 
-    
-    Fixed to avoid false positives on different tracks (like Japanese ver. suffixes).
-    Uses strict metadata title matching when available before cleaning.
+    """Quarantine duplicate audio files in ONE library folder.
+
+    ⚠️ THIS MUST NEVER DELETE. The reported pair
+
+        removed: 05. Stray Kids - BEWARE.mp3
+        kept:    02. Stray Kids - Double Knot -Japanese ver.-.mp3
+
+    are DIFFERENT tracks: a bad/shared tag made the old `artist::title` key
+    group them, and the loser was removed irrecoverably. A candidate now needs
+    independent agreement on ALL of:
+
+    * non-empty artist / title, and a KNOWN duration;
+    * the tag title **and** the title parsed from the FILENAME;
+    * duration within ``_DEDUPE_DURATION_TOLERANCE_SECONDS``.
+
+    The loser is renamed to ``<file>.duplicate`` (quarantined) so it can be
+    reviewed and deleted by hand. Nothing is ever removed here.
     """
     if not folder_path or not os.path.isdir(folder_path):
-        return {"removed": 0, "groups": 0}
+        return {"removed": 0, "quarantined": 0, "groups": 0}
+
+    try:
+        from services.downloads.download_scan_service import _duplicate_cleanup_config
+
+        if not _duplicate_cleanup_config("delete_duplicate_files", True):
+            return {
+                "removed": 0,
+                "quarantined": 0,
+                "groups": 0,
+                "skipped": True,
+                "reason": "duplicate cleanup disabled",
+            }
+    except Exception:
+        pass
 
     keep_abs = os.path.abspath(keep_path) if keep_path else None
 
-    def _get_audio_metadata(path: str) -> tuple[str, str, int]:
-        """Returns (artist, title, quality_score)"""
-        score = 100000 if os.path.splitext(path)[1].lower() in {".flac", ".wav", ".alac", ".aiff", ".ape", ".wv"} else 0
-        artist, title = "", ""
-        try:
-            from mutagen import File as MutagenFile
-            audio = MutagenFile(path)
-            if audio and hasattr(audio, "info"):
-                score += int(getattr(audio.info, "bitrate", 0) or 0) // 1000
-                score += int(getattr(audio.info, "sample_rate", 0) or 0) // 100
-            if audio and hasattr(audio, "tags") and audio.tags:
-                artist = str(audio.tags.get("TPE1", audio.tags.get("artist", [""]))[0]).strip().casefold()
-                title = str(audio.tags.get("TIT2", audio.tags.get("title", [""]))[0]).strip().casefold()
-        except Exception:
-            pass
-        return artist, title, score
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    try:
+        entries = list(os.scandir(folder_path))
+    except OSError as exc:
+        logger.debug("Library folder dedup scan failed", folder=folder_path, error=str(exc))
+        return {"removed": 0, "quarantined": 0, "groups": 0}
 
-    groups: dict[str, list[tuple[str, str, str, int]]] = {}
-    for entry in os.scandir(folder_path):
+    for entry in entries:
         if not entry.is_file():
             continue
         ext = os.path.splitext(entry.name)[1].lower()
         if ext not in _AUDIO_EXTS:
             continue
-        
-        artist, title, quality = _get_audio_metadata(entry.path)
-        # Fallback to filename candidate if tags are missing
-        if not title:
-            candidates = _filename_title_candidates(entry.name)
-            title = candidates[0] if candidates else entry.name.casefold()
-            
-        # Group strictly by artist + title to prevent cross-song data loss (e.g. different Japanese versions)
-        group_key = f"{artist}::{title}"
-        groups.setdefault(group_key, []).append((entry.path, artist, title, quality))
 
-    removed = 0
+        artist, title, duration, size, quality = _read_dedupe_metadata(entry.path)
+        filename_title = (_filename_title_candidates(entry.name) or [""])[0]
+        if not title:
+            title = filename_title
+        if not title or duration <= 0:
+            # Unprovable: no tag/filename title or no duration. Leave it alone.
+            logger.debug(
+                "Duplicate check skipped — no usable title/duration",
+                path=entry.path,
+                title=title,
+                duration=duration,
+            )
+            continue
+
+        # The FILENAME title is an independent witness. A mis-tagged BEWARE file
+        # cannot pair with a file whose NAME says "Double Knot".
+        group_key = (
+            _dedupe_key(artist),
+            _dedupe_key(title),
+            _dedupe_key(filename_title),
+        )
+        grouped.setdefault(group_key, []).append({
+            "path": entry.path,
+            "artist": artist,
+            "title": title,
+            "filename_title": filename_title,
+            "duration": duration,
+            "size": size,
+            "quality": quality,
+        })
+
+    quarantined = 0
     group_count = 0
-    for key, files in groups.items():
+    for group_key, files in grouped.items():
         if len(files) < 2:
             continue
-        group_count += 1
-        # Sort by quality descending, then path
-        files.sort(key=lambda fp: (-fp[3], fp[0]))
-        keep = files[0][0]
-        if keep_abs and os.path.abspath(keep) != keep_abs:
-            if os.path.abspath(keep_abs) in {os.path.abspath(f[0]) for f in files}:
-                keep = keep_abs
-        for path, _, _, _ in files:
-            if os.path.abspath(path) == os.path.abspath(keep):
-                continue
-            if keep_abs and os.path.abspath(path) == keep_abs:
-                continue
-            try:
-                os.remove(path)
-                removed += 1
-                logger.info(
-                    "Removed duplicate track from library folder safely",
-                    folder=folder_path, removed_path=path, kept=keep,
-                )
-            except Exception as exc:
-                logger.debug("Failed to remove duplicate", path=path, error=str(exc))
+        files.sort(key=lambda item: item["duration"])
+        clusters: list[list[dict[str, Any]]] = []
+        for item in files:
+            if (
+                clusters
+                and abs(
+                    item["duration"] - clusters[-1][-1]["duration"]
+                ) <= _DEDUPE_DURATION_TOLERANCE_SECONDS
+            ):
+                clusters[-1].append(item)
+            else:
+                clusters.append([item])
 
-    if removed:
-        logger.info("Library folder dedup complete", folder=folder_path, removed=removed, groups=group_count)
-    return {"removed": removed, "groups": group_count}
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            group_count += 1
+            cluster.sort(key=lambda item: (-item["quality"], item["path"]))
+            keep_item = cluster[0]
+            if keep_abs:
+                for item in cluster:
+                    if os.path.abspath(item["path"]) == keep_abs:
+                        keep_item = item
+                        break
+
+            for item in cluster:
+                if os.path.abspath(item["path"]) == os.path.abspath(keep_item["path"]):
+                    continue
+                if keep_abs and os.path.abspath(item["path"]) == keep_abs:
+                    continue
+                quarantine_path = _quarantine_duplicate(item["path"])
+                if quarantine_path is None:
+                    continue
+                quarantined += 1
+                logger.info(
+                    "Quarantined duplicate track from library folder",
+                    folder=folder_path,
+                    quarantined_path=item["path"],
+                    quarantine_path=quarantine_path,
+                    kept=keep_item["path"],
+                    group_key=list(group_key),
+                    kept_artist=keep_item["artist"],
+                    kept_title=keep_item["title"],
+                    kept_filename_title=keep_item["filename_title"],
+                    kept_duration=round(keep_item["duration"], 3),
+                    kept_size=keep_item["size"],
+                    removed_artist=item["artist"],
+                    removed_title=item["title"],
+                    removed_filename_title=item["filename_title"],
+                    removed_duration=round(item["duration"], 3),
+                    removed_size=item["size"],
+                    criterion=(
+                        "same artist + tag title + filename title + "
+                        f"duration within {_DEDUPE_DURATION_TOLERANCE_SECONDS:g}s"
+                    ),
+                    used="tags + filename + duration (no audio fingerprint/hash)",
+                )
+
+    if quarantined:
+        logger.info(
+            "Library folder dedup complete",
+            folder=folder_path,
+            quarantined=quarantined,
+            groups=group_count,
+        )
+    return {
+        "removed": quarantined,
+        "quarantined": quarantined,
+        "groups": group_count,
+    }

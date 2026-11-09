@@ -118,7 +118,8 @@ def _record_peer_stall(username: str | None, filename: str | None = None) -> Non
     if len(recent) >= _PEER_STALL_THRESHOLD:
         _blocked_usernames[uname] = now + _PEER_STALL_COOLDOWN_SECONDS
         logger.warning(
-            "Placed peer on stall cooldown after repeated stalled transfers",
+            "Placed peer on GLOBAL stall cooldown after repeated stalled transfers",
+            scope="peer_globally_blocked",
             username=username,
             stall_count=len(recent),
             cooldown_seconds=_PEER_STALL_COOLDOWN_SECONDS,

@@ -47,6 +47,10 @@ _CLEANUP_DISCOVERY_MIN_INTERVAL_SECONDS: int = int(
 )
 
 _discovery_last_run_at: float = 0.0
+#: Auto-delete is a full folder scan; on a slow volume it took minutes on runs
+#: where discovery was skipped ("scanned=0, auto_delete_ms=177721"). Gate it on
+#: the same interval so back-to-back cleanup passes don't repeat it.
+_auto_delete_last_run_at: float = 0.0
 
 
 # ==============================================================================
@@ -61,7 +65,7 @@ def cleanup_stale_downloads() -> dict[str, Any]:
     maintenance timeout: ``discover_files`` rescans and re-probes every audio
     file, and the reason was previously invisible.
     """
-    global _discovery_last_run_at
+    global _discovery_last_run_at, _auto_delete_last_run_at
 
     started = time.monotonic()
     timings: dict[str, float] = {}
@@ -89,11 +93,13 @@ def cleanup_stale_downloads() -> dict[str, Any]:
 
     auto_deleted = 0
     _t = time.monotonic()
-    try:
-        from services.downloads.download_folder_service import auto_delete_imported_folders
-        auto_deleted = auto_delete_imported_folders()
-    except Exception as exc:
-        logger.debug("Auto-delete imported folders failed", error=str(exc))
+    if time.time() - _auto_delete_last_run_at >= _CLEANUP_DISCOVERY_MIN_INTERVAL_SECONDS:
+        _auto_delete_last_run_at = time.time()
+        try:
+            from services.downloads.download_folder_service import auto_delete_imported_folders
+            auto_deleted = auto_delete_imported_folders()
+        except Exception as exc:
+            logger.debug("Auto-delete imported folders failed", error=str(exc))
     timings["auto_delete_ms"] = round((time.monotonic() - _t) * 1000.0, 1)
     timings["total_ms"] = round((time.monotonic() - started) * 1000.0, 1)
 

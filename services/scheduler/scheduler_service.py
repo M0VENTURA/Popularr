@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
@@ -60,6 +61,18 @@ class ResilientSQLAlchemyJobStore(SQLAlchemyJobStore):
     _RETRY_DELAY = 1.0
 
     def _execute(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        # Do not add jobstore connections to a recovering PostgreSQL. The
+        # global breaker is opened by the first connection failure; every
+        # caller then waits here without touching the server.
+        try:
+            from db.engine import db_outage_retry_after, is_db_outage_active
+
+            _deadline = time.monotonic() + 600.0
+            while is_db_outage_active() and time.monotonic() < _deadline:
+                time.sleep(min(max(db_outage_retry_after(), 1.0), 30.0))
+        except Exception:
+            pass
+
         from tenacity import (
             Retrying,
             retry_if_exception,

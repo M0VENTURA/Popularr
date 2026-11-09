@@ -53,6 +53,17 @@ from typing import Any
 # THE canonical map: internal field name -> the ONE on-disk name
 # ---------------------------------------------------------------------------
 CANONICAL_TAG_NAMES: dict[str, str] = {
+    # ── Standard Vorbis fields with a SPACE-SEPARATED twin ───────────────
+    # ``ALBUM ARTIST`` and ``ALBUMARTIST`` are DIFFERENT Vorbis keys — the
+    # normaliser treats them as the same field, but a file can physically hold
+    # both. Media Center/JRiver-tagged files do exactly that, with different
+    # values (the reported "album artist: Various Artists" beside
+    # "albumartist: Concrete Blonde"). The app wrote only the no-space key, so
+    # the stale space key survived and Navidrome imported a value the app never
+    # saved. Clearing both spellings before the write fixes it and repairs the
+    # file on its next tag write.
+    "album_artist": "ALBUMARTIST",
+    "albumartist": "ALBUMARTIST",
     # ── MusicBrainz entity IDs ────────────────────────────────────────────
     "musicbrainz_albumid": "MUSICBRAINZ_ALBUMID",
     "musicbrainz_album_mbid": "MUSICBRAINZ_ALBUMID",

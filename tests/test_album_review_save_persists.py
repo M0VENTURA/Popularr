@@ -146,7 +146,7 @@ def captured(monkeypatch):
     monkeypatch.setattr(ui, "resolve_music_file_path", lambda p: str(p) if p else None)
     monkeypatch.setattr(
         ui, "update_file_tags",
-        lambda path, tags: (cap.file_writes.append((str(path), dict(tags))) or True),
+        lambda path, tags, **kwargs: (cap.file_writes.append((str(path), dict(tags))) or True),
     )
 
     monkeypatch.setattr(ui, "track_carries_live_state", lambda t: False)
@@ -208,7 +208,7 @@ class TestStagedFieldsReachTheDatabase:
     async def test_staged_disc_number_is_written(self, client, captured):
         await _post(client, {"t1": {"changes": [
             {"field": "disc_number", "label": "Disc #", "current": "1", "proposed": "2"},
-        ]}})
+        ]}}, album_disctotal="2")
         assert any(str(p.get("disc_number")) == "2" for p in captured.db_payloads)
 
     async def test_staged_recording_mbid_is_written(self, client, captured):
@@ -358,6 +358,41 @@ class TestClearingAlbumIdentifiers:
             assert payload.get("discogs_album_id") == "1234"
 
 
+class TestSingleDiscClearsDiscNumbers:
+    """A one-disc release must not keep a bogus disc position anywhere.
+
+    Reported: *"when updating metadata, please ensure disk numbers are updated.
+    A single disk album should have all disk numbers removed from tracks if they
+    have any already on them."*
+    """
+
+    async def test_single_disc_clears_existing_disc_numbers(self, client, captured):
+        await _post(client, album_disctotal="1")
+
+        assert captured.db_payloads
+        assert all(
+            payload.get("disc_number") is None
+            for payload in captured.db_payloads
+            if "disc_number" in payload
+        ), captured.db_payloads
+        assert all(
+            tags.get("disc_number") == ""
+            for _path, tags in captured.file_writes
+            if "disc_number" in tags
+        ), captured.file_writes
+
+    async def test_single_disc_overrides_a_staged_disc_number(self, client, captured):
+        await _post(client, {"t1": {"changes": [
+            {"field": "disc_number", "label": "Disc #", "current": "1", "proposed": "2"},
+        ]}}, album_disctotal="1")
+
+        assert all(
+            payload.get("disc_number") is None
+            for payload in captured.db_payloads
+            if "disc_number" in payload
+        ), captured.db_payloads
+
+
 # ---------------------------------------------------------------------------
 # 2. The SAME fields reach the files
 # ---------------------------------------------------------------------------
@@ -382,7 +417,7 @@ class TestStagedFieldsReachTheFiles:
     async def test_staged_disc_number_reaches_the_file(self, client, captured):
         await _post(client, {"t1": {"changes": [
             {"field": "disc_number", "label": "Disc #", "current": "1", "proposed": "2"},
-        ]}, "album_type": "album", "album_disctotal": "2"})
+        ]}}, album_type="album", album_disctotal="2")
         assert "2" in [str(v) for v in _field_writes(captured, "disc_number")]
 
     async def test_staged_recording_mbid_reaches_the_file(self, client, captured):
@@ -598,7 +633,7 @@ class TestRefusedWritesAreReported:
         monkeypatch.setattr(ui, "db_session", lambda *a, **k: _FakeSession(tracks))
         monkeypatch.setattr(ui, "get_config", lambda: {})
         monkeypatch.setattr(ui, "resolve_music_file_path", lambda p: None)
-        monkeypatch.setattr(ui, "update_file_tags", lambda p, t: True)
+        monkeypatch.setattr(ui, "update_file_tags", lambda p, t, **kwargs: True)
         monkeypatch.setattr(ui, "track_carries_live_state", lambda t: False)
 
         def _boom(payloads):

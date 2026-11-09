@@ -50,9 +50,9 @@ else:
 from db.repositories.tag_repository import get_track_tags
 from services.metadata.tag_names import (
     canonical_tag_name,
+    normalise_tag_name,
     clear_id3_variants,
     clear_vorbis_variants,
-    normalise_tag_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -719,6 +719,38 @@ def _set_flac_front_cover(audio: FLACType, data: bytes, mime: str) -> None:
     audio.add_picture(pic)
 
 
+def _heal_duplicate_album_artist_tags(audio: Any) -> None:
+    """Collapse a file that holds BOTH ``ALBUM ARTIST`` and ``ALBUMARTIST``.
+
+    Vorbis treats them as different keys, so a Media Center/JRiver-tagged file
+    can carry two album artists with different values. The app writes the
+    no-space form; the legacy space form then survives and Navidrome can import
+    the value the app never saved. Keep the app's canonical spelling and remove
+    the rest. A file that has ONLY the legacy spelling is left alone — there is
+    no second value to prove which one is current.
+    """
+    try:
+        keys = [
+            str(key) for key in list(audio.keys())
+            if normalise_tag_name(key) == "albumartist"
+        ]
+    except Exception:
+        return
+    if len(keys) < 2:
+        return
+    keeper = next(
+        (key for key in keys if key.strip().lower() == "albumartist"),
+        keys[0],
+    )
+    for key in keys:
+        if key == keeper:
+            continue
+        try:
+            del audio[key]
+        except Exception:
+            pass
+
+
 def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
     if not MUTAGEN_AVAILABLE:
         logger.error("Mutagen not available for FLAC writing")
@@ -728,6 +760,10 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
         audio = cast(FLACType, FLAC(file_path))
         if audio.tags is None:
             audio.add_tags()
+
+        # Repair duplicate album-artist spellings on EVERY tag write, not only
+        # when this payload happens to carry album_artist.
+        _heal_duplicate_album_artist_tags(audio)
 
         for field, value in tags.items():
             if field in _NON_TAG_KEYS:

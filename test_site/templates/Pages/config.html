@@ -688,8 +688,8 @@
         <div class="col-12 col-md-6">
           <div class="form-check form-switch mb-2">
             <input class="form-check-input" type="checkbox" id="downloads_delete_duplicate_files" {% if config.get('features', {}).get('downloads_duplicate_cleanup', {}).get('delete_duplicate_files', True) %}checked{% endif %}>
-            <label class="form-check-label" for="downloads_delete_duplicate_files"><strong>Auto-delete Duplicate Files in Downloads</strong></label>
-            <small class="d-block text-muted">When enabled, duplicate/false-match files are deleted from the configured Downloads folder only, never from your music library.</small>
+            <label class="form-check-label" for="downloads_delete_duplicate_files"><strong>Handle Duplicate Files Automatically</strong></label>
+            <small class="d-block text-muted">Duplicate/false-match files in the configured Downloads folder are deleted. Duplicate tracks found inside the music library are renamed to <code>*.duplicate</code> for review — never deleted.</small>
           </div>
         </div>
         <div class="col-12 col-md-6">

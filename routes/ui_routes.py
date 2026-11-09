@@ -1946,7 +1946,6 @@ def _write_album_track_file_tags(
     payload: dict[str, Any],
     *,
     strip_disc_numbers: bool,
-    disc_staged: bool,
 ) -> tuple[bool, str]:
     """Write one track's tags to its audio file. Returns ``(ok, file_path)``.
 
@@ -1954,10 +1953,9 @@ def _write_album_track_file_tags(
 
     * the "Cover" genre, mirroring the standalone cover-detection area;
     * the single-disc ``disc_number=""`` clear — ``build_tag_updates`` drops
-      empty values, so it must be pushed explicitly. Skipped when the review
-      supplied a disc number: the strip is an album-level heuristic while a
-      staged value is a confirmed correction, and this line used to undo that
-      correction on the file after the DB had accepted it;
+      empty values, so it must be pushed explicitly. This is ALBUM-WIDE and
+      authoritative: a one-disc release has no meaningful disc position, so a
+      stale "1" (or a staged value) on any track is cleared;
     * the Release Name → ``albumversion`` write/clear, for the same reason (see
       the comment on it below).
     """
@@ -1980,7 +1978,7 @@ def _write_album_track_file_tags(
                     file_tags["genre"] = "; ".join([str(g) for g in existing] + ["Cover"])
             else:
                 file_tags["genre"] = "Cover"
-        if strip_disc_numbers and not disc_staged:
+        if strip_disc_numbers:
             file_tags["disc_number"] = ""
         # ── The RELEASE NAME → the file's ALBUMVERSION frame ────────────────
         # ⚠️ ANOTHER FIELD THAT COULD NOT BE CLEARED, and the one that makes a
@@ -2030,13 +2028,13 @@ def _write_album_track_file_tags(
 
 
 def _write_album_track_files_bounded(
-    jobs: list[tuple[Any, dict, dict, bool, bool]],
+    jobs: list[tuple[Any, dict, dict, bool]],
 ) -> list[tuple[bool, str]]:
     """Run one album save's per-track FILE writes, bounded. SYNC.
 
-    Each job is ``(track_id, track, payload, strip_disc_numbers, disc_staged)``
-    — the exact arguments of :func:`_write_album_track_file_tags`, which does the
-    actual write.
+    Each job is ``(track_id, track, payload, strip_disc_numbers)`` — the exact
+    arguments of :func:`_write_album_track_file_tags`, which does the actual
+    write.
 
     ⚠️ WHY THIS EXISTS. The save used to write each file inside its per-track
     loop, so an album cost N SEQUENTIAL disk passes (each one reads the file
@@ -2060,15 +2058,14 @@ def _write_album_track_files_bounded(
     if not jobs:
         return []
 
-    def _one(job: tuple[Any, dict, dict, bool, bool]) -> tuple[bool, str]:
-        track_id, track, payload, strip_disc_numbers, disc_staged = job
+    def _one(job: tuple[Any, dict, dict, bool]) -> tuple[bool, str]:
+        track_id, track, payload, strip_disc_numbers = job
         try:
-            # ``strip_disc_numbers``/``disc_staged`` are KEYWORD-ONLY on the
-            # phase, so they cannot ride along in an ``*job`` splat.
+            # ``strip_disc_numbers`` is KEYWORD-ONLY on the phase, so it cannot
+            # ride along in an ``*job`` splat.
             return _write_album_track_file_tags(
                 track_id, track, payload,
                 strip_disc_numbers=strip_disc_numbers,
-                disc_staged=disc_staged,
             )
         except Exception as exc:  # defensive: keep the other tracks going
             logger.warning(
@@ -2757,7 +2754,7 @@ async def album_detail(album_path: str) -> Any:
         genre_tracks_kept = 0
         # File-tag work is COLLECTED here and run as one concurrent phase after
         # the loop — see ``_write_album_track_files_concurrently``.
-        _file_jobs: list[tuple[Any, dict, dict, bool, bool]] = []
+        _file_jobs: list[tuple[Any, dict, dict, bool]] = []
         # Per-track DB payloads are likewise collected so the whole album can
         # commit in one transaction instead of paying for one session per row.
         _db_payloads: list[dict[str, Any]] = []
@@ -2946,6 +2943,14 @@ async def album_detail(album_path: str) -> Any:
                     for _sfield, _svalue in _staged_for_track.items():
                         if _sfield not in _STAGED_WRITABLE:
                             continue
+                        # An EXPLICIT empty disc value is a CLEAR, not "nothing to
+                        # do": the Lookup-MBID review stages one when the chosen
+                        # release is single-disc.
+                        if _sfield == "disc_number" and (
+                            _svalue is None or str(_svalue).strip() == ""
+                        ):
+                            payload["disc_number"] = None
+                            continue
                         if _svalue is None or str(_svalue).strip() == "":
                             continue
                         payload[_sfield] = _svalue
@@ -2971,28 +2976,19 @@ async def album_detail(album_path: str) -> Any:
                     if value or f"album_{field}" in form:
                         payload[field] = value
 
-                # Single-disc albums: strip the per-track disc_number so neither
-                # the DB nor the audio file tags carry a bogus disc position.
-                # Only set this when the payload is otherwise being written (the
-                # field is TEXT; an empty string clears the frame on file write).
+                # Single-disc release: strip the per-track disc_number so neither
+                # the DB nor the audio file tags carry a meaningless position.
                 #
-                # ⚠️ An EXPLICITLY REVIEWED disc number wins over the inference
-                # below. The strip is an album-level heuristic about the library's
-                # existing tags; the staged value is the user having just confirmed
-                # the correct position against MusicBrainz. Without this guard,
-                # saving a review for a track whose disc number was actually wrong
-                # threw the correction away and wrote back the bogus value —
-                # silently, because the surrounding save still reported success.
-                # ``disc_number`` is in ``_STAGED_WRITABLE``, so this is also what
-                # that whitelist promises the user.
-                _disc_staged = bool(_staged_updates.get(str(track_id), {}).get("disc_number"))
-                if _strip_disc_numbers and not _disc_staged:
-                    _cur_disc = str(track.get("disc_number") or "").strip()
-                    # A "0" disc is a bogus single-disc value — always clear it.
-                    if _cur_disc and _cur_disc != "0":
-                        payload["disc_number"] = ""
-                    elif _cur_disc == "0":
-                        payload["disc_number"] = ""
+                # ⚠️ THIS IS ALBUM-WIDE AND AUTHORITATIVE. It deliberately
+                # overrides a staged value: a one-disc release has no disc 2, so
+                # keeping a "staged correction" there would preserve exactly the
+                # bogus value the user asked to remove. Multi-disc releases still
+                # keep each reviewed disc number.
+                #
+                # NULL, not "" — the canonical clear (tracks.clear_disc_number)
+                # uses NULL; the file writer pushes "" to delete the frame.
+                if _strip_disc_numbers:
+                    payload["disc_number"] = None
                 elif _multi_disc:
                     # Multi-disc: ensure every track has a non-empty disc_number
                     # (default to "1" when unset, and never "0") so the album
@@ -3038,7 +3034,7 @@ async def album_detail(album_path: str) -> Any:
                 # this point, so the worker sees exactly what this track was saved
                 # with.
                 _file_jobs.append(
-                    (track_id, track, payload, _strip_disc_numbers, _disc_staged)
+                    (track_id, track, payload, _strip_disc_numbers)
                 )
 
                 # ── Live-state revert: ONLY when the album is RECLASSIFIED ──────

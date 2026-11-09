@@ -141,13 +141,22 @@ class TestPlaylistOutcomes:
             "D", {"failed": 1}
         ) == "failed"
         assert scan_log.playlist_outcome("E", {"skipped": 1}) == "skipped"
+        # A playlist that matches its resolved subset but has an ID awaiting a
+        # Navidrome import is PARTIAL — not a server rejection / failure.
+        assert scan_log.playlist_outcome(
+            "P", {"unchanged": 1, "partial": 1, "unresolved_ids": ["x"]}
+        ) == "partial"
         text = "\n".join(lines)
         assert 'Created playlist: "A"' in text
         assert "24 tracks" in text
         assert 'Could not update playlist: "D"' in text
+        assert 'Playlist partially synced: "P"' in text
+        assert "awaiting Navidrome import" in text
+        assert 'Could not update playlist: "P"' not in text
         counts = scan_log.playlist_outcome_summary()
         assert counts == {
-            "created": 1, "updated": 1, "unchanged": 1, "skipped": 1, "failed": 1
+            "created": 1, "updated": 1, "unchanged": 1, "skipped": 1,
+            "partial": 1, "failed": 1,
         }
 
     def test_summary_reports_all_buckets(self, monkeypatch):

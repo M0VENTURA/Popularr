@@ -5,6 +5,7 @@ High-level orchestration for library and Navidrome scanning operations.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import datetime
@@ -35,6 +36,11 @@ from services.scanning.navidrome_import import (
 from services.popularity.pipeline import run_popularity_scan
 
 logger = structlog.get_logger(__name__)
+
+#: Crash-recovery wait for the legacy full-library loop; tests set this to 1s.
+_DB_OUTAGE_MAX_WAIT_SECONDS = float(
+    os.environ.get("POPULARR_DB_OUTAGE_MAX_WAIT_SECONDS", "600") or 600
+)
 
 # Display names for the album loop's stage bands. The status bar shows these,
 # and until now the SCAN LOG said nothing at all about a band change — so an
@@ -174,7 +180,20 @@ def _run_artist_scan_pipeline_inner(
 
     log_unified(f"[SCAN_PIPELINE] Starting artist pipeline: {artist_name} (force={force})")
     try:
+        from db.engine import (
+            DatabaseUnavailable,
+            db_outage_retry_after,
+            is_db_outage_active,
+        )
+    except Exception:  # pragma: no cover - engine import must exist
+        DatabaseUnavailable = RuntimeError  # type: ignore[assignment,misc]
+        is_db_outage_active = lambda: False  # type: ignore[assignment]
+        db_outage_retry_after = lambda: 0.0  # type: ignore[assignment]
+
+    try:
         record_scan("artist", "started", message=f"Artist scan: {artist_name}", artist=artist_name)
+    except DatabaseUnavailable:
+        raise
     except Exception as e:
         logger.debug("Failed to record scan start (DB may be offline)", error=str(e))
     
@@ -213,6 +232,8 @@ def _run_artist_scan_pipeline_inner(
                 # artist; a targeted scan leaves this None so it verifies here.
                 freshness_verified=freshness_verified,
             )
+            if is_db_outage_active():
+                raise DatabaseUnavailable(db_outage_retry_after())
         else:
             log_unified(f"Navidrome import skipped for '{artist_name}' (no Navidrome artist ID found)")
 
@@ -234,6 +255,10 @@ def _run_artist_scan_pipeline_inner(
             progress_callback=_stage_band_cb,
             **(scan_options or {}),
         )
+        # The popularity pass catches per-album errors internally; if the
+        # shared breaker opened, do NOT report this artist as complete.
+        if is_db_outage_active():
+            raise DatabaseUnavailable(db_outage_retry_after())
 
         # ⭐ ``features.run_essentia`` is the operator's switch. This pass used
         # to run regardless, so a full scan paid the Essentia setup (and any
@@ -275,6 +300,9 @@ def _run_artist_scan_pipeline_inner(
         except Exception:
             pass
 
+    except DatabaseUnavailable:
+        # Infrastructure, not this artist: let the caller pause/retry.
+        raise
     except Exception as exc:
         log_unified(f"Artist scan failed: {exc}")
         try:
@@ -412,24 +440,74 @@ def run_full_library_scan(force: bool = False, restart: bool = False):
                     pass
                 break
 
+            try:
+                from db.engine import (
+                    DatabaseUnavailable,
+                    db_outage_retry_after,
+                    is_db_outage_active,
+                    wait_for_db_available,
+                )
+            except Exception:  # pragma: no cover
+                DatabaseUnavailable = RuntimeError  # type: ignore[assignment,misc]
+                is_db_outage_active = lambda: False  # type: ignore[assignment]
+                db_outage_retry_after = lambda: 0.0  # type: ignore[assignment]
+                wait_for_db_available = lambda **_: True  # type: ignore[assignment]
+
             write_progress_with_current_artist(progress, "library_scan", True, current_artist=name)
 
-            try:
-                run_artist_scan_pipeline(
-                    name,
-                    force=force,
-                    freshness_verified=_freshness_verified,
-                )
-            except Exception as exc:
-                # 🚨 CRITICAL: Catch fatal database disconnections and abort immediately
-                # to prevent ruining the scan progress checkpoint file.
-                if "OperationalError" in str(exc) or "connection" in str(exc).lower():
-                    log_unified("🛑 CRITICAL: Database connection lost. Aborting full library scan to protect checkpoint data.")
-                    logger.exception("Database offline. Aborting full scan.")
+            while True:
+                if is_db_outage_active():
+                    log_unified(
+                        f"[SCAN_PIPELINE] Database unavailable before '{name}' — "
+                        f"pausing (retry in {db_outage_retry_after():.0f}s)"
+                    )
+                    if not wait_for_db_available(timeout_seconds=_DB_OUTAGE_MAX_WAIT_SECONDS):
+                        log_unified("🛑 Database did not recover — aborting full library scan")
+                        _stopped = True
+                        break
+                try:
+                    run_artist_scan_pipeline(
+                        name,
+                        force=force,
+                        freshness_verified=_freshness_verified,
+                    )
+                    if is_db_outage_active():
+                        # The artist pipeline swallowed the DB failure; pause and
+                        # retry THIS artist rather than checkpointing past it.
+                        if not wait_for_db_available(timeout_seconds=_DB_OUTAGE_MAX_WAIT_SECONDS):
+                            log_unified("🛑 Database did not recover — aborting full library scan")
+                            _stopped = True
+                            break
+                        continue
                     break
-                
-                logger.exception("[SCAN_PIPELINE] Artist scan crashed (continuing)", artist=name, error=str(exc))
-                log_unified(f"Artist scan failed for '{name}': {exc} — continuing")
+                except DatabaseUnavailable:
+                    log_unified(
+                        f"[SCAN_PIPELINE] Database unavailable during '{name}' — "
+                        "pausing, then retrying the same artist"
+                    )
+                    if not wait_for_db_available(timeout_seconds=_DB_OUTAGE_MAX_WAIT_SECONDS):
+                        log_unified("🛑 Database did not recover — aborting full library scan")
+                        _stopped = True
+                        break
+                    continue
+                except Exception as exc:
+                    # 🚨 CRITICAL: Catch fatal database disconnections and abort immediately
+                    # to prevent ruining the scan progress checkpoint file.
+                    if (
+                        "OperationalError" in str(exc)
+                        or "connection" in str(exc).lower()
+                        or is_db_outage_active()
+                    ):
+                        log_unified("🛑 CRITICAL: Database connection lost. Aborting full library scan to protect checkpoint data.")
+                        logger.exception("Database offline. Aborting full scan.")
+                        break
+
+                    logger.exception("[SCAN_PIPELINE] Artist scan crashed (continuing)", artist=name, error=str(exc))
+                    log_unified(f"Artist scan failed for '{name}': {exc} — continuing")
+                    break
+
+            if _stopped:
+                break
 
             save_artist_scan_checkpoint(name, checkpoint_path)
             

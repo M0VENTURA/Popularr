@@ -266,8 +266,13 @@
       const note = change.note
         ? ' <span class="text-muted fst-italic">(' + esc(change.note) + ')</span>'
         : '';
+      // A staged CLEAR (e.g. disc # on a single-disc release) has an empty
+      // ``proposed``; render it as "empty" rather than a blank arrow target.
+      const proposed = (change.proposed === '' || change.proposed == null)
+        ? '<em>empty</em>'
+        : '<strong>' + esc(change.proposed) + '</strong>';
       return '<div><span class="text-muted">' + esc(label) + ':</span> ' +
-        current + ' → <strong>' + esc(change.proposed) + '</strong>' + note + '</div>';
+        current + ' → ' + proposed + note + '</div>';
     }).join('');
 
     tr.innerHTML =

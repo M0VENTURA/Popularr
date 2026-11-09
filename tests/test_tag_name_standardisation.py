@@ -135,6 +135,66 @@ def test_unmapped_fields_stay_unmapped() -> None:
         assert canonical_tag_name(field) is None
 
 
+def test_album_artist_space_and_nospace_spellings_are_one_field() -> None:
+    """Vorbis treats ``ALBUM ARTIST`` and ``ALBUMARTIST`` as different keys.
+
+    Reported: a file carried BOTH, with different values — the app wrote
+    ``albumartist`` while the legacy ``album artist`` kept the compilation's
+    "Various Artists". Navidrome imported the legacy value, which the app had
+    never saved. One canonical name + variant clearing removes both.
+    """
+    assert canonical_tag_name("album_artist") == "ALBUMARTIST"
+    assert canonical_tag_name("albumartist") == "ALBUMARTIST"
+    assert is_variant_of("ALBUM ARTIST", "ALBUMARTIST")
+    assert is_variant_of("ALBUM_ARTIST", "ALBUMARTIST")
+
+
+def test_clearing_album_artist_removes_the_space_twin() -> None:
+    audio = {
+        "ALBUM ARTIST": ["Various Artists"],
+        "albumartist": ["Concrete Blonde"],
+        "ARTIST": ["Concrete Blonde"],
+    }
+
+    clear_vorbis_variants(audio, "album_artist")
+
+    assert "ALBUM ARTIST" not in audio, "the stale space-separated tag survived"
+    assert "albumartist" not in audio, "the old no-space tag survived"
+    assert audio.get("ARTIST") == ["Concrete Blonde"], "an unrelated field was removed"
+
+
+def test_a_flac_write_heals_a_file_with_both_album_artist_tags() -> None:
+    from services.metadata.tag_file_service import (
+        _heal_duplicate_album_artist_tags,
+    )
+
+    audio = {
+        "ALBUM ARTIST": ["Various Artists"],
+        "albumartist": ["Concrete Blonde"],
+        "ARTIST": ["Concrete Blonde"],
+    }
+
+    _heal_duplicate_album_artist_tags(audio)
+
+    assert audio == {
+        "albumartist": ["Concrete Blonde"],
+        "ARTIST": ["Concrete Blonde"],
+    }
+
+
+def test_a_legacy_only_album_artist_is_not_removed() -> None:
+    from services.metadata.tag_file_service import (
+        _heal_duplicate_album_artist_tags,
+    )
+
+    audio = {"ALBUM ARTIST": ["Concrete Blonde"]}
+    _heal_duplicate_album_artist_tags(audio)
+
+    assert audio == {"ALBUM ARTIST": ["Concrete Blonde"]}, (
+        "removing the only album-artist tag would lose the value"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2. Variant clearing — the part that removes the duplicates
 # ---------------------------------------------------------------------------

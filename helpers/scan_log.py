@@ -226,6 +226,7 @@ def scan_completed(
             f"{int(playlists.get('updated') or 0)} updated · "
             f"{int(playlists.get('unchanged') or 0)} unchanged · "
             f"{int(playlists.get('skipped') or 0)} skipped · "
+            f"{int(playlists.get('partial') or 0)} partial · "
             f"{int(playlists.get('failed') or 0)} failed"
         )
     for index, line in enumerate(lines):
@@ -402,6 +403,7 @@ _PLAYLIST_TALLY: dict[str, int] = {
     "updated": 0,
     "unchanged": 0,
     "skipped": 0,
+    "partial": 0,
     "failed": 0,
 }
 _PLAYLIST_LOCK = threading.Lock()
@@ -436,7 +438,7 @@ def emit_playlist_summary(*, config: dict[str, Any] | None = None) -> dict[str, 
             "Playlist refresh complete: "
             f"{counts['created']} created · {counts['updated']} updated · "
             f"{counts['unchanged']} unchanged · {counts['skipped']} skipped · "
-            f"{counts['failed']} failed",
+            f"{counts['partial']} partial · {counts['failed']} failed",
             **counts,
         )
     return counts
@@ -454,12 +456,12 @@ def playlist_outcome(
     res = sync_res or {}
     created = int(res.get("created") or 0)
     updated = int(res.get("updated") or 0)
-    unchanged = int(res.get("unchanged") or 0)
     skipped = int(res.get("skipped") or 0)
     failed = int(res.get("failed") or 0)
     partial = int(res.get("partial") or 0)
+    unresolved = len(res.get("unresolved_ids") or [])
 
-    if failed or (partial and not created and not updated):
+    if failed:
         outcome = "failed"
     elif created:
         outcome = "created"
@@ -467,6 +469,11 @@ def playlist_outcome(
         outcome = "updated"
     elif skipped:
         outcome = "skipped"
+    elif partial:
+        # In sync with its RESOLVED subset, but known-unresolved IDs are
+        # awaiting a Navidrome import. This is NOT a server rejection: the
+        # old mapping reported every such playlist as `failed` on every scan.
+        outcome = "partial"
     else:
         outcome = "unchanged"
 
@@ -486,11 +493,7 @@ def playlist_outcome(
                 "playlist.created", f'Created playlist: "{name}"{count}'
             )
     elif outcome == "failed":
-        reason = (
-            f"{failed} client failure(s)"
-            if failed
-            else "server rejected the update"
-        )
+        reason = f"{failed} client failure(s)"
         if cfg["playlists"]["show_failed"]:
             log_event(
                 "playlist.failed",
@@ -503,6 +506,19 @@ def playlist_outcome(
                 "playlist.failed",
                 f'Could not update playlist: "{name}" · Reason: {reason}',
             )
+    elif outcome == "partial":
+        # Debug evidence, not a WARN: the playlist matches its resolvable
+        # subset and is waiting for Navidrome to index the missing track(s).
+        detail = (
+            f" · {unresolved} track(s) awaiting Navidrome import"
+            if unresolved
+            else ""
+        )
+        log_evidence(
+            "playlist.partial",
+            f'Playlist partially synced: "{name}"{count}{detail}',
+            unresolved=unresolved,
+        )
     elif outcome == "updated":
         # A batch refresh (scan/global rebuild) reports one summary; a single
         # manual Regenerate names the playlist it changed.

@@ -69,6 +69,7 @@ _ALBUM_FIELD_SPECS: tuple[tuple[str, str, str], ...] = (
     ("album_barcode", "Barcode", "barcode"),
     ("album_releasedate", "Release Date", "releasedate"),
     ("album_media", "Media Format", "media"),
+    ("album_disctotal", "Disc Total", "disctotal"),
     ("album_releasecountry", "Release Country", "releasecountry"),
 )
 
@@ -110,6 +111,19 @@ def _as_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _disc_count(metadata: dict[str, Any]) -> int:
+    """Number of media in the release, or 0 when MusicBrainz did not say."""
+    raw = metadata.get("disc_count")
+    if raw in (None, "", 0):
+        raw = metadata.get("disctotal")
+    if raw in (None, ""):
+        return 0
+    try:
+        return int(str(raw).split("/")[0].strip())
+    except (TypeError, ValueError):
+        return 0
 
 
 def _norm(value: Any) -> str:
@@ -392,6 +406,7 @@ def _album_level_proposals(
         "album_barcode": _current("barcode"),
         "album_releasedate": _current("releasedate"),
         "album_media": _current("media"),
+        "album_disctotal": _current("disctotal"),
         "album_releasecountry": _current("releasecountry"),
         "album_genres": _current("genres"),
     }
@@ -506,6 +521,10 @@ def _track_proposals(
     the release metadata, joined on the recording MBID.
     """
     by_id = {_as_text(row.get("id")): row for row in local_tracks}
+    # A one-disc release carries no meaningful disc position: every track is
+    # disc 1, and storing/displaying "1" makes Navidrome split or mislabel the
+    # album. The review proposes the CLEAR and the save path enforces it.
+    single_disc = _disc_count(metadata) == 1
 
     enrichment: dict[str, dict[str, Any]] = {}
     for mb_track in metadata.get("tracks") or []:
@@ -630,7 +649,9 @@ def _track_proposals(
         current_map: dict[str, str] = {
             "title": _as_text(local.get("title")),
             "track_number": _as_text(local.get("track_number")),
-            "disc_number": _as_text(local.get("disc_number") or "1"),
+            # NOT ``or "1"``: a missing disc number is already correct on a
+            # single-disc album; masking it as "1" hid the clear.
+            "disc_number": _as_text(local.get("disc_number")),
             "mbid": _as_text(local.get("mbid")),
             # A name LIST, exactly like genres: the column is TEXT but holds a
             # JSON array (``["A", "B"]``) while MusicBrainz hands back a comma
@@ -647,7 +668,9 @@ def _track_proposals(
         proposed_map: dict[str, str] = {
             "title": _as_text(entry.get("mb_title")),
             "track_number": _as_text(entry.get("mb_track_number")),
-            "disc_number": _as_text(entry.get("mb_disc_number")),
+            "disc_number": (
+                "" if single_disc else _as_text(entry.get("mb_disc_number"))
+            ),
             "mbid": rec_mbid,
             "writer": _genres_text(mb_track.get("writer")),
             # Mirror the SCAN's source: release-GROUP genres for a single-artist
@@ -664,6 +687,21 @@ def _track_proposals(
 
         for field, label, _key in _TRACK_FIELD_SPECS:
             if field in ignored:
+                continue
+            # Single-disc release: an EXISTING disc number is a leftover, not a
+            # position. Propose the clear even though the proposal is empty —
+            # the generic ``if not proposed`` guard below would otherwise hide
+            # exactly the edit the user asked for.
+            if field == "disc_number" and single_disc:
+                current_disc = current_map.get("disc_number", "")
+                if current_disc and current_disc != "0":
+                    changes.append({
+                        "field": "disc_number",
+                        "label": label,
+                        "current": current_disc,
+                        "proposed": "",
+                        "clear": True,
+                    })
                 continue
             proposed = proposed_map.get(field, "")
             if not proposed:

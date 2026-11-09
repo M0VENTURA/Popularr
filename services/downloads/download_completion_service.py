@@ -861,7 +861,13 @@ def _block_peer_for_queue_item(
                 try:
                     from services.downloads.download_pipeline_service import _block_peer
                     _block_peer(username, remote)
-                    logger.warning("Blocked peer after mismatched download", queue_id=queue_id, username=username, filename=remote[:120])
+                    logger.warning(
+                        "Blocked peer/file combination after mismatched download",
+                        scope="peer_track_cooldown",
+                        queue_id=queue_id,
+                        username=username,
+                        filename=remote[:120],
+                    )
                 except Exception as _be:
                     logger.debug("Peer block skipped", queue_id=queue_id, error=str(_be))
                 break
@@ -2194,7 +2200,12 @@ def _try_match_slskd_completed(
         return "matched", match_found, abs_path, match_source
 
     from db.repositories.queue import mark_failed
-    _delete_mismatched_download(abs_path, queue_id, f"rejected ({match_source})")
+    # The exact expected/observed evidence, not a bare "rejected (metadata)".
+    _delete_mismatched_download(
+        abs_path,
+        queue_id,
+        _discard_detail_sentence(_discard_detail, match_source),
+    )
     _block_peer_for_queue_item(queue_id, found_fn)
     _record_discarded_download(
         item=item,
@@ -2263,7 +2274,12 @@ def _try_match_exact_candidates(
         )
         if not is_match:
             from db.repositories.queue import mark_failed
-            _delete_mismatched_download(candidate, queue_id, f"rejected for exact filename match ({match_source})")
+            _delete_mismatched_download(
+                candidate,
+                queue_id,
+                "exact filename match — "
+                + _discard_detail_sentence(_discard_detail, match_source),
+            )
             _block_peer_for_queue_item(queue_id, found_fn)
             _record_discarded_download(
                 item=item,
@@ -2308,17 +2324,38 @@ def _try_match_fuzzy_candidates(
         _cand_base = os.path.basename(candidate)
         _is_expected_base = _cand_base.lower() in _expected_bases or _cand_base in _expected_bases
 
+        _meta_detail: dict[str, Any] = {}
         try:
             from services.queue.queue_metadata_matcher import _metadata_matches_queue_item
-            meta_state = _metadata_matches_queue_item(candidate, item)
+            meta_state = _metadata_matches_queue_item(
+                candidate, item, detail=_meta_detail
+            )
         except Exception:
             meta_state = None
 
         if meta_state is False:
             if _is_expected_base:
-                _delete_mismatched_download(candidate, queue_id, "metadata mismatch")
+                # Name the expected and observed values, so "(Dust)" can be
+                # verified instead of guessed at from a bare "metadata mismatch".
+                _meta_reason = _discard_detail_sentence(_meta_detail, "metadata")
+                _delete_mismatched_download(
+                    candidate,
+                    queue_id,
+                    _meta_reason or "metadata mismatch",
+                )
+                _record_discarded_download(
+                    item=item,
+                    queue_id=queue_id,
+                    detail=_meta_detail,
+                    match_source="metadata",
+                    filename=fn_key,
+                )
                 _block_peer_for_queue_item(queue_id, found_fn)
-                mark_failed(queue_id, "Downloaded file did not match queue item; deleted and rescheduled")
+                mark_failed(
+                    queue_id,
+                    _meta_reason
+                    or "Downloaded file did not match queue item; deleted and rescheduled",
+                )
                 return "failed", None, None, ""
             continue
 

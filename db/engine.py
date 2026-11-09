@@ -7,6 +7,8 @@ management for the Popularr database, powered by PostgreSQL & SQLAlchemy 2.0.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Generator
 
@@ -345,6 +347,199 @@ def _is_transient_db_error(exc: BaseException) -> bool:
     return False
 
 
+class DatabaseUnavailable(RuntimeError):
+    """Raised while the process-wide DB outage breaker is open.
+
+    Deliberately NOT an ``OperationalError``: callers must be able to tell
+    "the database is recovering, do not hammer it" apart from a query error.
+    """
+
+    def __init__(self, retry_after: float):
+        self.retry_after = max(0.0, float(retry_after))
+        super().__init__(
+            "database unavailable (recovering from a restart); "
+            f"retry in {self.retry_after:.0f}s"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Crash-recovery circuit breaker
+# ---------------------------------------------------------------------------
+# ⚠️ WHY THIS EXISTS. When PostgreSQL PANICs/restarts, every scan artist
+# continued to open connections, retry 6 times, fail, and move on. With 1,000+
+# artists that is a constant connection storm while the server is replaying
+# WAL — it lengthens recovery and floods every log. The first connection-level
+# failure opens a short breaker; all other callers fail fast without touching
+# the server, and a single probe per few seconds checks for recovery.
+_DB_OUTAGE_LOCK = threading.Lock()
+_DB_OUTAGE_UNTIL = 0.0
+_DB_OUTAGE_BACKOFF = 0.0
+_DB_OUTAGE_PROBE_AT = 0.0
+_DB_OUTAGE_PROBE_IN_FLIGHT = False
+#: Nested ``db_session`` calls on the probe's own thread must be allowed to
+#: use the connection the outer probe is holding. Depth is per-thread.
+_DB_PROBE_LOCAL = threading.local()
+_DB_OUTAGE_INITIAL_SECONDS = 10.0
+_DB_OUTAGE_MAX_SECONDS = 60.0
+_DB_OUTAGE_PROBE_INTERVAL_SECONDS = 5.0
+
+
+def db_outage_retry_after() -> float:
+    """Seconds until the breaker allows another probe (0 when closed)."""
+    with _DB_OUTAGE_LOCK:
+        if _DB_OUTAGE_UNTIL <= 0.0:
+            return 0.0
+        return max(0.0, _DB_OUTAGE_UNTIL - time.monotonic())
+
+
+def is_db_outage_active() -> bool:
+    return db_outage_retry_after() > 0.0
+
+
+def _is_connection_level_db_error(exc: BaseException) -> bool:
+    """True only for connection/startup failures, never a lock or query error.
+
+    ⚠️ Do NOT use ``is_transient_pg_startup_error`` here: it treats EVERY
+    SQLAlchemy ``OperationalError`` as transient, including SQLite's
+    ``no such table``. That opened the breaker during unit tests (and would
+    open it for any unrelated query error), pausing the scan for no reason.
+    """
+    msg = str(exc or "").lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "the database system is in recovery mode",
+            "the database system is starting up",
+            "the database system was interrupted",
+            "is shutting down",
+            "cannot connect now",
+            "terminating connection",
+            "could not connect to server",
+            "connection refused",
+            "server closed the connection unexpectedly",
+            "connection timed out",
+            "unexpected eof on client connection",
+        )
+    )
+
+
+def _note_db_outage(exc: BaseException) -> None:
+    """Open or extend the breaker after a real connection failure."""
+    if not _is_connection_level_db_error(exc):
+        return
+
+    global _DB_OUTAGE_UNTIL, _DB_OUTAGE_BACKOFF, _DB_OUTAGE_PROBE_AT
+
+    with _DB_OUTAGE_LOCK:
+        now = time.monotonic()
+        was_open = _DB_OUTAGE_UNTIL > 0.0
+        if was_open and now < _DB_OUTAGE_UNTIL:
+            # A fail-fast caller (or an early probe) is not new evidence.
+            return
+        _DB_OUTAGE_BACKOFF = min(
+            max(_DB_OUTAGE_BACKOFF * 2.0, _DB_OUTAGE_INITIAL_SECONDS),
+            _DB_OUTAGE_MAX_SECONDS,
+        )
+        _DB_OUTAGE_UNTIL = now + _DB_OUTAGE_BACKOFF
+        _DB_OUTAGE_PROBE_AT = now + min(
+            _DB_OUTAGE_PROBE_INTERVAL_SECONDS, _DB_OUTAGE_BACKOFF
+        )
+        seconds = _DB_OUTAGE_BACKOFF
+
+    if was_open:
+        logger.debug(
+            "Database still unavailable — breaker extended",
+            retry_after_seconds=round(seconds, 1),
+        )
+    else:
+        logger.warning(
+            "Database unavailable — pausing database access",
+            retry_after_seconds=round(seconds, 1),
+            error=str(exc)[:300],
+        )
+
+
+def reset_db_outage() -> None:
+    """Close the breaker (a connection succeeded). Also used by tests."""
+    global _DB_OUTAGE_UNTIL, _DB_OUTAGE_BACKOFF, _DB_OUTAGE_PROBE_AT
+    global _DB_OUTAGE_PROBE_IN_FLIGHT
+
+    with _DB_OUTAGE_LOCK:
+        was_open = _DB_OUTAGE_UNTIL > 0.0
+        _DB_OUTAGE_UNTIL = 0.0
+        _DB_OUTAGE_BACKOFF = 0.0
+        _DB_OUTAGE_PROBE_AT = 0.0
+        _DB_OUTAGE_PROBE_IN_FLIGHT = False
+        try:
+            _DB_PROBE_LOCAL.depth = 0
+        except Exception:
+            pass
+    if was_open:
+        logger.info("Database available again — resuming database access")
+
+
+def _claim_db_probe() -> bool:
+    """May this caller attempt a connection?
+
+    Closed breaker → yes. Open breaker → only one probe per interval; every
+    other caller raises ``DatabaseUnavailable`` without opening a socket.
+    """
+    global _DB_OUTAGE_PROBE_IN_FLIGHT, _DB_OUTAGE_PROBE_AT
+    with _DB_OUTAGE_LOCK:
+        now = time.monotonic()
+        if _DB_OUTAGE_UNTIL <= 0.0:
+            return True
+        # The probe's own nested sessions reuse its connection.
+        if getattr(_DB_PROBE_LOCAL, "depth", 0) > 0:
+            _DB_PROBE_LOCAL.depth += 1
+            return True
+        if _DB_OUTAGE_PROBE_IN_FLIGHT:
+            return False
+        if now < _DB_OUTAGE_PROBE_AT:
+            return False
+        _DB_OUTAGE_PROBE_IN_FLIGHT = True
+        _DB_PROBE_LOCAL.depth = 1
+        _DB_OUTAGE_PROBE_AT = now + _DB_OUTAGE_PROBE_INTERVAL_SECONDS
+        return True
+
+
+def _release_db_probe() -> None:
+    global _DB_OUTAGE_PROBE_IN_FLIGHT
+    with _DB_OUTAGE_LOCK:
+        depth = getattr(_DB_PROBE_LOCAL, "depth", 0)
+        if depth <= 0:
+            # Not the probe: do NOT clear another thread's in-flight flag.
+            return
+        depth -= 1
+        _DB_PROBE_LOCAL.depth = depth
+        if depth == 0:
+            _DB_OUTAGE_PROBE_IN_FLIGHT = False
+
+
+def wait_for_db_available(
+    *,
+    timeout_seconds: float | None = None,
+    poll_seconds: float = 1.0,
+) -> bool:
+    """Block (without connecting) until the breaker closes.
+
+    Returns False when ``timeout_seconds`` elapses first. The caller's next
+    session acquisition becomes the probe.
+    """
+    deadline = (
+        None
+        if timeout_seconds is None
+        else time.monotonic() + max(0.0, float(timeout_seconds))
+    )
+    while True:
+        retry_after = db_outage_retry_after()
+        if retry_after <= 0.0:
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(min(max(retry_after, 0.25), max(0.25, poll_seconds)))
+
+
 # Number of acquisition attempts + backoff for transient DB errors.
 # PostgreSQL crash-recovery can take 10-30s ("database system was
 # interrupted ... in recovery mode"); the retry must ride through that
@@ -359,71 +554,117 @@ _DB_RETRY_MAX_SECONDS = 10.0
 
 @contextmanager
 def db_session(retries: int = _DB_RETRY_ATTEMPTS) -> Generator[Session, None, None]:
-    """Sync context manager yielding a Session, auto-committing on success."""
+    """Sync context manager yielding a Session, auto-committing on success.
+
+    While the outage breaker is open, callers that are not the current probe
+    fail fast with ``DatabaseUnavailable`` — they never open a socket.
+    """
+    if not _claim_db_probe():
+        raise DatabaseUnavailable(db_outage_retry_after())
+
     def _acquire_session() -> Session:
         return get_session_factory()()
 
     def _dispose_before_retry(retry_state: Any) -> None:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        if exc is not None:
+            _note_db_outage(exc)
         if _ENGINE:
             _ENGINE.dispose()
         logger.warning(
             "Transient database error, retrying session acquisition",
             attempt=retry_state.attempt_number,
-            exception=str(retry_state.outcome.exception()) if retry_state.outcome else None,
+            exception=str(exc) if exc is not None else None,
         )
 
-    session = Retrying(
-        stop=stop_after_attempt(max(1, retries)),
-        wait=wait_exponential(multiplier=_DB_RETRY_BASE_SECONDS, exp_base=2, min=0.3, max=_DB_RETRY_MAX_SECONDS),
-        retry=retry_if_exception(_is_transient_db_error),
-        reraise=True,
-        before_sleep=_dispose_before_retry,
-    )(_acquire_session)
-
+    session = None
     try:
+        session = Retrying(
+            stop=stop_after_attempt(max(1, retries)),
+            wait=wait_exponential(multiplier=_DB_RETRY_BASE_SECONDS, exp_base=2, min=0.3, max=_DB_RETRY_MAX_SECONDS),
+            retry=retry_if_exception(_is_transient_db_error),
+            reraise=True,
+            before_sleep=_dispose_before_retry,
+        )(_acquire_session)
+
         yield session
         session.commit()
+        reset_db_outage()
     except Exception as exc:
-        session.rollback()
-        if _is_transient_db_error(exc) and _ENGINE:
-            _ENGINE.dispose()
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+        if _is_transient_db_error(exc):
+            _note_db_outage(exc)
+            if _ENGINE:
+                _ENGINE.dispose()
         raise
     finally:
-        session.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        _release_db_probe()
 
 
 @asynccontextmanager
 async def async_db_session(retries: int = _DB_RETRY_ATTEMPTS) -> AsyncGenerator[AsyncSession, None]:
-    """Async context manager yielding an AsyncSession (asyncpg)."""
+    """Async context manager yielding an AsyncSession (asyncpg).
+
+    Shares the same outage breaker as the sync path.
+    """
+    if not _claim_db_probe():
+        raise DatabaseUnavailable(db_outage_retry_after())
+
     async def _acquire_session() -> AsyncSession:
         return get_async_session_factory()()
 
     def _dispose_before_retry(retry_state: Any) -> None:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        if exc is not None:
+            _note_db_outage(exc)
         if _ASYNC_ENGINE:
             _ASYNC_ENGINE.sync_engine.dispose()
         logger.warning(
             "Transient async database error, retrying session acquisition",
             attempt=retry_state.attempt_number,
+            exception=str(exc) if exc is not None else None,
         )
 
-    session = await AsyncRetrying(
-        stop=stop_after_attempt(max(1, retries)),
-        wait=wait_exponential(multiplier=_DB_RETRY_BASE_SECONDS, exp_base=2, min=0.3, max=_DB_RETRY_MAX_SECONDS),
-        retry=retry_if_exception(_is_transient_db_error),
-        reraise=True,
-        before_sleep=_dispose_before_retry,
-    )(_acquire_session)
-
+    session = None
     try:
+        session = await AsyncRetrying(
+            stop=stop_after_attempt(max(1, retries)),
+            wait=wait_exponential(multiplier=_DB_RETRY_BASE_SECONDS, exp_base=2, min=0.3, max=_DB_RETRY_MAX_SECONDS),
+            retry=retry_if_exception(_is_transient_db_error),
+            reraise=True,
+            before_sleep=_dispose_before_retry,
+        )(_acquire_session)
+
         yield session
         await session.commit()
+        reset_db_outage()
     except Exception as exc:
-        await session.rollback()
-        if _is_transient_db_error(exc) and _ASYNC_ENGINE:
-            _ASYNC_ENGINE.sync_engine.dispose()
+        if session is not None:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+        if _is_transient_db_error(exc):
+            _note_db_outage(exc)
+            if _ASYNC_ENGINE:
+                _ASYNC_ENGINE.sync_engine.dispose()
         raise
     finally:
-        await session.close()
+        if session is not None:
+            try:
+                await session.close()
+            except Exception:
+                pass
+        _release_db_probe()
 
 
 # ---------------------------------------------------------------------------

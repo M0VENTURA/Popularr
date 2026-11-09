@@ -10,6 +10,7 @@ Routes should call this module rather than building scan kwargs inline.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -294,6 +295,42 @@ def _run_full_scan_as_artist_pipeline(
     from db.repositories.library import get_all_artists
     from services.scanning.pipeline import run_artist_scan_pipeline
     from services.popularity.stages.load_stage import _artist_key
+    from db.engine import (
+        DatabaseUnavailable,
+        db_outage_retry_after,
+        is_db_outage_active,
+        wait_for_db_available,
+    )
+
+    def _pause_for_db_outage(where: str) -> bool:
+        """Block WITHOUT connecting until the DB breaker closes.
+
+        Returns False when the maximum wait elapsed. The wait is configurable
+        so tests never block for the production ten minutes.
+        """
+        if not is_db_outage_active():
+            return True
+        try:
+            _db_outage_max_wait = float(
+                os.environ.get("POPULARR_DB_OUTAGE_MAX_WAIT_SECONDS", "600")
+            )
+        except (TypeError, ValueError):
+            _db_outage_max_wait = 600.0
+        if _db_outage_max_wait <= 0:
+            return False
+        retry_after = db_outage_retry_after()
+        log_unified(
+            f"[FULL_SCAN] Database unavailable {where} — pausing database "
+            f"access; retry in {retry_after:.0f}s"
+        )
+        if wait_for_db_available(timeout_seconds=_db_outage_max_wait):
+            log_unified("[FULL_SCAN] Database available again — resuming")
+            return True
+        log_unified(
+            "[FULL_SCAN] Database did not recover within 10 minutes — "
+            "aborting scan (progress is checkpointed)"
+        )
+        return False
 
     progress_file = get_scan_progress_path("full_scan")
 
@@ -498,7 +535,29 @@ def _run_full_scan_as_artist_pipeline(
     }
     try:
         for i, artist in enumerate(artists):
-            if is_stop_requested(progress_file):
+            # A DB outage is INFRASTRUCTURE, not this artist's failure. Wait for
+            # the breaker to close instead of moving on to the next artist and
+            # opening another connection into a recovering server.
+            if not _pause_for_db_outage(f"before artist {i + 1}/{total}"):
+                status = "error"
+                break
+
+            try:
+                _stop = is_stop_requested(progress_file)
+            except DatabaseUnavailable:
+                if not _pause_for_db_outage(f"before artist {i + 1}/{total}"):
+                    status = "error"
+                    break
+                _stop = False
+            except Exception as _stop_exc:
+                if is_db_outage_active() or "recovery mode" in str(_stop_exc).lower():
+                    if not _pause_for_db_outage(f"before artist {i + 1}/{total}"):
+                        status = "error"
+                        break
+                    _stop = False
+                else:
+                    raise
+            if _stop:
                 status = "stopped"
                 log_unified("[FULL_SCAN] Stop requested — halting artist loop")
                 break
@@ -642,25 +701,68 @@ def _run_full_scan_as_artist_pipeline(
                 )
 
             from services.popularity.scan_stage_runner import _bounded_call_report
-            _artist_report = _bounded_call_report(
-                _run_one_artist,
-                seconds=_artist_budget,
-                label=f"artist pipeline '{artist}'",
-            )
 
-            # ⚠️ `_bounded_call_report` has TWO return conventions:
-            #   * `seconds is None` (budget DISABLED via track_timeout_seconds=0)
-            #     returns the function's RAW result — here `None`, because
-            #     `_run_one_artist` returns nothing.
-            #   * a configured budget returns the wrapper dict.
-            # Reading `.get("ok")` unconditionally therefore crashed the whole
-            # artist loop with AttributeError on the first artist for anyone who
-            # followed the Config page's advice to "set 0 to disable the timeout".
-            # Normalise first: "no report" simply means the artist ran and did
-            # not raise (an exception propagates out of the helper, it does not
-            # come back as a report).
-            if not isinstance(_artist_report, dict):
-                _artist_report = {"ok": True, "abandoned": False, "reason": None}
+            # A DB outage is retried against the SAME artist. The inner
+            # pipeline can swallow a connection error and return "normally",
+            # so the breaker state — not just the report — is the authority.
+            _outage_started_at: float | None = None
+            try:
+                _outage_max_wait = float(
+                    os.environ.get("POPULARR_DB_OUTAGE_MAX_WAIT_SECONDS", "600")
+                )
+            except (TypeError, ValueError):
+                _outage_max_wait = 600.0
+            while True:
+                _artist_report = _bounded_call_report(
+                    _run_one_artist,
+                    seconds=_artist_budget,
+                    label=f"artist pipeline '{artist}'",
+                )
+
+                # ⚠️ `_bounded_call_report` has TWO return conventions:
+                #   * `seconds is None` (budget DISABLED) returns the raw result;
+                #   * a configured budget returns the wrapper dict.
+                # Normalise first: "no report" means the artist ran and did not
+                # raise.
+                if not isinstance(_artist_report, dict):
+                    _artist_report = {"ok": True, "abandoned": False, "reason": None}
+
+                _reason_text = str(_artist_report.get("reason") or "")
+                _reason_l = _reason_text.lower()
+                _db_failure = (
+                    is_db_outage_active()
+                    or "databaseunavailable" in _reason_l
+                    or "recovery mode" in _reason_l
+                    or "psycopg2" in _reason_l
+                    or "could not connect to server" in _reason_l
+                    or "server closed the connection" in _reason_l
+                )
+                if not _db_failure:
+                    _outage_started_at = None
+                    break
+
+                _now = time.monotonic()
+                if _outage_started_at is None:
+                    _outage_started_at = _now
+                _outage_elapsed = _now - _outage_started_at
+                if _outage_max_wait > 0 and _outage_elapsed >= _outage_max_wait:
+                    status = "error"
+                    log_unified(
+                        f"[FULL_SCAN] Database still unavailable after "
+                        f"{_outage_elapsed:.0f}s — aborting scan (progress is "
+                        "checkpointed)"
+                    )
+                    break
+                log_unified(
+                    f"[FULL_SCAN] Database unavailable while scanning {artist} "
+                    f"({_outage_elapsed:.0f}s) — pausing and retrying this artist"
+                )
+                if not _pause_for_db_outage(f"while scanning {artist}"):
+                    status = "error"
+                    break
+
+            if status == "error":
+                break
 
             if _artist_report.get("ok"):
                 log_unified(f"[FULL_SCAN] Artist {i + 1}/{total} done: {artist}")

@@ -36,6 +36,19 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("POPULARLR_NAV_URL", "http://navidrome:4533")
 os.environ.setdefault("POPULARLR_NAV_USER", "admin")
 os.environ.setdefault("POPULARLR_NAV_PASS", "password")
+# A unit test must never block for the production 10-minute crash-recovery
+# wait. The scan pipeline reads this at call time.
+os.environ.setdefault("POPULARR_DB_OUTAGE_MAX_WAIT_SECONDS", "1")
+
+
+@pytest.fixture(autouse=True)
+def _reset_db_outage_breaker():
+    """Never let one test's simulated outage leak into the next test."""
+    from db.engine import reset_db_outage
+
+    reset_db_outage()
+    yield
+    reset_db_outage()
 
 
 def register_sqlite_regexp_replace(engine) -> None:

@@ -694,6 +694,11 @@
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="album_media" name="album_media" value="{{ album_data.media or '' }}" placeholder="e.g., CD, Digital">
               </div>
               <div class="col-6 col-md-4">
+                <label for="album_disctotal" class="form-label small">Disc Total</label>
+                <input type="number" min="1" class="form-control bg-dark text-light border-secondary" id="album_disctotal" name="album_disctotal" value="{{ album_data.disctotal or '' }}" placeholder="1">
+                <div class="form-text text-muted">1 = single disc; every track's disc number is cleared on save.</div>
+              </div>
+              <div class="col-6 col-md-4">
                 <label for="album_releasecountry" class="form-label small">Release Country</label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="album_releasecountry" name="album_releasecountry" value="{{ album_data.releasecountry or '' }}">
               </div>
