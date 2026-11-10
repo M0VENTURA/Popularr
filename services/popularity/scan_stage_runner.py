@@ -4371,7 +4371,15 @@ def run_scan(
                                 stash_album_recommendations,
                             )
 
-                            _proposal = propose_album_metadata(artist, album, _release_mbid)
+                            _proposal = propose_album_metadata(
+                                artist,
+                                album,
+                                _release_mbid,
+                                # The scan applies the single-disc clear through
+                                # the import payload; offering it here would put
+                                # every single-disc album in "needs review".
+                                include_disc_clear=False,
+                            )
                             _stash = stash_album_recommendations(artist, album, _proposal)
                             if _stash.get("stashed"):
                                 logger.debug(

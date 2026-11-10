@@ -298,6 +298,23 @@ def build_track_payload(
     for field in EXTRACTED_DIRECT_FIELDS:
         payload[field] = extracted.get(field)
 
+    # ── Single-disc releases have no meaningful disc position ───────────
+    # Storing "1" makes Navidrome split/mislabel the album, and it made the
+    # scan's "offer whatever I could not apply" pass stash a Disc # change for
+    # EVERY track on EVERY single-disc album — the whole library showed
+    # "needs review". Clear it here, at import time, instead of offering it.
+    _disc_total_raw = (
+        (extracted.get("disctotal") if extracted else None)
+        or (album_tags or {}).get("disctotal")
+        or (album_tags or {}).get("disc_count")
+    )
+    try:
+        _disc_total = int(str(_disc_total_raw).split("/")[0].strip())
+    except (TypeError, ValueError):
+        _disc_total = 0
+    if _disc_total == 1:
+        payload["disc_number"] = None
+
     # ── MusicBrainz identity ───────────────────────────────────────────
     # Recording MBID → the canonical `recording_mbid` column every consumer
     # queries (queue dedupe, download-import track resolution, popularity).

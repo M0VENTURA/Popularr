@@ -513,6 +513,8 @@ def _track_proposals(
     local_tracks: list[dict[str, Any]],
     comparison: list[dict[str, Any]],
     metadata: dict[str, Any],
+    *,
+    include_disc_clear: bool = True,
 ) -> list[dict[str, Any]]:
     """Build per-track "current -> proposed" lists.
 
@@ -523,8 +525,14 @@ def _track_proposals(
     by_id = {_as_text(row.get("id")): row for row in local_tracks}
     # A one-disc release carries no meaningful disc position: every track is
     # disc 1, and storing/displaying "1" makes Navidrome split or mislabel the
-    # album. The review proposes the CLEAR and the save path enforces it.
-    single_disc = _disc_count(metadata) == 1
+    # album. The manual review proposes the CLEAR and the save path enforces it.
+    #
+    # ⚠️ The SCAN's "offer whatever I could not apply" pass disables this
+    # (``include_disc_clear=False``): otherwise every single-disc album gains a
+    # "Disc #: 1 → empty" pending recommendation on every scan, and the whole
+    # library shows "needs review". The scan applies the clear through the
+    # import payload instead (see payload_builder).
+    single_disc = include_disc_clear and _disc_count(metadata) == 1
 
     enrichment: dict[str, dict[str, Any]] = {}
     for mb_track in metadata.get("tracks") or []:
@@ -832,6 +840,8 @@ def propose_album_metadata(
     album: str,
     release_mbid: str,
     comparison_result: dict[str, Any] | None = None,
+    *,
+    include_disc_clear: bool = True,
 ) -> dict[str, Any]:
     """Return the metadata a MusicBrainz import WOULD write for this album.
 
@@ -915,7 +925,12 @@ def propose_album_metadata(
     metadata = fetch_musicbrainz_release_metadata(resolved_release_id) or {}
 
     album_changes = _album_level_proposals(local_tracks, metadata)
-    track_changes = _track_proposals(local_tracks, comparison, metadata)
+    track_changes = _track_proposals(
+        local_tracks,
+        comparison,
+        metadata,
+        include_disc_clear=include_disc_clear,
+    )
     # Duration is reported SEPARATELY and never staged: a file's length is
     # intrinsic to the audio, so there is nothing a metadata import could write
     # for it. It is surfaced because a mismatch is the clearest sign the file is

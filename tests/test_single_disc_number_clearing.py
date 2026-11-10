@@ -19,6 +19,8 @@ from services.metadata.metadata_proposal_service import (
     _track_proposals,
 )
 
+from services.scanning.payload_builder import build_track_payload
+
 
 def _local(**overrides):
     row = {
@@ -77,6 +79,19 @@ def _disc_change(local, metadata, mb_disc=1):
     )
 
 
+def test_the_scan_pass_does_not_stage_a_disc_clear():
+    """The scan offers what it could NOT apply; the disc clear is applied by
+    the import payload, so offering it here flagged every single-disc album."""
+    local = _local(disc_number="1")
+    metadata = _metadata(1)
+    out = _track_proposals(
+        [local], _comparison(), metadata, include_disc_clear=False
+    )
+
+    changes = out[0]["changes"] if out else []
+    assert not any(c["field"] == "disc_number" for c in changes)
+
+
 def test_single_disc_stages_a_clear_for_an_existing_disc_number():
     change = _disc_change(_local(disc_number="1"), _metadata(1))
 
@@ -107,3 +122,43 @@ def test_the_release_disc_total_reaches_the_form():
     )
     assert disc_total is not None
     assert disc_total["proposed"] == "1"
+
+
+def _payload(disc_total, disc_number=1):
+    return build_track_payload(
+        track={
+            "id": "t1",
+            "title": "Song",
+            "artist": "Artist",
+            "albumArtist": "Artist",
+        },
+        album_name="Album",
+        album_artist_value="Artist",
+        canonical_artist_name="Artist",
+        extracted={
+            "disc_number": disc_number,
+            "disctotal": disc_total,
+            "title": "Song",
+        },
+        is_new_track=False,
+    )
+
+
+def test_a_single_disc_import_clears_the_disc_number():
+    """This is the APPLY path — without it the scan offers a disc clear on
+    every single-disc album forever."""
+    payload = _payload("1")
+
+    assert payload.get("disc_number") is None
+
+
+def test_a_multi_disc_import_keeps_the_disc_number():
+    payload = _payload("2", disc_number=2)
+
+    assert payload.get("disc_number") == 2
+
+
+def test_an_unknown_disc_total_does_not_clear_the_disc_number():
+    payload = _payload(None, disc_number=1)
+
+    assert payload.get("disc_number") == 1
