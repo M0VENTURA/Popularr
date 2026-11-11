@@ -360,6 +360,9 @@ class DownloadQueue(Base):
     release_source: Mapped[str | None] = mapped_column(String)
     release_mbid: Mapped[str | None] = mapped_column(String)
     recording_mbid: Mapped[str | None] = mapped_column(String)
+    # Redownload replacement: the library track whose file is removed after
+    # this queue row imports successfully.
+    replace_track_id: Mapped[str | None] = mapped_column(String)
     # Album-scoped MusicBrainz identity stored at QUEUE time.  It used to live
     # only inside the ``metadata`` JSONB, so a queue path that skipped that blob
     # left the row with no release group and the imported file split into its

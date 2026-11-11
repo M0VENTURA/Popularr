@@ -702,6 +702,196 @@ def _queue_row_references_file(local_path: str, downloads_dir: str) -> bool:
     return False
 
 
+def _music_delete_roots() -> list[str]:
+    roots: list[str] = []
+    try:
+        from services.infrastructure.filesystem_service import resolve_music_dir
+
+        configured = resolve_music_dir()
+        if configured:
+            roots.append(str(configured))
+    except Exception:
+        pass
+    for key in ("MUSIC_FOLDER", "MUSIC_ROOT", "MUSIC_DIR"):
+        value = os.environ.get(key)
+        if value:
+            roots.append(str(value))
+    roots.append("/music")
+    return [root for root in roots if root]
+
+
+def _is_safe_music_delete(path: str) -> bool:
+    """True when *path* is inside a configured music library root."""
+    try:
+        real = os.path.realpath(path)
+    except Exception:
+        return False
+    for root in _music_delete_roots():
+        try:
+            root_real = os.path.realpath(root)
+        except Exception:
+            continue
+        if real == root_real or real.startswith(root_real + os.sep):
+            return True
+    return False
+
+
+def _replaced_track_file_path(item: dict[str, Any]) -> str | None:
+    """The library file of the track this queue row replaces (if any)."""
+    old_id = str(item.get("replace_track_id") or "").strip()
+    if not old_id:
+        return None
+    try:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT file_path FROM tracks "
+                    "WHERE CAST(id AS TEXT) = :id"
+                ),
+                {"id": old_id},
+            ).first()
+        raw = str(row[0] or "").strip() if row and row[0] else ""
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        from services.metadata.tag_file_service import resolve_music_file_path
+
+        return resolve_music_file_path(raw) or raw
+    except Exception:
+        return raw
+
+
+def _delete_replaced_track(
+    item: dict[str, Any],
+    new_path: str,
+    *,
+    replace_path: str | None = None,
+) -> None:
+    """Delete the library track a redownload was queued to replace.
+
+    Called ONLY after the new file has verified and the queue row is marked
+    imported. ``replace_path`` is the OLD path captured BEFORE the import, not
+    read after it: ``_apply_stored_metadata`` can adopt the old row by recording
+    MBID and move its ``file_path`` to the new file, which would otherwise make
+    this cleanup miss the orphaned old file.
+
+    It is deliberately conservative:
+
+    * no ``replace_track_id`` → ordinary download, nothing to do;
+    * the captured old path equals the new path → replaced in place;
+    * the old path is outside every configured music root → refuse;
+    * the tracks row is kept when the import reused it (its current
+      ``file_path`` is the new file), and removed otherwise.
+    """
+    old_id = str(item.get("replace_track_id") or "").strip()
+    if not old_id:
+        return
+    replace_path = str(replace_path or "").strip()
+
+    try:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+    except Exception:
+        return
+
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT id, file_path, title, artist, album FROM tracks "
+                    "WHERE CAST(id AS TEXT) = :id"
+                ),
+                {"id": old_id},
+            ).mappings().first()
+    except Exception as exc:
+        logger.warning(
+            "Replaced-track lookup failed",
+            queue_id=item.get("id"), replace_track_id=old_id, error=str(exc),
+        )
+        return
+
+    if row is None:
+        logger.debug(
+            "Replaced track no longer exists", queue_id=item.get("id"),
+            replace_track_id=old_id,
+        )
+        # The row is gone but the captured old file may still be on disk.
+        if not replace_path:
+            return
+        old_path = replace_path
+        row = {}
+    else:
+        old_path = replace_path or str(row.get("file_path") or "").strip()
+
+    current_path = str(row.get("file_path") or "").strip() if row else ""
+    try:
+        new_real = os.path.realpath(new_path) if new_path else ""
+        old_real = os.path.realpath(old_path) if old_path else ""
+        current_real = os.path.realpath(current_path) if current_path else ""
+    except Exception:
+        new_real = old_real = current_real = ""
+    if old_path and new_real and old_real == new_real:
+        logger.debug(
+            "Replaced track reused the imported path — keeping it",
+            queue_id=item.get("id"), replace_track_id=old_id, path=old_path,
+        )
+        return
+
+    if old_path and os.path.isfile(old_path):
+        if not _is_safe_music_delete(old_path):
+            logger.warning(
+                "Refused to delete replaced track outside music roots",
+                queue_id=item.get("id"), replace_track_id=old_id, path=old_path,
+            )
+            return
+        try:
+            os.remove(old_path)
+            logger.info(
+                "Deleted replaced track file",
+                queue_id=item.get("id"),
+                replace_track_id=old_id,
+                path=old_path,
+                title=row.get("title"),
+                artist=row.get("artist"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not delete replaced track file",
+                queue_id=item.get("id"), replace_track_id=old_id,
+                path=old_path, error=str(exc),
+            )
+            return
+
+    # The old file is gone (or was already missing). Drop the stale row ONLY
+    # if the import did not reuse it. ``_apply_stored_metadata`` resolves the
+    # row by recording MBID and can update its file_path to the NEW file; that
+    # row is the live track now, so deleting it would delete the replacement.
+    if current_path and new_real and current_real == new_real:
+        logger.debug(
+            "Replaced track row was reused by the import — keeping the row",
+            queue_id=item.get("id"), replace_track_id=old_id, path=current_path,
+        )
+        return
+    try:
+        from db.repositories.tracks import delete_tracks_by_id
+
+        delete_tracks_by_id(
+            {old_id}, context="replaced by a better download version"
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not delete replaced track row",
+            queue_id=item.get("id"), replace_track_id=old_id, error=str(exc),
+        )
+
+
 def _delete_mismatched_download(file_path: str, queue_id: int, reason: str) -> None:
     """Safely delete a mismatched file only if it resides within allowed download roots."""
     try:
@@ -1669,6 +1859,12 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
             except Exception:
                 pass
 
+        # Capture the OLD file path BEFORE anything can adopt/update its row.
+        # The import may resolve the old track by recording MBID and move its
+        # file_path to the new file; the cleanup still has to remove the old
+        # file from the path it had at queue time.
+        _replace_path = _replaced_track_file_path(item)
+
         _apply_stored_metadata(item, abs_path)
 
         track = {
@@ -1684,7 +1880,15 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
             "year": item.get("year"),
         }
 
-        move_result = move_track_to_library(track, release_metadata, _MUSIC_ROOT)
+        move_result = move_track_to_library(
+            track,
+            release_metadata,
+            _MUSIC_ROOT,
+            # A redownload-for-a-better-version may resolve to the SAME path as
+            # the old file. Move that aside and replace it instead of treating
+            # the new version as a duplicate.
+            replace_path=_replace_path,
+        )
         if not move_result.get("success"):
             _reset_to_downloading(f"move failed: {move_result.get('error')}")
             return move_result
@@ -1772,6 +1976,21 @@ def _move_and_import(item: dict[str, Any], abs_path: str, match_source: str) -> 
             except Exception as exc:
                 _reset_to_downloading(f"status update failed: {exc}")
                 return {"success": False, "error": str(exc)}
+
+            # The new version is verified and the queue row is imported — only
+            # NOW is it safe to remove the old library version this redownload
+            # was explicitly queued to replace.
+            try:
+                _delete_replaced_track(
+                    item, target_path, replace_path=_replace_path
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Replaced-track cleanup failed",
+                    queue_id=queue_id,
+                    replace_track_id=item.get("replace_track_id"),
+                    error=str(exc),
+                )
 
             try:
                 from helpers.logging_config import log_activity

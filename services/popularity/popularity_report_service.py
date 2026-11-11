@@ -6,7 +6,9 @@ and the collection-wide export on the Config page: the full popularity row set
 the combined score, the star rating and the single-detection verdict — so the
 numbers can be sorted and filtered in a spreadsheet instead of read off a
 screen. It also carries ``last_scanned`` (the newest Last.fm/ListenBrainz fetch
-for the row) so a reader can tell whether the numbers are current or stale.
+for the row) so a reader can tell whether the numbers are current or stale, and
+the per-source genre fields (ListenBrainz, MusicBrainz, Last.fm, Discogs) plus
+the final chosen genre so a reader can see where a track's genre came from.
 
 All three scopes share ONE query and ONE ordering rule. The album report is a
 subset of the artist report at the same ordering, and the artist report is a
@@ -25,6 +27,7 @@ from typing import Any
 from sqlalchemy import text
 
 from db.engine import db_session
+from db.repositories.popularity_repository import parse_genre_value
 
 #: Columns of the report, in file order. ``rank`` and ``last_scanned`` are
 #: computed after the query; every other name is a real ``tracks`` column
@@ -38,6 +41,15 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "disc_number",
     "track_number",
     "year",
+    # Per-source genres + the final chosen genre, so a reader can see which
+    # provider supplied the genre the app settled on. These are JSONB columns
+    # that psycopg hands back as a Python list (and SQLite as JSON/text); they
+    # are normalised to a "A; B" cell below rather than written as a list repr.
+    "listenbrainz_genres",
+    "musicbrainz_genres",
+    "lastfm_tags",
+    "discogs_genres",
+    "genres",
     "raw_score",
     "final_score",
     "popularity",
@@ -84,6 +96,8 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
 #: album file reads out in the same relative order as the artist file.
 _POPULARITY_REPORT_SELECT = """
     SELECT title, artist, album, disc_number, track_number, year,
+           listenbrainz_genres, musicbrainz_genres, lastfm_tags,
+           discogs_genres, genres,
            raw_score, final_score, popularity, stars, duration,
            lastfm_listeners, lastfm_playcount, lastfm_playcount_available,
            lastfm_score,
@@ -107,6 +121,20 @@ _ARTIST_PREDICATE = "LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:
 #: thousand times over), which is why the album scope always carries the
 #: artist predicate as well.
 _ALBUM_PREDICATE = "LOWER(COALESCE(album, '')) = LOWER(:album)"
+
+#: Genre columns are JSONB in PostgreSQL (a Python list off the driver) and
+#: JSON/text under SQLite. They are written as one delimited cell — never the
+#: Python list repr — so a spreadsheet sees "Rock; Pop" rather than "['Rock',
+#: 'Pop']".
+_GENRE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "listenbrainz_genres",
+        "musicbrainz_genres",
+        "lastfm_tags",
+        "discogs_genres",
+        "genres",
+    }
+)
 
 
 def _scope(*, artist: str | None, album: str | None) -> tuple[str, dict[str, Any]]:
@@ -156,6 +184,17 @@ def _filename_part(value: str, fallback: str) -> str:
     return re.sub(r"[^A-Za-z0-9 _-]", "", str(value or "")).strip() or fallback
 
 
+def _genre_cell(value: Any) -> str:
+    """One CSV cell for a genre column, regardless of its stored shape.
+
+    ``genres`` is TEXT while the provider columns are JSONB; a JSONB column
+    arrives as a Python list from psycopg and as JSON text from SQLite, so the
+    shared :func:`parse_genre_value` is what keeps both dialects and both column
+    types reading out as ``"Rock; Pop"``.
+    """
+    return "; ".join(parse_genre_value(value))
+
+
 def build_popularity_report(*, artist: str | None = None, album: str | None = None) -> str:
     """CSV text for one artist (or one album), or the whole collection.
 
@@ -186,10 +225,14 @@ def build_popularity_report(*, artist: str | None = None, album: str | None = No
             row.get("lastfm_last_updated"),
             row.get("listenbrainz_last_updated"),
         )
-        values = [
-            last_scanned if column == "last_scanned" else row.get(column)
-            for column in POPULARITY_REPORT_COLUMNS[1:]
-        ]
+        values = []
+        for column in POPULARITY_REPORT_COLUMNS[1:]:
+            if column == "last_scanned":
+                values.append(last_scanned)
+            elif column in _GENRE_COLUMNS:
+                values.append(_genre_cell(row.get(column)))
+            else:
+                values.append(row.get(column))
         # ``None`` becomes an empty cell; everything else is written as stored.
         writer.writerow([position] + values)
     return buffer.getvalue()

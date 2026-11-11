@@ -159,6 +159,23 @@ _DEFAULT_ERA_RULES: dict[str, dict[str, float | int]] = {
     "minor": {"catalog_top_pct": 0.10, "album_top_n": 3, "max_5star_slots": 2},
 }
 
+#: Gates + caps for the ALBUM-level "minor era" penalty. An album's era (how
+#: its median standing compares with the artist's peak album) only becomes a
+#: penalty when the album is old enough for its plays to be meaningful AND the
+#: catalogue is large enough for "weak for this artist" to mean anything. A new
+#: release with no accumulated plays is never written off.
+#:
+#: The penalty has its OWN slot caps so it cannot be silently disabled by the
+#: legacy per-era ``minor_max_5star_slots`` value (which controls the ordinary,
+#: unpenalised allowance).
+_DEFAULT_ALBUM_PENALTY_GATES: dict[str, float] = {
+    "min_age_years": 2,
+    "min_catalogue_albums": 3,
+    "min_catalogue_tracks": 30,
+    "minor_max_5star_slots": 1,
+    "minor_max_4star_slots": 2,
+}
+
 #: Fallbacks for the album ratio-standout gate, mirroring
 #: helpers/config_helpers._DEFAULT_ALBUM_RATIO_STANDOUT. Kept here as well so
 #: the gate has sane values when it is reached without a config layer (tests,
@@ -228,6 +245,53 @@ def _live_album_scaling() -> tuple[dict[str, dict[str, float | int]], float, flo
     peak_min = _safe_float(scaling.get("peak_era_min_ratio"), 0.75)
     solid_min = _safe_float(scaling.get("solid_era_min_ratio"), 0.40)
     return rules, peak_min, solid_min
+
+
+def _album_penalty_gates() -> dict[str, float]:
+    """Age + catalogue-size gates for the album-level era penalty."""
+    cfg = get_standout_config() or {}
+    scaling = cfg.get("album_scaling") or {}
+    if not isinstance(scaling, dict):
+        scaling = {}
+    return {
+        key: max(0.0, _safe_float(scaling.get(f"penalty_{key}"), float(default)))
+        for key, default in _DEFAULT_ALBUM_PENALTY_GATES.items()
+    }
+
+
+def _album_penalty_applies(
+    *,
+    album_year: int | float | None,
+    catalogue_albums: int,
+    catalogue_tracks: int,
+    current_year: int | None = None,
+    gates: dict[str, float] | None = None,
+) -> bool:
+    """Should this album's era reduce its 4★/5★ allowance?
+
+    The penalty is only honest when (a) the album is old enough for low plays
+    to mean something and (b) the artist has enough catalogue for "low for this
+    artist" to be measurable. An unknown year is treated as NOT mature — a
+    missing tag must never write off a new album.
+    """
+    resolved = gates if gates is not None else _album_penalty_gates()
+    try:
+        year = int(album_year or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year <= 0:
+        return False
+    try:
+        now = int(current_year or datetime.now().year)
+    except (TypeError, ValueError):
+        now = datetime.now().year
+    if (now - year) < float(resolved.get("min_age_years") or 0):
+        return False
+    if int(catalogue_albums or 0) < int(resolved.get("min_catalogue_albums") or 0):
+        return False
+    if int(catalogue_tracks or 0) < int(resolved.get("min_catalogue_tracks") or 0):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -2015,15 +2079,47 @@ def _album_era_for_ratio(reff: float) -> str:
     return "minor"
 
 
+def _load_artist_catalogue_rows(artist: str) -> list[dict[str, Any]]:
+    """All scored tracks for one artist, in the shape ``_build_album_model`` reads.
+
+    Extracted so a resync can load this ONCE per artist instead of once per
+    album. The query is artist-wide, so running it for every album of the
+    artist made a full-library preview O(albums x catalogue) and was the
+    dominant reason the request outlived the Gunicorn timeout.
+    """
+    with db_session() as session:
+        rows = session.execute(
+            text(
+                "SELECT title, album, COALESCE(NULLIF(raw_score, 0), final_score) AS final_score, year, "
+                "COALESCE(lastfm_listeners, 0) AS lastfm_listeners, "
+                "COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens "
+                "FROM tracks "
+                "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
+                "AND COALESCE(NULLIF(raw_score, 0), final_score) > 0"
+            ),
+            {"artist": artist},
+        ).fetchall() or []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        mapping = getattr(row, "_mapping", None)
+        out.append(dict(mapping) if mapping is not None else dict(row))
+    return out
+
+
 def _build_album_model(
     artist: str,
     album_results: list[dict[str, Any]],
     artist_scores: list[float],
+    catalogue_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """3-step scaling model context for ONE album."""
+    """3-step scaling model context for ONE album.
+
+    ``catalogue_rows`` lets a caller that already loaded the artist's scored
+    tracks (the star resync) reuse them for every album instead of re-querying
+    the artist-wide catalogue per album.
+    """
     try:
         from services.popularity.popularity_math import (
-            album_prominence_median,
             album_prominence_score,
         )
 
@@ -2035,18 +2131,11 @@ def _build_album_model(
             )
             for r in album_results
         }
-        with db_session() as session:
-            rows = session.execute(
-                text(
-                    "SELECT title, album, COALESCE(NULLIF(raw_score, 0), final_score) AS final_score, year, "
-                    "COALESCE(lastfm_listeners, 0) AS lastfm_listeners, "
-                    "COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens "
-                    "FROM tracks "
-                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
-                    "AND COALESCE(NULLIF(raw_score, 0), final_score) > 0"
-                ),
-                {"artist": artist},
-            ).fetchall() or []
+        rows = (
+            _load_artist_catalogue_rows(artist)
+            if catalogue_rows is None
+            else catalogue_rows
+        )
 
         by_album: dict[str, list[float]] = {}
         album_years: dict[str, int] = {}
@@ -2098,9 +2187,15 @@ def _build_album_model(
 
         prominence_medians: dict[str, float] = {}
         for _album, _scores in prominence_by_album.items():
-            prominence_value = album_prominence_median(_scores)
-            if prominence_value > 0:
-                prominence_medians[_album] = prominence_value
+            # ``prominence_by_album`` holds per-track prominence SCORES, not
+            # track rows. Passing them to ``album_prominence_median`` (which
+            # expects rows with listener keys) returned 0 for every album, so
+            # the prominence benchmark never activated and every album fell
+            # back to the log-compressed score medians — where the 0.40 minor
+            # threshold is practically unreachable.
+            _valid = [float(s) for s in _scores if float(s or 0) > 0]
+            if _valid:
+                prominence_medians[_album] = median(_valid)
 
         use_prominence = len(prominence_medians) >= 2
         prominence_power = 2.0
@@ -2137,6 +2232,27 @@ def _build_album_model(
         _rules, _, _ = _live_album_scaling()
         rules = _rules.get(era, _rules["peak"])
 
+        if use_prominence:
+            catalogue_albums = max(len(prominence_medians), len(by_album))
+        else:
+            catalogue_albums = len(by_album)
+        catalogue_tracks = len([s for s in (artist_scores or []) if float(s or 0) > 0])
+
+        gates = _album_penalty_gates()
+        penalty_applies = _album_penalty_applies(
+            album_year=album_year,
+            catalogue_albums=catalogue_albums,
+            catalogue_tracks=catalogue_tracks,
+            gates=gates,
+        )
+
+        # The ordinary era allowance, then the minor-era penalty on top.
+        max_5star_slots = int(rules["max_5star_slots"])
+        max_4star_slots: int | None = None
+        if era == "minor" and penalty_applies:
+            max_5star_slots = int(gates["minor_max_5star_slots"])
+            max_4star_slots = int(gates["minor_max_4star_slots"])
+
         return {
             "has_benchmark": True,
             "m_peak": m_peak,
@@ -2144,12 +2260,18 @@ def _build_album_model(
             "a_skew": a_skew,
             "reff": reff,
             "era": era,
+            "album_year": album_year,
+            "album_age_years": (datetime.now().year - album_year) if album_year else 0,
+            "catalogue_albums": catalogue_albums,
+            "catalogue_tracks": catalogue_tracks,
+            "penalty_applies": penalty_applies,
             "benchmark_source": "prominence" if use_prominence else "scores",
             "catalog_cutoff": _percentile_cutoff(
                 artist_scores, float(rules["catalog_top_pct"])
             ),
             "album_top_n": int(rules["album_top_n"]),
-            "max_5star_slots": int(rules["max_5star_slots"]),
+            "max_5star_slots": max_5star_slots,
+            "max_4star_slots": max_4star_slots,
         }
     except Exception as exc:
         logger.debug("Album benchmark failed", artist=artist, error=str(exc))
@@ -5633,7 +5755,13 @@ def _log_scan_weights(
             f"| caps: catalog_top={float(era_rules.get('catalog_top_pct') or 0) * 100:.0f}%, "
             f"album_top_n={era_rules.get('album_top_n') or '—'}, "
             f"max_5★={era_rules.get('max_5star_slots') or '—'} "
-            f"| source: {'config' if _album_scaling_configured() else 'defaults'}"
+            f"| penalty={'on' if album_model.get('penalty_applies') else 'off'}"
+            + (
+                f" (max_5★={album_model.get('max_5star_slots')}, "
+                f"max_4★={album_model.get('max_4star_slots')})"
+                if album_model.get("penalty_applies") else ""
+            )
+            + f" | source: {'config' if _album_scaling_configured() else 'defaults'}"
         )
 
         if is_live_album:
@@ -5701,6 +5829,113 @@ def _apply_live_album_slot_caps(
             "Live album cap applied: 4★ → 3★",
             artist=artist, album=album, title=track.get("title"), cap=max4,
         )
+
+
+def _apply_album_five_star_cap(
+    album_results: list[dict[str, Any]],
+    *,
+    max_slots: int,
+    artist: str = "",
+    album: str = "",
+    era: str = "",
+) -> int:
+    """Cap ALL 5★ tracks on a penalised album (not only era standouts).
+
+    With the album star curve enabled, a track can reach 5★ from the curve base
+    without ``_era_5star`` ever being set, so the ordinary era slot cap would
+    skip it. This pass exists only for the minor-era penalty and caps every
+    non-protected 5★ down to the penalty allowance. Tracks that already cleared
+    the genuine standout path (``_era_5star``) are protected — they were capped
+    by the ordinary era pass to the same ``max_slots``, so a real standout on a
+    weak album still keeps 5★.
+    """
+    if max_slots < 0:
+        return 0
+
+    def _protected(track: dict[str, Any]) -> bool:
+        return (
+            bool(track.get("_lock_honoured"))
+            or str(track.get("single_confidence") or "").strip().casefold() == "user"
+            or int(track.get("_force_floor") or 0) >= 5
+            or bool(track.get("_era_5star"))
+        )
+
+    def _score(track: dict[str, Any]) -> float:
+        return float(track.get("popularity_score") or track.get("final_score") or 0)
+
+    protected = [
+        t for t in album_results
+        if int(t.get("stars") or 0) == 5 and _protected(t)
+    ]
+    automatic = [
+        t for t in album_results
+        if int(t.get("stars") or 0) == 5 and not _protected(t)
+    ]
+    automatic.sort(key=_score, reverse=True)
+
+    demoted = 0
+    for track in automatic[max(0, int(max_slots) - len(protected)):]:
+        track["stars"] = 4
+        track["_era_5star"] = False
+        demoted += 1
+        logger.info(
+            "Album era cap applied: 5★ → 4★",
+            artist=artist, album=album, title=track.get("title"),
+            era=era, cap=max_slots,
+        )
+    return demoted
+
+
+def _apply_album_four_star_cap(
+    album_results: list[dict[str, Any]],
+    *,
+    max_slots: int,
+    artist: str = "",
+    album: str = "",
+    era: str = "",
+) -> int:
+    """Cap how many tracks on a penalised album may keep 4★.
+
+    Used only for the album-level minor-era penalty (old album, large
+    catalogue). Tracks that carry a real signal — a user lock, a user rating, a
+    forced floor, or a dedicated-single floor — are protected; the rest are
+    ranked by score and the excess drops to 3★. This deliberately runs AFTER
+    the 5★ slot cap, so 5★ tracks demoted to 4★ are subject to the same limit.
+    """
+    if max_slots < 0:
+        return 0
+
+    def _protected(track: dict[str, Any]) -> bool:
+        return (
+            bool(track.get("_lock_honoured"))
+            or str(track.get("single_confidence") or "").strip().casefold() == "user"
+            or int(track.get("_force_floor") or 0) >= 4
+            or bool(track.get("_dedicated_single_floor"))
+        )
+
+    def _score(track: dict[str, Any]) -> float:
+        return float(track.get("popularity_score") or track.get("final_score") or 0)
+
+    protected = [
+        t for t in album_results
+        if int(t.get("stars") or 0) == 4 and _protected(t)
+    ]
+    automatic = [
+        t for t in album_results
+        if int(t.get("stars") or 0) == 4 and not _protected(t)
+    ]
+    automatic.sort(key=_score, reverse=True)
+
+    demoted = 0
+    for track in automatic[max(0, int(max_slots) - len(protected)):]:
+        track["stars"] = 3
+        demoted += 1
+        logger.info(
+            "Album era cap applied: 4★ → 3★",
+            artist=artist, album=album, title=track.get("title"),
+            era=era, cap=max_slots,
+        )
+    return demoted
 
 
 def _apply_short_track_star_cap(
@@ -5931,6 +6166,24 @@ def post_album_star_ratings(
         except Exception as exc:
             logger.debug("Album DB score merge failed", artist=artist, album=album, error=str(exc))
 
+        # Load the artist's scored catalogue ONCE per resync/scan run. Both the
+        # album model and the artist listen distribution read it, and doing
+        # either query per album made a full-library preview O(albums x
+        # catalogue) — the request outlived Gunicorn's timeout.
+        _artist_key = str(artist or "").casefold()
+        _catalogue_cache = options.setdefault("_artist_catalogue_cache", {})
+        if _artist_key in _catalogue_cache:
+            _artist_catalogue_rows = _catalogue_cache[_artist_key]
+        else:
+            try:
+                _artist_catalogue_rows = _load_artist_catalogue_rows(artist)
+            except Exception as exc:
+                logger.debug(
+                    "Artist catalogue load failed", artist=artist, error=str(exc)
+                )
+                _artist_catalogue_rows = []
+            _catalogue_cache[_artist_key] = _artist_catalogue_rows
+
         album_model: dict[str, Any] = {}
         try:
             _model_cache = options.setdefault("_album_model_cache", {})
@@ -5944,7 +6197,12 @@ def post_album_star_ratings(
             if _model_key in _model_cache:
                 album_model = _model_cache[_model_key]
             else:
-                album_model = _build_album_model(artist, album_results, artist_scores)
+                album_model = _build_album_model(
+                    artist,
+                    album_results,
+                    artist_scores,
+                    catalogue_rows=_artist_catalogue_rows,
+                )
                 _model_cache[_model_key] = album_model
             if album_model.get("has_benchmark"):
                 _era_log = logger.debug if provisional else logger.info
@@ -6044,6 +6302,13 @@ def post_album_star_ratings(
         # honour its own config (write tags / sync Navidrome) without a scan.
         _write_tags_enabled = options.get("write_file_tags")
         _write_tags_enabled = True if _write_tags_enabled is None else bool(_write_tags_enabled)
+        # A resync PREVIEW must write nothing at all. The resync service rates a
+        # copy of each album, but without this guard ``post_album_star_ratings``
+        # still persisted the computed stars to the database (the copy shares
+        # track ids), so "Preview only" was not actually read-only.
+        _dry_run = bool(options.get("_dry_run"))
+        if _dry_run:
+            _write_tags_enabled = False
 
         _artist_listen_distribution = [
             float(result.get("lastfm_listeners") or 0)
@@ -6058,24 +6323,16 @@ def post_album_star_ratings(
                 )
                 for result in album_results
             }
-            with db_session() as _sess:
-                _artist_rows = _sess.execute(
-                    text(
-                        "SELECT album, title, lastfm_listeners FROM tracks "
-                        "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist "
-                        "AND COALESCE(lastfm_listeners, 0) > 0"
-                    ),
-                    {"artist": artist},
-                ).fetchall() or []
-            for _r in _artist_rows:
-                mapping = _r._mapping
+            # Reuse the artist catalogue loaded above instead of a second
+            # artist-wide query per album.
+            for _row in _artist_catalogue_rows:
                 row_key = (
-                    str(mapping.get("album") or "").strip().casefold(),
-                    _normalise_essential_title(str(mapping.get("title") or "")),
+                    str(_row.get("album") or "").strip().casefold(),
+                    _normalise_essential_title(str(_row.get("title") or "")),
                 )
                 if row_key in _scanned_listener_keys:
                     continue
-                listeners = float(mapping.get("lastfm_listeners") or 0)
+                listeners = float(_row.get("lastfm_listeners") or 0)
                 if listeners > 0:
                     _artist_listen_distribution.append(listeners)
         except Exception as exc:
@@ -6191,6 +6448,7 @@ def post_album_star_ratings(
             if configured_slots is None:
                 configured_slots = _rules["peak"]["max_5star_slots"]
             max_slots = max(0, int(configured_slots))
+            _penalty_active = album_model.get("max_4star_slots") is not None
 
             protected_five_star_tracks = [
                 track for track in album_results
@@ -6200,6 +6458,8 @@ def post_album_star_ratings(
                         bool(track.get("_lock_honoured"))
                         or str(track.get("single_confidence") or "").strip().casefold() == "user"
                         or int(track.get("_force_floor") or 0) == 5
+                        # Genuine standouts are exempt from the album penalty.
+                        or (_penalty_active and bool(track.get("_era_5star")))
                     )
                 )
             ]
@@ -6237,6 +6497,27 @@ def post_album_star_ratings(
                     artist=artist, album=album,
                     title=track.get("title"), cap=max_slots,
                     protected=len(protected_five_star_tracks),
+                )
+
+            # Album-level minor-era penalty: a mature, weak album on a large
+            # catalogue also gives up 5★ and 4★ slots. The 5★ pass catches
+            # curve-earned fives the ordinary era cap skips; the 4★ pass then
+            # counts any 5★ demoted above.
+            _configured4 = album_model.get("max_4star_slots")
+            if _penalty_active:
+                _apply_album_five_star_cap(
+                    album_results,
+                    max_slots=max(0, int(album_model.get("max_5star_slots") or 0)),
+                    artist=artist,
+                    album=album,
+                    era=str(album_model.get("era") or ""),
+                )
+                _apply_album_four_star_cap(
+                    album_results,
+                    max_slots=max(0, int(_configured4 or 0)),
+                    artist=artist,
+                    album=album,
+                    era=str(album_model.get("era") or ""),
                 )
 
         # 2.9 Clamp very short tracks (skits / interludes / jokes).
@@ -6286,7 +6567,7 @@ def post_album_star_ratings(
                 param["rec"] = bool(stars_reconciled)
             _batch_params.append(param)
 
-        if _batch_params:
+        if _batch_params and not _dry_run:
             _sets_sql = "stars = :stars" + (", stars_reconciled = :rec" if stars_reconciled is not None else "")
             _update_stmt = text(f"UPDATE tracks SET {_sets_sql} WHERE CAST(id AS TEXT) = :tid")
             try:
@@ -6324,14 +6605,15 @@ def post_album_star_ratings(
         _timings["persistence"] = time.monotonic() - _persist_started
 
         # 4. Apply the favourite floor to the newly persisted ratings
-        try:
-            from services.favourites_service import apply_favourite_rating_floor
-            _floored = apply_favourite_rating_floor(artist, album)
-            if _floored:
-                invalidate_genre_playlist_rows()
-                log_unified(f"♥ {_floored} hearted track(s) raised to the favourite rating floor")
-        except Exception as _floor_err:
-            logger.debug("Favourite rating floor skipped", artist=artist, album=album, error=str(_floor_err))
+        if not _dry_run:
+            try:
+                from services.favourites_service import apply_favourite_rating_floor
+                _floored = apply_favourite_rating_floor(artist, album)
+                if _floored:
+                    invalidate_genre_playlist_rows()
+                    log_unified(f"♥ {_floored} hearted track(s) raised to the favourite rating floor")
+            except Exception as _floor_err:
+                logger.debug("Favourite rating floor skipped", artist=artist, album=album, error=str(_floor_err))
 
         # 5. Reload authoritative final ratings into memory in one query batch
         _track_by_id = {
@@ -6339,7 +6621,7 @@ def post_album_star_ratings(
             for track in album_results
             if str(track.get("track_id") or "").strip()
         }
-        if _track_by_id:
+        if _track_by_id and not _dry_run:
             try:
                 with db_session() as session:
                     _final_rows = session.execute(

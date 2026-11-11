@@ -641,7 +641,12 @@ function buildConfigObject() {
           minor_album_top_n: parseInt(getValue('era_minor_album_top_n', '3')) || 3,
           minor_max_5star_slots: parseInt(getValue('era_minor_max_5star_slots', '2')) || 2,
           peak_era_min_ratio: parseFloat(getValue('peak_era_min_ratio', '0.75')) || 0.75,
-          solid_era_min_ratio: parseFloat(getValue('solid_era_min_ratio', '0.40')) || 0.40
+          solid_era_min_ratio: parseFloat(getValue('solid_era_min_ratio', '0.40')) || 0.40,
+          penalty_min_age_years: parseNumber('album_penalty_min_age_years', 2),
+          penalty_min_catalogue_albums: parseNumber('album_penalty_min_catalogue_albums', 3),
+          penalty_min_catalogue_tracks: parseNumber('album_penalty_min_catalogue_tracks', 30),
+          penalty_minor_max_5star_slots: parseNumber('album_penalty_minor_max_5star_slots', 1),
+          penalty_minor_max_4star_slots: parseNumber('album_penalty_minor_max_4star_slots', 2)
         },
         album_ratio_standout: {
           enabled: getChecked('album_ratio_standout_enabled', true),
@@ -671,9 +676,9 @@ function buildConfigObject() {
         },
         album_star_curve: {
           enabled: getChecked('album_star_curve_enabled', false),
-          curve_5star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_5star_percentile', '0.80')); return isFinite(v) ? v : 0.80; })(),
-          curve_4star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_4star_percentile', '0.55')); return isFinite(v) ? v : 0.55; })(),
-          curve_3star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_3star_percentile', '0.30')); return isFinite(v) ? v : 0.30; })(),
+          curve_5star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_5star_percentile', '0.85')); return isFinite(v) ? v : 0.85; })(),
+          curve_4star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_4star_percentile', '0.65')); return isFinite(v) ? v : 0.65; })(),
+          curve_3star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_3star_percentile', '0.35')); return isFinite(v) ? v : 0.35; })(),
           curve_2star_percentile: (function () { var v = parseFloat(getValue('album_star_curve_curve_2star_percentile', '0.12')); return isFinite(v) ? v : 0.12; })(),
           catalogue_cap_5star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_5star', '0.85')); return isFinite(v) ? v : 0.85; })(),
           catalogue_cap_4star: (function () { var v = parseFloat(getValue('album_star_curve_catalogue_cap_4star', '0.60')); return isFinite(v) ? v : 0.60; })(),

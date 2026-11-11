@@ -39,7 +39,7 @@ def queue_engine(monkeypatch):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 artist TEXT, title TEXT, album TEXT,
                 status TEXT DEFAULT 'queued', source TEXT DEFAULT 'soulseek',
-                track_number TEXT, import_group TEXT,
+                track_number TEXT, import_group TEXT, replace_track_id TEXT,
                 created_at TEXT, updated_at TEXT
             )
         """))

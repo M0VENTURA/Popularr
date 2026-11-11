@@ -29,3 +29,37 @@ def test_every_new_report_column_is_actually_selected():
         "lastfm_playcount_available",
     } <= selected
     assert selected <= set(svc.POPULARITY_REPORT_COLUMNS)
+
+
+def test_report_lists_every_genre_source_and_the_final_genre():
+    """The config-page export must show where a track's genre came from."""
+    columns = set(svc.POPULARITY_REPORT_COLUMNS)
+    assert {
+        "listenbrainz_genres",
+        "musicbrainz_genres",
+        "lastfm_tags",
+        "discogs_genres",
+        "genres",
+    } <= columns
+
+    select_block = svc._POPULARITY_REPORT_SELECT.split("FROM tracks")[0]
+    selected = {
+        name.strip()
+        for name in select_block.replace("SELECT", "").split(",")
+        if name.strip()
+    }
+    assert {
+        "listenbrainz_genres",
+        "musicbrainz_genres",
+        "lastfm_tags",
+        "discogs_genres",
+        "genres",
+    } <= selected
+
+
+def test_genre_lists_are_written_as_one_delimited_cell():
+    """A JSONB list off psycopg must not land in the CSV as a Python repr."""
+    assert svc._genre_cell(["Rock", "Pop"]) == "Rock; Pop"
+    assert svc._genre_cell('["Rock", "Pop"]') == "Rock; Pop"
+    assert svc._genre_cell("Rock, Pop") == "Rock; Pop"
+    assert svc._genre_cell(None) == ""

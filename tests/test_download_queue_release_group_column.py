@@ -135,7 +135,7 @@ def queue_engine(tmp_path: Any) -> Iterator[Any]:
                     track_number TEXT, disc_number TEXT,
                     year TEXT, release_year INTEGER,
                     release_id TEXT, release_mbid TEXT, recording_mbid TEXT,
-                    musicbrainz_releasegroupid TEXT,
+                    musicbrainz_releasegroupid TEXT, replace_track_id TEXT,
                     duration REAL, import_group TEXT, import_type TEXT,
                     metadata TEXT, search_query TEXT,
                     file_path TEXT, found_filename TEXT,

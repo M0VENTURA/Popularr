@@ -111,6 +111,8 @@ def ensure_schema(cursor):
         "album_artist": "TEXT",
         "release_mbid": "TEXT",
         "recording_mbid": "TEXT",
+        # Redownload-at-a-better-version replacement target.
+        "replace_track_id": "TEXT",
         # Album-scoped: the artist page keys albums on this field, so a queue row
         # that never stores it imports into a SEPARATE album from the release it
         # was downloaded for.  Mirrors COLUMN_REGISTRY["download_queue"].

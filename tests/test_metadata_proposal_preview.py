@@ -179,6 +179,39 @@ def _propose(monkeypatch: Any, proposal: Any, *, rows: list[dict[str, Any]] | No
 # propose_album_metadata — the write nothing guarantee
 # ---------------------------------------------------------------------------
 
+def test_missing_tracks_carry_the_track_artist(monkeypatch, proposal):
+    """The missing row must know WHO performs it.
+
+    Reported: "When searching lookup mbid from the album page, the track artist
+    doesn't seem to populate for missing tracks, then when adding to the queue
+    it's missing the track artist." The comparison entry has ``mb_artist``;
+    the proposal's missing list used to drop it, so the UI fell back to the
+    album artist.
+    """
+    comparison = {
+        "success": True,
+        "mb_release_mbid": "rel-1",
+        "mb_release_group_mbid": "rg-1",
+        "comparison": [{
+            "mb_track_number": 4,
+            "mb_disc_number": 1,
+            "mb_title": "Missing Song",
+            "mb_recording_mbid": "rec-missing",
+            "mb_artist": "Guest Performer",
+            "mb_duration": 240000,
+            "matched": False,
+        }],
+        "extra_tracks": [],
+    }
+
+    result = _propose(monkeypatch, proposal, comparison=comparison)
+
+    missing = result["missing"][0]
+    assert missing["mb_artist"] == "Guest Performer"
+    assert missing["track_artist"] == "Guest Performer"
+    assert missing["duration"] == 240000
+
+
 class TestProposeWritesNothing:
     def test_never_issues_a_write_statement(self, monkeypatch, proposal):
         """The single most important property: a preview must not mutate.

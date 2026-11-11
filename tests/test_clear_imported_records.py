@@ -123,7 +123,8 @@ def queue_db(monkeypatch):
                 status TEXT DEFAULT 'queued', source TEXT DEFAULT 'soulseek',
                 track_number TEXT, disc_number INTEGER, file_path TEXT,
                 matched_file_path TEXT, music_file_path TEXT,
-                import_group TEXT, created_at TEXT, updated_at TEXT
+                import_group TEXT, replace_track_id TEXT,
+                created_at TEXT, updated_at TEXT
             )
         """))
 

@@ -1610,6 +1610,9 @@ window.queueMissingTrack = function (btn) {
     const recordingMbid = btn.dataset.recordingMbid || null;
     const duration = btn.dataset.duration ? parseInt(btn.dataset.duration, 10) : null;
     const releaseId = btn.dataset.releaseId || _getLinkedReleaseMbid() || null;
+    // Set only by the "Redownload correct version" button. The importer removes
+    // this old library track once the new file verifies and imports.
+    const replaceTrackId = btn.dataset.replaceTrackId || null;
 
     const origHtml = btn.innerHTML;
     btn.disabled = true;
@@ -1639,6 +1642,7 @@ window.queueMissingTrack = function (btn) {
             release_mbid: releaseId,
             release_source: releaseId ? 'musicbrainz' : null,
             recording_mbid: recordingMbid,
+            replace_track_id: replaceTrackId,
             duration: duration,
             source: 'soulseek'
         })

@@ -65,6 +65,7 @@ def queue_env(monkeypatch):
                 retry_delay_minutes INTEGER DEFAULT 30,
                 failure_reason TEXT,
                 next_retry_at TEXT,
+                replace_track_id TEXT,
                 created_at TEXT,
                 updated_at TEXT
             )

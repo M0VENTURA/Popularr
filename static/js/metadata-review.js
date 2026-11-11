@@ -367,6 +367,9 @@
     btn.dataset.discNumber = check.disc_number || '';
     btn.dataset.recordingMbid = check.recording_mbid || '';
     btn.dataset.duration = check.duration || '';
+    // The library track this download REPLACES. The import deletes its file
+    // and row only after the new version verifies and lands.
+    btn.dataset.replaceTrackId = check.track_id || '';
     btn.innerHTML = '<i class="bi bi-download me-1"></i>Redownload correct version';
     // ``queueMissingTrack`` is the same path the missing rows use — dedupe,
     // busy popup and the "already_queued is not an insert" rule included.

@@ -379,6 +379,11 @@ def resync_star_ratings(
         # A resync has no scan loop to post per-album, so nothing is deferred.
         "_per_album_posted": True,
         "_resync": True,
+        # Makes ``post_album_star_ratings`` skip ALL database writes, the
+        # favourite floor and the reload. Rating a copy is not enough on its
+        # own — the copy keeps the same track ids, so the shared path would
+        # still have persisted the new stars.
+        "_dry_run": bool(dry_run),
     }
     if dry_run:
         # Suppress the Navidrome client build entirely.

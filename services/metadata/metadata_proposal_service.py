@@ -957,6 +957,14 @@ def propose_album_metadata(
                 "mb_disc_number": entry.get("mb_disc_number"),
                 "mb_title": entry.get("mb_title"),
                 "mb_recording_mbid": entry.get("mb_recording_mbid"),
+                # ⚠️ The missing row's TRACK ARTIST. Without it the album page
+                # fell back to the album artist (or blank) and queued the track
+                # without its performer. The comparison already carries the
+                # recording credit; the proposal used to drop it.
+                "mb_artist": entry.get("mb_artist"),
+                "track_artist": entry.get("mb_artist"),
+                "mb_duration": entry.get("mb_duration"),
+                "duration": entry.get("mb_duration"),
             }
             for entry in comparison
             if not entry.get("matched")

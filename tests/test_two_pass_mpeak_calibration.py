@@ -63,9 +63,10 @@ class TestCatalogWideMPeak:
 
     def _model_for(self, album_results, db_rows, monkeypatch):
         from services.popularity.stages import finalise_stage as fs
-        import db.engine as db_engine
 
-        monkeypatch.setattr(db_engine, "db_session", _session_factory(db_rows))
+        # ``finalise_stage`` binds ``db_session`` at import time; patch the
+        # module the model actually calls.
+        monkeypatch.setattr(fs, "db_session", _session_factory(db_rows))
         return fs._build_album_model(
             "A Perfect Circle",
             album_results,

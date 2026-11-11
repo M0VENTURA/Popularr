@@ -163,7 +163,8 @@ def seeded_queue(monkeypatch):
                 artist TEXT, title TEXT, album TEXT, album_artist TEXT,
                 status TEXT DEFAULT 'queued', source TEXT DEFAULT 'soulseek',
                 track_number TEXT, disc_number INTEGER, file_path TEXT,
-                import_group TEXT, release_id TEXT, created_at TEXT, updated_at TEXT
+                import_group TEXT, release_id TEXT, replace_track_id TEXT,
+                created_at TEXT, updated_at TEXT
             )
         """))
         rows = [

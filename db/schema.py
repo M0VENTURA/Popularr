@@ -493,6 +493,10 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "auto_delete_at": "TIMESTAMP", "copied_individually_at": "TIMESTAMP", 
         "release_id": "TEXT", "release_source": "TEXT", "release_mbid": "TEXT", 
         "recording_mbid": "TEXT", "musicbrainz_releasegroupid": "TEXT",
+        # A redownload queued from a duration mismatch: the library track this
+        # row REPLACES. After the new file verifies and imports, the old file
+        # and its tracks row are removed. NULL for an ordinary download.
+        "replace_track_id": "TEXT",
         "metadata_id": "BIGINT", "release_metadata_id": "BIGINT",
         "metadata": "JSONB DEFAULT '{}'::jsonb", "collection_track_id": "TEXT", 
         "collection_matched_at": "TEXT", "in_collection": "INTEGER DEFAULT 0", 

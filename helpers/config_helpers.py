@@ -920,9 +920,12 @@ _DEFAULT_ALBUM_STAR_CURVE: dict[str, Any] = {
     # Star Rating Resync (which previews every change first).
     "enabled": 0,
     # Within-album percentile needed for each tier (top of the album = 1.0).
-    "curve_5star_percentile": 0.80,
-    "curve_4star_percentile": 0.55,
-    "curve_3star_percentile": 0.30,
+    # Tuned tighter than the original 0.80/0.55/0.30/0.12: the first cut put
+    # 20% of every album in the 5★ bracket and 45% at 4★+, which reproduced
+    # the "nearly the whole upper half of the album is 4★" clustering.
+    "curve_5star_percentile": 0.85,
+    "curve_4star_percentile": 0.65,
+    "curve_3star_percentile": 0.35,
     "curve_2star_percentile": 0.12,
     # Artist-catalogue percentile each tier must ALSO clear. 0 disables a tier's
     # catalogue check.

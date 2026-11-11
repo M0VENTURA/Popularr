@@ -253,7 +253,7 @@ class TestConfigReaders:
             "the curve must ship DISABLED — enabling it by default would "
             "silently re-rate the whole library on the next scan"
         )
-        assert curve["curve_5star_percentile"] == 0.80
+        assert curve["curve_5star_percentile"] == 0.85
         assert curve["catalogue_cap_5star"] == 0.85
         assert curve["five_star_min_listeners"] == 0
         assert curve["min_album_tracks"] == 3
@@ -287,7 +287,7 @@ class TestConfigReaders:
         assert curve["enabled"] == 0
         assert curve["five_star_min_listeners"] == 25_000
         # untouched keys keep their defaults
-        assert curve["curve_5star_percentile"] == 0.80
+        assert curve["curve_5star_percentile"] == 0.85
 
         resync = get_star_resync_config(config=cfg)
         assert resync["enabled"] == 0
@@ -332,6 +332,8 @@ class TestResyncServiceContract:
         svc.resync_star_ratings(dry_run=True)
         assert called["options"]["write_file_tags"] is False
         assert called["options"]["sync_navidrome"] is False
+        # The shared posting path needs this to skip DB writes entirely.
+        assert called["options"]["_dry_run"] is True
 
     def test_apply_honours_the_configured_flags(self, monkeypatch):
         from services.popularity import star_resync_service as svc

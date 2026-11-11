@@ -384,7 +384,13 @@ def _titles_match(a: str, b: str) -> bool:
     return bool(norm(a) and norm(a) == norm(b))
 
 
-def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any], music_root: str) -> Dict[str, Any]:
+def move_track_to_library(
+    track: dict[str, Any],
+    release_metadata: dict[str, Any],
+    music_root: str,
+    *,
+    replace_path: str | None = None,
+) -> Dict[str, Any]:
     file_path = track.get("file_path")
 
     if not file_path:
@@ -421,6 +427,35 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
     if converting and target_format:
         target_path = f"{os.path.splitext(target_path)[0]}.{target_format}"
 
+    # A redownload-for-a-better-version can resolve to the OLD file's exact
+    # path. The duplicate check below would then "skip" the new file and leave
+    # the wrong version in place. Move the old file aside first and restore it
+    # if the new move/conversion fails.
+    replace_abs = os.path.realpath(replace_path) if replace_path else ""
+    target_abs = os.path.realpath(target_path) if target_path else ""
+    replacement_target = bool(replace_abs and target_abs and replace_abs == target_abs)
+    backup_path: str | None = None
+
+    def _restore_backup() -> None:
+        if not backup_path:
+            return
+        try:
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            os.replace(backup_path, target_path)
+        except Exception as restore_exc:
+            logger.warning(
+                "Could not restore replaced version after a failed import",
+                target=target_path, backup=backup_path, error=str(restore_exc),
+            )
+
+    if replacement_target and os.path.exists(target_path):
+        backup_path = f"{target_path}.replace-{os.getpid()}"
+        try:
+            os.replace(target_path, backup_path)
+        except Exception as exc:
+            return {"success": False, "error": f"could not back up old version: {exc}"}
+
     if os.path.exists(target_path):
         if _titles_match(_read_file_title(target_path), track.get("title")):
             logger.info(
@@ -438,12 +473,24 @@ def move_track_to_library(track: dict[str, Any], release_metadata: dict[str, Any
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         if converting:
             if not _convert_flac_and_handle_original(file_path, target_path, conversion_settings):
+                _restore_backup()
                 return {"success": False, "error": f"{target_format.upper()} conversion failed"}
+            if backup_path:
+                try:
+                    os.remove(backup_path)
+                except Exception:
+                    pass
             return {"success": True, "target_path": target_path, "converted": True}
         shutil.move(file_path, target_path)
     except Exception as exc:
+        _restore_backup()
         return {"success": False, "error": str(exc)}
 
+    if backup_path:
+        try:
+            os.remove(backup_path)
+        except Exception:
+            pass
     return {"success": True, "target_path": target_path}
 
 

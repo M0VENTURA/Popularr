@@ -71,9 +71,11 @@ def _album_result(album, scores, lf_list=None, lb_list=None, year=2000):
 
 def _model_for(album_results, db_rows, monkeypatch, artist="A Perfect Circle"):
     from services.popularity.stages import finalise_stage as fs
-    import db.engine as db_engine
 
-    monkeypatch.setattr(db_engine, "db_session", _session_factory(db_rows))
+    # ``finalise_stage`` binds ``db_session`` at import time, so patching
+    # ``db.engine.db_session`` does not reach it. Patch the module the model
+    # actually calls.
+    monkeypatch.setattr(fs, "db_session", _session_factory(db_rows))
     return fs._build_album_model(
         artist,
         album_results,
@@ -215,7 +217,10 @@ class TestAlbumProminenceScore:
         assert album_prominence_score(0, 500) > 0.0
 
     def test_median_helper(self):
-        from services.popularity.popularity_math import album_prominence_median
+        from services.popularity.popularity_math import (
+            album_prominence_median,
+            album_prominence_score,
+        )
 
         rows = [
             {"lastfm_listeners": 800000, "listenbrainz_listens": 80000},

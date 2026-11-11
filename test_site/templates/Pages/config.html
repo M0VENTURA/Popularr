@@ -2603,18 +2603,18 @@
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="album_star_curve_curve_5star_percentile">5★ Album Percentile</label>
-          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_5star_percentile" placeholder="0.80" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_5star_percentile', 0.80) }}">
-          <small class="form-text text-muted">Top 20% of the album. Default: <strong>0.80</strong></small>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_5star_percentile" placeholder="0.85" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_5star_percentile', 0.85) }}">
+          <small class="form-text text-muted">Top 15% of the album. Default: <strong>0.85</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="album_star_curve_curve_4star_percentile">4★ Album Percentile</label>
-          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_4star_percentile" placeholder="0.55" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_4star_percentile', 0.55) }}">
-          <small class="form-text text-muted">Default: <strong>0.55</strong></small>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_4star_percentile" placeholder="0.65" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_4star_percentile', 0.65) }}">
+          <small class="form-text text-muted">Default: <strong>0.65</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="album_star_curve_curve_3star_percentile">3★ Album Percentile</label>
-          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_3star_percentile" placeholder="0.30" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_3star_percentile', 0.30) }}">
-          <small class="form-text text-muted">Default: <strong>0.30</strong></small>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_3star_percentile" placeholder="0.35" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_3star_percentile', 0.35) }}">
+          <small class="form-text text-muted">Default: <strong>0.35</strong></small>
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="album_star_curve_curve_2star_percentile">2★ Album Percentile</label>
@@ -3242,6 +3242,35 @@
               <label class="form-label form-label-sm" for="solid_era_min_ratio">Solid Era Threshold</label>
               <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="solid_era_min_ratio" placeholder="0.40" value="{{ scaling.get('solid_era_min_ratio', 0.40) }}">
               <small class="form-text text-muted">Popularity ratio required for a Solid Era album. Albums below this threshold are marked Minor. Default: <strong>0.40</strong></small>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="border rounded p-3 h-100">
+            <h6 class="mb-2">Minor Album Penalty</h6>
+            <p class="text-muted small mb-2">A mature Minor-era album (well below the artist's peak album) gives up high-tier slots. Genuine standouts can still reach 5★. New albums are exempt until they have had time to gather plays.</p>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="album_penalty_min_age_years">Minimum Album Age (years)</label>
+              <input type="number" step="1" min="0" max="50" class="form-control form-control-sm" id="album_penalty_min_age_years" placeholder="2" value="{{ scaling.get('penalty_min_age_years', 2) }}">
+              <small class="form-text text-muted">Albums newer than this are never penalised. Default: <strong>2</strong></small>
+            </div>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="album_penalty_min_catalogue_albums">Minimum Catalogue Albums</label>
+              <input type="number" step="1" min="0" max="100" class="form-control form-control-sm" id="album_penalty_min_catalogue_albums" placeholder="3" value="{{ scaling.get('penalty_min_catalogue_albums', 3) }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="album_penalty_min_catalogue_tracks">Minimum Catalogue Tracks</label>
+              <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="album_penalty_min_catalogue_tracks" placeholder="30" value="{{ scaling.get('penalty_min_catalogue_tracks', 30) }}">
+            </div>
+            <div class="row g-2">
+              <div class="col-6">
+                <label class="form-label form-label-sm" for="album_penalty_minor_max_5star_slots">Max 5★ Tracks</label>
+                <input type="number" step="1" min="0" max="20" class="form-control form-control-sm" id="album_penalty_minor_max_5star_slots" placeholder="1" value="{{ scaling.get('penalty_minor_max_5star_slots', 1) }}">
+              </div>
+              <div class="col-6">
+                <label class="form-label form-label-sm" for="album_penalty_minor_max_4star_slots">Max 4★ Tracks</label>
+                <input type="number" step="1" min="0" max="20" class="form-control form-control-sm" id="album_penalty_minor_max_4star_slots" placeholder="2" value="{{ scaling.get('penalty_minor_max_4star_slots', 2) }}">
+              </div>
             </div>
           </div>
         </div>
