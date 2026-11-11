@@ -160,6 +160,81 @@
     }
   }
 
+  /**
+   * Re-evaluate every track's final genres from the evidence already stored in
+   * the database (no provider calls). Writes only the `genres` column.
+   */
+  async function runGenreResync(dryRun) {
+    const out = document.getElementById('genre_resync_output');
+    const setOut = (html) => { if (out) out.innerHTML = html; };
+
+    if (!dryRun && !confirm(
+      'Re-evaluate genres for every track from the stored genre evidence?\n\n' +
+      'This rewrites the genres column in the database. It does not change your music files or call any providers.\n\n' +
+      'Run Preview first if you have not.'
+    )) {
+      return;
+    }
+
+    const btns = [
+      document.getElementById('genre_resync_preview_btn'),
+      document.getElementById('genre_resync_apply_btn')
+    ].filter(Boolean);
+    btns.forEach(b => { b.disabled = true; });
+    setOut(dryRun ? 'Calculating genre preview…' : 'Re-evaluating genres…');
+
+    try {
+      const limitRaw = document.getElementById('genre_resync_limit_tracks')?.value;
+      const limit = parseInt(limitRaw || '0', 10);
+      const body = { dry_run: !!dryRun };
+      if (Number.isFinite(limit) && limit > 0) body.limit_tracks = limit;
+
+      const resp = await fetch('/api/genres/resync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        setOut('<span class="text-danger">' + esc(data.error || ('HTTP ' + resp.status)) + '</span>');
+        return;
+      }
+
+      const changed = Array.isArray(data.changed_tracks) ? data.changed_tracks : [];
+      const rows = changed.slice(0, 200).map(t => {
+        const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
+        return '<tr><td>' + esc(t.title || '') + '</td>'
+          + '<td class="text-muted">' + esc(label) + '</td>'
+          + '<td>' + esc(t.before || '—') + '</td>'
+          + '<td><strong>' + esc(t.after || '—') + '</strong></td></tr>';
+      }).join('');
+
+      setOut(
+        '<div class="alert alert-' + (dryRun ? 'info' : 'success') + ' py-2 mb-2">'
+        + (dryRun ? '<strong>Preview only — nothing was written.</strong> ' : '<strong>Genres re-evaluated.</strong> ')
+        + data.tracks + ' tracks, ' + data.with_evidence + ' with stored evidence, '
+        + '<strong>' + data.changed + '</strong> genre set(s) ' + (dryRun ? 'would change' : 'changed')
+        + ' in ' + data.seconds + 's.'
+        + (data.skipped_no_evidence
+          ? ' ' + data.skipped_no_evidence + ' had no stored evidence and were left alone.'
+          : '')
+        + '</div>'
+        + (rows
+          ? '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+            + '<thead><tr><th>Track</th><th>Album</th><th>Before</th><th>After</th></tr></thead>'
+            + '<tbody>' + rows + '</tbody></table></div>'
+            + (changed.length > 200
+              ? '<div class="text-muted mt-1">Showing first 200 of ' + changed.length + '.</div>'
+              : '')
+          : '<div class="text-muted">No genre changes.</div>')
+      );
+    } catch (err) {
+      setOut('<span class="text-danger">' + esc(String(err)) + '</span>');
+    } finally {
+      btns.forEach(b => { b.disabled = false; });
+    }
+  }
+
   // ── Excluded playlist artists ───────────────────────────────────────────
 
   let configExcludedArtists = [];
@@ -2330,6 +2405,10 @@
     if (resyncPreview) resyncPreview.addEventListener('click', () => runStarResync(true));
     const resyncApply = document.getElementById('star_resync_apply_btn');
     if (resyncApply) resyncApply.addEventListener('click', () => runStarResync(false));
+    const genreResyncPreview = document.getElementById('genre_resync_preview_btn');
+    if (genreResyncPreview) genreResyncPreview.addEventListener('click', () => runGenreResync(true));
+    const genreResyncApply = document.getElementById('genre_resync_apply_btn');
+    if (genreResyncApply) genreResyncApply.addEventListener('click', () => runGenreResync(false));
     if (document.getElementById('excludedArtistsList')) {
       loadExcludedArtists();
     }

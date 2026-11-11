@@ -1,0 +1,219 @@
+"""Re-evaluate ``tracks.genres`` from the genre evidence already in the DB.
+
+The popularity/enrichment scan writes a track's final genres once. When the
+selection engine, the vocabulary or a source column changes, the stored values
+do not update until the album is scanned again — and a scan re-queries the
+providers. Every input the selector needs is already in the ``tracks`` table, so
+this recomputes the final genres without any provider calls.
+
+It is the genre twin of ``services.popularity.star_resync_service``:
+``dry_run=True`` reports what would change and writes nothing.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+import structlog
+from sqlalchemy import text
+
+from db.engine import db_session
+from services.enrichment.genre_aggregation_service import (
+    _same_genre_value,
+    aggregate_genres,
+)
+
+logger = structlog.get_logger(__name__)
+
+#: Source -> stored column. ``manual`` outranks everything in the selector.
+SOURCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("musicbrainz", "musicbrainz_genres"),
+    ("listenbrainz", "listenbrainz_genres"),
+    ("lastfm", "lastfm_tags"),
+    ("discogs", "discogs_genres"),
+    ("spotify", "spotify_genres"),
+    ("navidrome", "navidrome_genres"),
+    ("audiodb", "audiodb_genres"),
+    ("essentia", "essentia_genres"),
+    ("wikidata", "wikidata_genres"),
+    ("manual", "manual_genres"),
+)
+
+_SELECT_COLUMNS = (
+    "id", "title", "album", "artist", "album_artist", "genres",
+    *(column for _source, column in SOURCE_COLUMNS),
+)
+
+
+def _has_value(value: Any) -> bool:
+    """True when a stored genre column carries at least one usable value."""
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return str(value).strip() not in ("", "[]", "{}", "null", "None")
+
+
+def _source_map(row: Any) -> dict[str, Any]:
+    """The selector's ``source@track`` evidence map for one stored row."""
+    out: dict[str, Any] = {}
+    for source, column in SOURCE_COLUMNS:
+        value = row.get(column)
+        if _has_value(value):
+            out[f"{source}@track"] = value
+    return out
+
+
+def _track_limit() -> int:
+    try:
+        from helpers.config_helpers import get_genre_track_limit
+
+        return max(1, int(get_genre_track_limit()))
+    except Exception:
+        return 3
+
+
+def _load_rows(artist: str | None, album: str | None) -> list[dict[str, Any]]:
+    where = ["COALESCE(album, '') <> ''"]
+    params: dict[str, Any] = {}
+    if artist:
+        where.append("LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)")
+        params["artist"] = artist
+    if album:
+        where.append("LOWER(album) = LOWER(:album)")
+        params["album"] = album
+
+    sql = (
+        "SELECT " + ", ".join(_SELECT_COLUMNS) + " FROM tracks "
+        "WHERE " + " AND ".join(where) + " "
+        "ORDER BY COALESCE(NULLIF(album_artist, ''), artist), album, disc_number, track_number"
+    )
+    with db_session() as session:
+        rows = session.execute(text(sql), params).fetchall() or []
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        mapping = getattr(row, "_mapping", None)
+        out.append(dict(mapping) if mapping is not None else dict(row))
+    return out
+
+
+def _persist(changes: list[tuple[str, str]]) -> None:
+    if not changes:
+        return
+    stmt = text("UPDATE tracks SET genres = :genres WHERE CAST(id AS TEXT) = :id")
+    batch = [{"genres": after, "id": track_id} for track_id, after in changes]
+    try:
+        with db_session() as session:
+            session.execute(stmt, batch)
+    except Exception as batch_exc:
+        logger.debug(
+            "Genre resync batch update failed, falling back to per-row",
+            error=str(batch_exc),
+        )
+        for param in batch:
+            try:
+                with db_session() as session:
+                    session.execute(stmt, param)
+            except Exception as exc:
+                logger.warning(
+                    "Genre resync row update failed",
+                    track_id=param["id"], error=str(exc),
+                )
+
+
+def resync_genres(
+    *,
+    artist: str | None = None,
+    album: str | None = None,
+    limit_tracks: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Recompute final genres for stored tracks from their stored evidence.
+
+    Args:
+        artist: Restrict to one album artist (``album_artist`` when present).
+        album: Restrict to one album title (combine with ``artist``).
+        limit_tracks: Cap the number of tracks examined (smoke tests).
+        dry_run: Compute and report only; write nothing at all.
+
+    Returns:
+        ``{"ok", "dry_run", "tracks", "with_evidence", "changed",
+        "skipped_no_evidence", "changed_tracks", "seconds"}``.
+    """
+    started = time.monotonic()
+    max_genres = _track_limit()
+    rows = _load_rows(artist, album)
+    if limit_tracks:
+        rows = rows[: int(limit_tracks)]
+
+    changes: list[tuple[str, str]] = []
+    changed_rows: list[dict[str, Any]] = []
+    with_evidence = 0
+
+    for row in rows:
+        source_map = _source_map(row)
+        if not source_map:
+            continue
+        with_evidence += 1
+
+        proposed = aggregate_genres(
+            source_map,
+            max_genres=max_genres,
+            context_title=str(row.get("title") or ""),
+            context_album=str(row.get("album") or ""),
+        )
+        if not proposed:
+            continue
+        proposed_str = ", ".join(proposed)
+        existing = row.get("genres")
+        if _same_genre_value(existing, proposed_str):
+            continue
+
+        track_id = str(row.get("id") or "").strip()
+        if not track_id:
+            continue
+        changes.append((track_id, proposed_str))
+        changed_rows.append(
+            {
+                "track_id": track_id,
+                "title": str(row.get("title") or ""),
+                "artist": str(row.get("artist") or ""),
+                "album": str(row.get("album") or ""),
+                "before": str(existing or ""),
+                "after": proposed_str,
+            }
+        )
+
+    if not dry_run:
+        _persist(changes)
+
+    elapsed = round(time.monotonic() - started, 2)
+    logger.info(
+        "Genre resync finished",
+        tracks=len(rows), with_evidence=with_evidence,
+        changed=len(changes), dry_run=dry_run, seconds=elapsed,
+    )
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "tracks": len(rows),
+        "with_evidence": with_evidence,
+        "changed": len(changes),
+        "skipped_no_evidence": len(rows) - with_evidence,
+        "changed_tracks": changed_rows,
+        "seconds": elapsed,
+    }
+
+
+def preview_genres(
+    *,
+    artist: str | None = None,
+    album: str | None = None,
+    limit_tracks: int | None = None,
+) -> dict[str, Any]:
+    """Convenience wrapper: a dry run that writes nothing."""
+    return resync_genres(
+        artist=artist, album=album, limit_tracks=limit_tracks, dry_run=True
+    )

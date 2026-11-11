@@ -781,9 +781,18 @@ def _append_extra_genres(
     filters = set(intercepted_filters or ())
 
     # Base heuristic checks
-    if bool(re.search(r"[\(\[]\s*(live|acoustic|unplugged)[^)\]]*[\)\]]\s*$", title_lower)) or \
+    # ⚠️ ACOUSTIC/UNPLUGGED ARE NOT LIVE. This used to match
+    # ``(live|acoustic|unplugged)`` and always append "Live", so an acoustic
+    # bonus track carried a false Live marker and never got "Acoustic". The
+    # markers are per-performance attributes and must name the right
+    # performance.
+    if re.search(r"[\(\[]\s*live[^)\]]*[\)\]]\s*$", title_lower) or \
        any(re.search(p, context_lower) for p in [r"\bconcert\b", r"\bat\s+\w+\s+(arena|stadium|hall|club|theatre|theater)"]):
         filters.add("Live")
+    if re.search(r"[\(\[]\s*unplugged[^)\]]*[\)\]]\s*$", title_lower):
+        filters.add("Unplugged")
+    elif re.search(r"[\(\[]\s*acoustic[^)\]]*[\)\]]\s*$", title_lower):
+        filters.add("Acoustic")
 
     # "Cover" is a per-TRACK affiliation, never an album property.
     if (re.search(r"[\(\[]\s*[^)\]]+\s+cover\s*[\)\]]\s*$", title_lower)

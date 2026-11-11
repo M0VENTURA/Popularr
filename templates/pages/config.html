@@ -2658,6 +2658,28 @@
       </div>
 
       <hr class="my-3">
+      <div class="border rounded p-3" id="genre-resync">
+        <h6 class="mb-1">Genre Re-evaluation</h6>
+        <p class="text-muted small mb-3">
+          Recomputes each track's final genres from the genre evidence already stored in the database
+          (MusicBrainz, ListenBrainz, Last.fm, Discogs, Spotify, Navidrome, AudioDB, Essentia, Wikidata and manual).
+          No provider calls. Run this after changing the genre vocabulary or selection thresholds; Preview first.
+        </p>
+        <div class="row g-3 mb-3">
+          <div class="col-12 col-sm-6 col-lg-3">
+            <label class="form-label form-label-sm" for="genre_resync_limit_tracks">Limit Tracks (0 = all)</label>
+            <input type="number" step="1" min="0" class="form-control form-control-sm" id="genre_resync_limit_tracks" placeholder="0" value="0">
+            <small class="form-text text-muted">Use a small number for a first preview. 0 = every track.</small>
+          </div>
+          <div class="col-12">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="genre_resync_preview_btn">Preview Genre Changes</button>
+            <button type="button" class="btn btn-warning btn-sm ms-2" id="genre_resync_apply_btn">Apply Genre Re-evaluation</button>
+            <div id="genre_resync_output" class="small mt-2"></div>
+          </div>
+        </div>
+      </div>
+
+      <hr class="my-3">
       <h6 class="mb-3">3 · Score Adjustments</h6>
       <div class="row g-3">
         <div class="col-12 col-sm-6 col-lg-3">

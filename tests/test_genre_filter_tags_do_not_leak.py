@@ -123,24 +123,31 @@ class TestCoverIsStrict:
 
 
 class TestLiveAcousticRegexRestored:
-    def test_acoustic_title_gets_the_live_filter(self):
+    def test_acoustic_title_gets_the_acoustic_filter(self):
         out = aggregate_genres(
             {"musicbrainz": ["rock"]},
             max_genres=2,
             context_title="Blackbird (Acoustic)",
             context_album="Album",
         )
-        assert "Live" in out, (
-            "the parenthetical alternation was corrupted by de12b3cf "
-            "((live\\vert{}acoustic\\vert{}unplugged) never matches); "
-            "(Acoustic) titles must be tagged again"
-        )
+        assert "Acoustic" in out, "(Acoustic) titles must be tagged Acoustic"
+        assert "Live" not in out, "an acoustic version is not a live take"
 
-    def test_unplugged_title_gets_the_live_filter(self):
+    def test_unplugged_title_gets_the_unplugged_filter(self):
         out = aggregate_genres(
             {"musicbrainz": ["rock"]},
             max_genres=2,
             context_title="Song (Unplugged)",
+            context_album="Album",
+        )
+        assert "Unplugged" in out
+        assert "Live" not in out
+
+    def test_live_title_gets_the_live_filter(self):
+        out = aggregate_genres(
+            {"musicbrainz": ["rock"]},
+            max_genres=2,
+            context_title="Song (Live)",
             context_album="Album",
         )
         assert "Live" in out

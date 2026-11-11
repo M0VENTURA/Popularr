@@ -187,7 +187,7 @@
     {"id": "hip_hop", "display": "Hip-Hop", "parent": null, "specificity": 0, "aliases": ["hip hop", "hiphop", "rap"]},
     {"id": "boom_bap", "display": "Boom Bap", "parent": "hip_hop", "specificity": 2, "aliases": ["boom-bap"]},
     {"id": "trap", "display": "Trap", "parent": "hip_hop", "specificity": 2},
-    {"id": "gangsta_rap", "display": "Gangsta Rap", "parent": "hip_hop", "specificity": 2, "aliases": ["gangster rap"]},
+    {"id": "gangsta_rap", "display": "Gangsta Rap", "parent": "hip_hop", "specificity": 2, "aliases": ["gangster rap", "gangsta", "gangsta rap", "gangsta-rap"]},
     {"id": "conscious_hip_hop", "display": "Conscious Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["conscious hip hop", "conscious rap"]},
     {"id": "east_coast_hip_hop", "display": "East Coast Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["east coast hip hop", "east coast rap"]},
     {"id": "west_coast_hip_hop", "display": "West Coast Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["west coast hip hop", "west coast rap"]},
@@ -233,7 +233,29 @@
     {"id": "avant_garde", "display": "Avant-Garde", "parent": "experimental", "specificity": 2, "aliases": ["avant garde"]},
     {"id": "comedy", "display": "Comedy", "parent": null, "specificity": 1},
     {"id": "soundtrack", "display": "Soundtrack", "parent": null, "specificity": 1, "aliases": ["original soundtrack", "ost"]},
-    {"id": "christmas", "display": "Christmas", "parent": null, "specificity": 1, "aliases": ["xmas", "holiday", "yuletide"]}
+    {"id": "christmas", "display": "Christmas", "parent": null, "specificity": 1, "aliases": ["xmas", "holiday", "yuletide", "christmas music"]},
+
+    {"id": "pop_rock", "display": "Pop Rock", "parents": ["rock", "pop"], "specificity": 2, "family": "rock", "aliases": ["pop-rock"]},
+    {"id": "classic_rock", "display": "Classic Rock", "parent": "rock", "specificity": 2, "aliases": ["classic-rock"]},
+    {"id": "arena_rock", "display": "Arena Rock", "parent": "hard_rock", "specificity": 2, "aliases": ["stadium rock"]},
+    {"id": "acoustic_rock", "display": "Acoustic Rock", "parent": "rock", "specificity": 2, "aliases": ["acoustic-rock"]},
+    {"id": "symphonic_rock", "display": "Symphonic Rock", "parent": "rock", "specificity": 2, "aliases": ["symphonic-rock"]},
+    {"id": "industrial_rock", "display": "Industrial Rock", "parents": ["rock", "industrial"], "specificity": 2, "family": "rock", "aliases": ["industrial-rock"]},
+    {"id": "rock_and_roll", "display": "Rock & Roll", "parent": "rock", "specificity": 1, "aliases": ["rock and roll", "rock 'n' roll", "rock n roll", "rock'n'roll"]},
+    {"id": "glam_rock", "display": "Glam Rock", "parent": "rock", "specificity": 2, "aliases": ["glam", "glam-rock"]},
+    {"id": "psychobilly", "display": "Psychobilly", "parent": "rockabilly", "specificity": 2},
+    {"id": "britpop", "display": "Britpop", "parent": "alternative_rock", "specificity": 2, "aliases": ["brit pop", "brit-pop"]},
+    {"id": "disco", "display": "Disco", "parent": "pop", "specificity": 1},
+    {"id": "dance_pop", "display": "Dance-Pop", "parent": "pop", "specificity": 2, "aliases": ["dance pop", "dancepop"]},
+    {"id": "europop", "display": "Europop", "parent": "pop", "specificity": 2, "aliases": ["euro pop", "euro-pop"]},
+    {"id": "bubblegum_pop", "display": "Bubblegum Pop", "parent": "pop", "specificity": 2, "aliases": ["bubblegum", "bubblegum-pop"]},
+    {"id": "teen_pop", "display": "Teen Pop", "parent": "pop", "specificity": 2, "aliases": ["teen-pop"]},
+    {"id": "new_jack_swing", "display": "New Jack Swing", "parent": "r_and_b", "specificity": 2, "aliases": ["new-jack-swing"]},
+    {"id": "west_coast_swing", "display": "West Coast Swing", "parent": "swing", "specificity": 2, "aliases": ["west-coast-swing"]},
+    {"id": "euro_house", "display": "Euro House", "parent": "house", "specificity": 2, "aliases": ["euro-house"]},
+    {"id": "pop_rap", "display": "Pop Rap", "parent": "hip_hop", "specificity": 2, "aliases": ["pop-rap"]},
+    {"id": "funk_metal", "display": "Funk Metal", "parents": ["metal", "funk"], "specificity": 2, "family": "metal", "aliases": ["funk-metal"]},
+    {"id": "sea_shanties", "display": "Sea Shanties", "parent": "folk", "specificity": 2, "aliases": ["sea shanty", "shanty", "shanties"]}
   ],
 
   "moods": [
@@ -247,7 +269,7 @@
     {"id": "playful", "display": "Playful", "family": "valence", "aliases": ["quirky", "whimsical", "funny"]},
     {"id": "melancholic", "display": "Melancholic", "family": "valence", "aliases": ["melancholy", "sad", "somber", "sombre", "moody", "bittersweet", "wistful"]},
     {"id": "dark", "display": "Dark", "family": "valence", "aliases": ["dark atmosphere", "sinister", "ominous", "brooding"]},
-    {"id": "atmospheric", "display": "Atmospheric", "family": "atmosphere", "aliases": ["ambient atmosphere", "spacious"]},
+    {"id": "atmospheric", "display": "Atmospheric", "family": "atmosphere", "aliases": ["ambient atmosphere", "spacious", "ambiance", "ambience"]},
     {"id": "dreamy", "display": "Dreamy", "family": "atmosphere", "aliases": ["hazy", "ethereal"]},
     {"id": "haunting", "display": "Haunting", "family": "atmosphere", "aliases": ["eerie", "unsettling"]},
     {"id": "meditative", "display": "Meditative", "family": "atmosphere", "aliases": ["hypnotic", "trance like"]},
@@ -256,7 +278,9 @@
     {"id": "danceable", "display": "Danceable", "family": "function", "aliases": ["dance", "club", "party"]},
     {"id": "romantic", "display": "Romantic", "family": "function", "aliases": ["love", "sensual", "sexy"]},
     {"id": "focus", "display": "Focus", "family": "function", "aliases": ["study", "concentration"]},
-    {"id": "sleep", "display": "Sleep", "family": "function", "aliases": ["bedtime", "nighttime"]}
+    {"id": "sleep", "display": "Sleep", "family": "function", "aliases": ["bedtime", "nighttime"]},
+    {"id": "melodic", "display": "Melodic", "family": "texture", "aliases": ["melody", "melodic music"]},
+    {"id": "heavy", "display": "Heavy", "family": "texture", "aliases": ["heaviness"]}
   ],
 
   "geography": {

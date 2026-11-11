@@ -2194,6 +2194,71 @@ async def api_resync_star_ratings() -> Any:
 
 
 # ===========================================================================
+# GENRE RE-EVALUATION
+# ===========================================================================
+
+@misc_api_bp.route("/genres/resync", methods=["POST"])
+async def api_resync_genres() -> Any:
+    """Recompute ``tracks.genres`` from genre evidence already in the DB.
+
+    No provider calls: the selector reads the stored MusicBrainz,
+    ListenBrainz, Last.fm, Discogs, Spotify, Navidrome, AudioDB, Essentia,
+    Wikidata and manual columns. This is how a vocabulary/selection change is
+    applied to the existing library without a rescan.
+
+    Body (all optional)::
+
+        {"dry_run": true}                      # preview only (default)
+        {"artist": "AC/DC"}
+        {"artist": "AC/DC", "album": "..."}
+        {"limit_tracks": 50}
+
+    ``dry_run`` defaults to TRUE for this endpoint: a stray call must not
+    rewrite the whole library's genres. The Config page's Apply button sends
+    ``false`` explicitly.
+    """
+    from services.enrichment.genre_resync_service import resync_genres
+
+    try:
+        payload = (await request.get_json(silent=True)) or {}
+    except Exception:
+        payload = {}
+
+    def _as_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().casefold() not in ("", "0", "false", "no", "off")
+        return bool(value)
+
+    dry_run = _as_bool(payload.get("dry_run"), default=True)
+    artist = str(payload.get("artist") or "").strip() or None
+    album = str(payload.get("album") or "").strip() or None
+    limit_tracks: int | None = None
+    if payload.get("limit_tracks") not in (None, ""):
+        try:
+            limit_tracks = max(1, int(payload.get("limit_tracks")))
+        except (TypeError, ValueError):
+            limit_tracks = None
+
+    try:
+        result = await asyncio.to_thread(
+            resync_genres,
+            artist=artist,
+            album=album,
+            limit_tracks=limit_tracks,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        logger.error("Genre resync request failed", error=str(exc))
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    if not result.get("ok") and result.get("error"):
+        return jsonify(result), 400
+    return jsonify(result), 200
+
+
+# ===========================================================================
 # DATABASE CLEANUP
 # ===========================================================================
 
