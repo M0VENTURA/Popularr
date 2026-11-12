@@ -60,6 +60,8 @@
     full_scan: 'Full Scan',
     library_scan: 'Library Scan',
     missing_releases_scan: 'Missing Releases Scan',
+    // The Config page's two-step genre → playlist resync.
+    genre_playlist_resync: 'Genre / Playlist Resync',
   };
 
   function scanDisplayName(type) {

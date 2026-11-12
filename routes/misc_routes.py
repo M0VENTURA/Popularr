@@ -2259,6 +2259,113 @@ async def api_resync_genres() -> Any:
 
 
 # ===========================================================================
+# GENRE + PLAYLIST RESYNC (two-step, background apply)
+# ===========================================================================
+
+def _resync_limit(payload: dict[str, Any]) -> int | None:
+    if payload.get("limit_tracks") in (None, ""):
+        return None
+    try:
+        return max(1, int(payload.get("limit_tracks")))
+    except (TypeError, ValueError):
+        return None
+
+
+@misc_api_bp.route("/genres/playlist-resync/preview", methods=["POST"])
+async def api_genre_playlist_resync_preview() -> Any:
+    """STEP 1 — report what a resync would change. Writes nothing.
+
+    Read-only despite the POST: the body carries the options, and a large
+    library's comparison is not something to put in a URL. Returns the genre
+    changes per track AND the membership changes per genre playlist, both
+    computed by the code the Apply step will run.
+    """
+    from services.enrichment.genre_playlist_resync_service import (
+        preview_genre_playlist_resync,
+    )
+
+    try:
+        payload = (await request.get_json(silent=True)) or {}
+    except Exception:
+        payload = {}
+
+    try:
+        result = await asyncio.to_thread(
+            preview_genre_playlist_resync,
+            limit_tracks=_resync_limit(payload),
+        )
+    except Exception as exc:
+        logger.error("Genre/playlist resync preview failed", error=str(exc))
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    if not result.get("ok"):
+        return jsonify(result), 400
+    return jsonify(result), 200
+
+
+@misc_api_bp.route("/genres/playlist-resync/apply", methods=["POST"])
+async def api_genre_playlist_resync_apply() -> Any:
+    """STEP 2 — start the apply in the BACKGROUND and return immediately.
+
+    The job writes the genre changes, then rebuilds the genre playlists. It is
+    long enough on a real library that holding the request would hit the
+    Cloudflare origin timeout, and the dashboard already polls scan progress, so
+    progress is published to a shared ``scan_states`` row instead of being
+    streamed from this response.
+
+    ``202`` means ACCEPTED, not done — poll ``/api/scan-progress`` (the job
+    appears as ``genre_playlist_resync``) or ``/genres/playlist-resync/status``.
+    """
+    from services.enrichment.genre_playlist_resync_service import (
+        apply_genre_playlist_resync,
+        is_resync_running,
+    )
+
+    if is_resync_running():
+        return jsonify({
+            "ok": False,
+            "error": "A genre/playlist resync is already running.",
+        }), 409
+
+    try:
+        payload = (await request.get_json(silent=True)) or {}
+    except Exception:
+        payload = {}
+    limit = _resync_limit(payload)
+
+    def _run() -> None:
+        try:
+            apply_genre_playlist_resync(limit_tracks=limit)
+        except Exception as exc:
+            logger.error("Background genre/playlist resync failed", error=str(exc))
+
+    threading.Thread(
+        target=_run, name="genre-playlist-resync", daemon=True
+    ).start()
+
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "message": "Resync started — progress appears on the dashboard.",
+    }), 202
+
+
+@misc_api_bp.route("/genres/playlist-resync/status", methods=["GET"])
+def api_genre_playlist_resync_status() -> Any:
+    """The current resync progress row, for callers not watching scan progress."""
+    try:
+        from services.scanning.scan_state import read_progress_file
+        from services.enrichment.genre_playlist_resync_service import SCAN_TYPE
+
+        state = read_progress_file(f"{SCAN_TYPE}_progress.json") or {}
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    if not state:
+        return jsonify({"ok": True, "is_running": False, "status": "idle"}), 200
+    return jsonify({"ok": True, **state}), 200
+
+
+# ===========================================================================
 # DATABASE CLEANUP
 # ===========================================================================
 

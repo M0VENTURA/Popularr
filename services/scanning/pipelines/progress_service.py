@@ -43,6 +43,10 @@ SCAN_TYPES = [
     "combined_scan",
     "missing_releases_scan",
     "mp3_import",
+    # The Config page's two-step genre → playlist resync. It is NOT a scan, but
+    # it publishes progress to the same ``scan_states`` row, so it must be listed
+    # here or the dashboard poller would never surface it.
+    "genre_playlist_resync",
 ]
 
 

@@ -5297,6 +5297,9 @@ def _create_genre_top_track_playlists(
     *,
     cleanup_orphans: bool = True,
     timings: dict[str, float] | None = None,
+    plan_only: bool = False,
+    plan_out: dict[str, list[str]] | None = None,
+    rows_override: list[dict[str, Any]] | None = None,
 ) -> int:
     """Create/update genre top-tracks playlists.
 
@@ -5307,6 +5310,21 @@ def _create_genre_top_track_playlists(
     ``cleanup_orphans`` must be False for an incremental artist/album refresh.
     An incremental pass has no library-wide view, so it cannot prove an
     unrelated managed playlist is obsolete. Only the global rebuild sweeps.
+
+    ⭐ ``plan_only`` computes what WOULD be written and writes nothing.
+
+    It fills ``plan_out`` with ``{playlist_name: [song_id, …]}`` — the exact
+    ordered list this pass would push — and returns the number of playlists it
+    would touch. The emptiness of a list is meaningful: a playlist mapped to
+    ``[]`` is one this pass would CLEAR. A PREVIEW uses this rather than a
+    second implementation of the pool logic, because two copies of "which
+    tracks belong to which genre" is how a preview starts disagreeing with the
+    apply it is meant to describe.
+
+    ``rows_override`` substitutes the track rows to pool by. A preview needs it:
+    it must predict the playlists built from the genres it is about to WRITE,
+    not from the ones the database still holds. Passing the rewritten rows makes
+    the prediction match the apply instead of describing the state before it.
     """
     try:
         from helpers.config_helpers import get_config
@@ -5333,7 +5351,9 @@ def _create_genre_top_track_playlists(
         }
         norm_only_genres.discard("")
 
-    if only_genres is None:
+    if rows_override is not None:
+        rows = [dict(r) for r in rows_override]
+    elif only_genres is None:
         rows = _fetch_genre_playlist_rows(min_stars)
     else:
         rows = _fetch_genre_playlist_rows(min_stars, genres=only_genres)
@@ -5594,6 +5614,14 @@ def _create_genre_top_track_playlists(
         if not _song_ids:
             continue
 
+        # ⭐ PLAN-ONLY stops here: the list above IS what would be pushed, and
+        # nothing below this point may run without touching Navidrome.
+        if plan_only:
+            if plan_out is not None:
+                plan_out[playlist_name] = list(_song_ids)
+            written += 1
+            continue
+
         try:
             _known_pl_id = existing_playlist_ids.get(playlist_name.casefold())
             sync_res = _sync_playlist_to_navidrome(
@@ -5722,6 +5750,12 @@ def _create_genre_top_track_playlists(
                     "Emptied genre has no playlist on the server — nothing to clear",
                     genre=_empty_display,
                 )
+                continue
+            # PLAN-ONLY records the planned CLEAR (an empty list) and stops.
+            if plan_only:
+                if plan_out is not None:
+                    plan_out[_empty_name] = []
+                written += 1
                 continue
             try:
                 _empty_res = _sync_playlist_to_navidrome(

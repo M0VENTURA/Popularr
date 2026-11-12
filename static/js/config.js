@@ -2289,7 +2289,232 @@ async function runGenreResync(dryRun) {
   }
 }
 
+/**
+ * STEP 1 of the genre → playlist resync: report what would change, write nothing.
+ *
+ * Two steps exist so a library-wide genre rewrite is never applied blind: the
+ * preview shows the per-track genre changes AND which tracks would enter or
+ * leave each genre playlist, then enables the Apply button.
+ */
+async function runGenrePlaylistPreview() {
+  const out = document.getElementById('genre_playlist_resync_output');
+  const stateEl = document.getElementById('genre_playlist_resync_state');
+  const previewBtn = document.getElementById('genre_playlist_resync_preview_btn');
+  const applyBtn = document.getElementById('genre_playlist_resync_apply_btn');
+  const setOut = (html) => { if (out) out.innerHTML = html; };
+  const setState = (text) => { if (stateEl) stateEl.textContent = text || ''; };
+
+  const limitRaw = document.getElementById('genre_playlist_resync_limit')?.value;
+  const limit = parseInt(limitRaw || '0', 10);
+  const body = {};
+  if (Number.isFinite(limit) && limit > 0) body.limit_tracks = limit;
+
+  [previewBtn, applyBtn].filter(Boolean).forEach(b => { b.disabled = true; });
+  setState('Comparing…');
+  setOut('<span class="text-muted">Recomputing genres and comparing playlists…</span>');
+
+  try {
+    const resp = await fetch('/api/genres/playlist-resync/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) {
+      setOut('<span class="text-danger">' + escapeHtml(data.error || ('HTTP ' + resp.status)) + '</span>');
+      setState('Preview failed');
+      return;
+    }
+
+    const g = data.genre_changes || {};
+    const summary = data.summary || {};
+    const genreRows = (g.tracks_detail || []).slice(0, 100).map(t => {
+      const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
+      return '<tr><td>' + escapeHtml(t.title || '') + '</td>'
+        + '<td class="text-muted">' + escapeHtml(label) + '</td>'
+        + '<td>' + escapeHtml(t.before || '—') + '</td>'
+        + '<td><strong>' + escapeHtml(t.after || '—') + '</strong></td></tr>';
+    }).join('');
+
+    const playlistRows = (data.playlist_changes || []).slice(0, 100).map(p => {
+      const badge = p.is_clear
+        ? '<span class="badge bg-warning text-dark">clear</span>'
+        : (p.is_new ? '<span class="badge bg-info text-dark">new</span>' : '');
+      return '<tr><td>' + escapeHtml(p.name) + ' ' + badge + '</td>'
+        + '<td class="text-end">' + p.count_before + ' &rarr; <strong>' + p.count_after + '</strong></td>'
+        + '<td class="text-success">+' + (p.added || []).length + '</td>'
+        + '<td class="text-danger">-' + (p.removed || []).length + '</td></tr>';
+    }).join('');
+
+    setOut(
+      '<div class="alert alert-info py-2 mb-2">'
+      + '<strong>Preview only — nothing was written.</strong> '
+      + (g.changed || 0) + ' of ' + (g.tracks || 0) + ' track(s) would have their genres changed. '
+      + (summary.playlists_touched || 0) + ' genre playlist(s) would change'
+      + (summary.playlists_cleared ? ' (' + summary.playlists_cleared + ' cleared)' : '')
+      + (summary.playlists_created ? ' (' + summary.playlists_created + ' created)' : '')
+      + ' — +' + (summary.tracks_gained || 0) + ' / -' + (summary.tracks_removed || 0) + ' tracks.'
+      + '</div>'
+      + (playlistRows
+        ? '<div class="fw-semibold mt-2">Playlists</div>'
+          + '<div style="max-height:18rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+          + '<thead><tr><th>Playlist</th><th class="text-end">Tracks</th><th>Gains</th><th>Losses</th></tr></thead>'
+          + '<tbody>' + playlistRows + '</tbody></table></div>'
+        : '<div class="text-muted mt-2">No playlist membership changes.</div>')
+      + (genreRows
+        ? '<div class="fw-semibold mt-3">Tracks whose genres would change</div>'
+          + '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+          + '<thead><tr><th>Track</th><th>Album</th><th>Before</th><th>After</th></tr></thead>'
+          + '<tbody>' + genreRows + '</tbody></table></div>'
+          + ((g.tracks_detail || []).length > 100
+            ? '<div class="text-muted mt-1">Showing first 100 of ' + g.tracks_detail.length + '.</div>'
+            : '')
+        : '')
+      + ((data.unmanaged_playlists || []).length
+        ? '<div class="text-muted mt-2">Not managed by this resync: '
+          + escapeHtml(data.unmanaged_playlists.slice(0, 10).join(', '))
+          + (data.unmanaged_playlists.length > 10 ? ' …' : '') + '</div>'
+        : '')
+    );
+
+    // The apply may only proceed once the user has SEEN the preview.
+    if (applyBtn) applyBtn.disabled = false;
+    setState('Preview ready (' + data.seconds + 's)');
+  } catch (err) {
+    setOut('<span class="text-danger">' + escapeHtml(String(err)) + '</span>');
+    setState('Preview failed');
+  } finally {
+    if (previewBtn) previewBtn.disabled = false;
+  }
+}
+
+/**
+ * STEP 2: start the background apply, then poll its progress row.
+ *
+ * The job writes the genres and rebuilds the playlists on a worker thread, so
+ * the request returns 202 immediately. Progress is read from the same
+ * ``scan_states`` row the dashboard polls, and is ALSO visible there as
+ * "Genre / Playlist Resync".
+ */
+async function runGenrePlaylistApply() {
+  const out = document.getElementById('genre_playlist_resync_output');
+  const stateEl = document.getElementById('genre_playlist_resync_state');
+  const previewBtn = document.getElementById('genre_playlist_resync_preview_btn');
+  const applyBtn = document.getElementById('genre_playlist_resync_apply_btn');
+  const setOut = (html) => { if (out) out.innerHTML = html; };
+  const setState = (text) => { if (stateEl) stateEl.textContent = text || ''; };
+
+  if (!confirm(
+    'Apply the previewed changes?\n\n' +
+    'This rewrites the genres column, then rebuilds the genre playlists on Navidrome.\n' +
+    'It does not change your music files or call any providers.\n\n' +
+    'It runs in the background — progress appears here and on the dashboard.'
+  )) {
+    return;
+  }
+
+  const limitRaw = document.getElementById('genre_playlist_resync_limit')?.value;
+  const limit = parseInt(limitRaw || '0', 10);
+  const body = {};
+  if (Number.isFinite(limit) && limit > 0) body.limit_tracks = limit;
+
+  [previewBtn, applyBtn].filter(Boolean).forEach(b => { b.disabled = true; });
+  setState('Starting…');
+
+  try {
+    const resp = await fetch('/api/genres/playlist-resync/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) {
+      // 409 = already running; that is not an error worth alarming about.
+      setOut('<span class="text-' + (resp.status === 409 ? 'warning' : 'danger') + '">'
+        + escapeHtml(data.error || ('HTTP ' + resp.status)) + '</span>');
+      setState('');
+      if (applyBtn) applyBtn.disabled = false;
+      if (previewBtn) previewBtn.disabled = false;
+      return;
+    }
+    setOut('<div class="alert alert-success py-2 mb-0">'
+      + 'Resync started in the background — it also appears on the dashboard.</div>');
+    pollGenrePlaylistResync();
+  } catch (err) {
+    setOut('<span class="text-danger">' + escapeHtml(String(err)) + '</span>');
+    setState('');
+    if (applyBtn) applyBtn.disabled = false;
+    if (previewBtn) previewBtn.disabled = false;
+  }
+}
+
+/** Poll the resync progress row until it stops running.
+ *
+ * ``silent`` is used for the page-load check: a run that finished BEFORE this
+ * page was opened must not announce itself as though it just happened. Only a
+ * currently-running job resumes the visible polling.
+ */
+async function pollGenrePlaylistResync(silent) {
+  const stateEl = document.getElementById('genre_playlist_resync_state');
+  const out = document.getElementById('genre_playlist_resync_output');
+  const previewBtn = document.getElementById('genre_playlist_resync_preview_btn');
+  const applyBtn = document.getElementById('genre_playlist_resync_apply_btn');
+  const setState = (text) => { if (stateEl) stateEl.textContent = text || ''; };
+
+  try {
+    const resp = await fetch('/api/genres/playlist-resync/status', { cache: 'no-store' });
+    const data = await resp.json();
+    if (!data || data.ok === false) {
+      setState('');
+      return;
+    }
+    const pct = Math.round(Number(data.percent_complete || 0));
+    const phase = data.current_stage || '';
+    const item = data.current_item || '';
+    if (data.is_running) {
+      setState(phase + (pct ? ' · ' + pct + '%' : '') + (item ? ' · ' + item : ''));
+      // Keep the Apply button locked while a job runs.
+      if (applyBtn) applyBtn.disabled = true;
+      setTimeout(function () { pollGenrePlaylistResync(false); }, 1500);
+      return;
+    }
+    if (silent) return;  // a stale finished row: leave the card untouched
+    // Finished (or failed) — restore the buttons.
+    if (previewBtn) previewBtn.disabled = false;
+    if (applyBtn) applyBtn.disabled = true;  // require a fresh preview
+    const result = data.resync_result || null;
+    if (data.status === 'failed') {
+      setState('Failed');
+      if (out) {
+        out.innerHTML = '<div class="alert alert-danger py-2 mb-0">'
+          + escapeHtml(data.error || 'Resync failed — see the logs.') + '</div>';
+      }
+      return;
+    }
+    setState('Complete');
+    if (out && result) {
+      out.innerHTML = '<div class="alert alert-success py-2 mb-0">'
+        + '<strong>Resync complete.</strong> '
+        + (result.genres_changed || 0) + ' track genre set(s) updated, '
+        + (result.playlists_written || 0) + ' playlist(s) synced'
+        + (result.seconds ? ' in ' + result.seconds + 's' : '') + '.'
+        + '</div>';
+    }
+  } catch (_err) {
+    setState('');
+  }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
+  const gpPreview = document.getElementById('genre_playlist_resync_preview_btn');
+  if (gpPreview) gpPreview.addEventListener('click', runGenrePlaylistPreview);
+  const gpApply = document.getElementById('genre_playlist_resync_apply_btn');
+  if (gpApply) gpApply.addEventListener('click', runGenrePlaylistApply);
+  // A job started from another tab (or still running from before a reload) keeps
+  // reporting into this card: resume polling rather than showing an idle button.
+  if (gpApply && document.getElementById('genre_playlist_resync_state')) {
+    pollGenrePlaylistResync(true);
+  }
   if (document.getElementById('stripKeywordsList')) {
     initializeStripKeywords();
   }
