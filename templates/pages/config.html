@@ -3033,13 +3033,52 @@
         </div>
         <div class="col-6 col-md-4">
           <label class="form-label form-label-sm" for="genre_selection_max">Maximum Genres</label>
-          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="genre_selection_max" value="{{ config.get('genres', {}).get('selection', {}).get('max_genres', 3) }}">
-          <small class="form-text text-muted">How many <strong>musical</strong> genres are written onto each track (default <strong>3</strong>), and therefore how many a track may pool into for the genre playlists. A ceiling, not a target. Cover / Live / Acoustic / Remaster / Christmas markers are added <em>on top</em> of this and never take one of the slots.</small>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="genre_selection_max" value="{{ config.get('genres', {}).get('selection', {}).get('max_genres', 4) }}">
+          <small class="form-text text-muted">How many <strong>musical</strong> genres are written onto each track (default <strong>4</strong>), and therefore how many a track may pool into for the genre playlists. A ceiling, not a target: every position must still earn its place. Cover / Live / Acoustic / Remaster / Christmas markers are added <em>on top</em> of this and never take one of the slots.</small>
+        </div>
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="genre_selection_pool">Candidate Pool</label>
+          <input type="number" step="1" min="1" max="12" class="form-control form-control-sm" id="genre_selection_pool" value="{{ config.get('genres', {}).get('selection', {}).get('selection_pool', 6) }}">
+          <small class="form-text text-muted">How many top-scoring candidates are taken <em>before</em> cleanup (default <strong>6</strong>), so the rules below have alternatives to promote when they remove a genre. Always at least the Maximum Genres.</small>
         </div>
         <div class="col-6 col-md-4">
           <label class="form-label form-label-sm" for="genre_selection_family_limit">Family Slot Limit</label>
-          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="genre_selection_family_limit" value="{{ config.get('genres', {}).get('selection', {}).get('family_slot_limit', 3) }}">
-          <small class="form-text text-muted">Max genres from one hierarchy branch (rock, metal, electronic…) unless the extra one has track-level support. Default: <strong>3</strong></small>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="genre_selection_family_limit" value="{{ config.get('genres', {}).get('selection', {}).get('family_slot_limit', 2) }}">
+          <small class="form-text text-muted">Max genres from one hierarchy branch (rock, metal, electronic…) unless the extra one has track-level support. Default: <strong>2</strong></small>
+        </div>
+      </div>
+
+      <h6 class="mb-2">Collection Policy</h6>
+      <small class="text-muted d-block mb-3">
+        Applied to the final musical genres, <em>after</em> weak outliers are rejected — so one
+        loosely-supported metal tag cannot delete a well-supported rock set.
+      </small>
+      <div class="row g-3 mb-4">
+        <div class="col-12 col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="genre_selection_metal_suppresses_rock" {% if config.get('genres', {}).get('selection', {}).get('metal_suppresses_rock', True) %}checked{% endif %}>
+            <label class="form-check-label" for="genre_selection_metal_suppresses_rock"><strong>Metal supersedes Rock</strong></label>
+            <small class="d-block text-muted">When an accepted metal genre is present, rock-family genres are removed from the final set (Folk Metal + Folk Rock → Folk Metal). Punk, electronic, hip-hop, pop and R&amp;B are never affected.</small>
+          </div>
+        </div>
+        <div class="col-12 col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="genre_selection_nu_metal_exception" {% if config.get('genres', {}).get('selection', {}).get('nu_metal_exception', True) %}checked{% endif %}>
+            <label class="form-check-label" for="genre_selection_nu_metal_exception"><strong>Nu Metal keeps its rock companions</strong></label>
+            <small class="d-block text-muted">Nu Metal is a metal/rock hybrid, so it does <em>not</em> suppress the approved companions below. A second, non-Nu-Metal genre cancels this and the rock side goes.</small>
+          </div>
+        </div>
+        <div class="col-12 col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="genre_selection_remove_generic_parents" {% if config.get('genres', {}).get('selection', {}).get('remove_generic_parents', True) %}checked{% endif %}>
+            <label class="form-check-label" for="genre_selection_remove_generic_parents"><strong>Remove redundant generic parents</strong></label>
+            <small class="d-block text-muted">Drop a family root ("Metal", "Rock", "Punk") when a more specific genre of the same family is also selected. The specific genre is never invented from the root.</small>
+          </div>
+        </div>
+        <div class="col-12 col-md-6">
+          <label class="form-label form-label-sm" for="genre_selection_nu_companions">Nu Metal Rock Companions</label>
+          <input type="text" class="form-control form-control-sm" id="genre_selection_nu_companions" placeholder="hard_rock, alternative_rock" value="{{ (config.get('genres', {}).get('selection', {}).get('nu_metal_rock_companions') or ['hard_rock', 'alternative_rock'])|join(', ') }}">
+          <small class="form-text text-muted">Comma-separated genre ids kept beside Nu Metal. Deliberately short — adding every rock genre would let the exception swallow the policy. Default: <strong>hard_rock, alternative_rock</strong></small>
         </div>
       </div>
 

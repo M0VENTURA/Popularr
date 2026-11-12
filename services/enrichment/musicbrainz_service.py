@@ -2178,6 +2178,19 @@ def _flatten_release(release: dict[str, Any], release_id: str) -> dict[str, Any]
                     work = relation.get("work") or {}
                     if not isinstance(work, dict):
                         continue
+                    # ⭐ THE AUTHORITATIVE COVER SIGNAL: MusicBrainz's own
+                    # ``cover`` attribute on the performance relation
+                    # ("this recording is a cover recording of that work").
+                    # It is curated per recording, so unlike an artist-credit
+                    # comparison it cannot be confused with songwriting.
+                    _rel_attrs = {
+                        str(a).strip().casefold()
+                        for a in (relation.get("attributes") or [])
+                        if str(a).strip()
+                    }
+                    if "cover" in _rel_attrs and work.get("id"):
+                        entry["is_cover"] = True
+                        entry["is_cover_relation"] = True
                     if work.get("id"):
                         entry["work_mbid"] = str(work["id"])
                     if work.get("title"):
@@ -2205,15 +2218,39 @@ def _flatten_release(release: dict[str, Any], release_id: str) -> dict[str, Any]
                         entry["work_artist"] = work_artist
                         release_artist_key = _normalise_artist_key(track_artist)
                         work_artist_key = _normalise_artist_key(work_artist)
-                        if (
+                        # ⚠️⚠️ A WORK'S ARTIST-CREDIT IS NOT THE ORIGINAL
+                        # PERFORMER, SO THIS IS NOT A COVER TEST.
+                        #
+                        # On MusicBrainz a work's artist-credit carries the
+                        # COMPOSER(S) of the composition (Picard and the MB
+                        # schema both treat it that way). Comparing it with the
+                        # performing artist therefore asks "did the performer
+                        # WRITE this song?", not "is this a cover" — and a band
+                        # performing a song it did not write answered "cover".
+                        #
+                        # That is the reported Flaw case: all ten tracks of
+                        # "Vol IV Because of the Brave" (the band's OWN 2019
+                        # album) were labelled "<title> (Janet Gardner Cover)"
+                        # because Janet Gardner is credited as a WRITER on those
+                        # works. Every track on every album whose writers differ
+                        # from the performer was mislabelled the same way.
+                        #
+                        # The authoritative signal is the ``cover`` ATTRIBUTE on
+                        # the recording's performance relation (read above into
+                        # ``cover_work_mbid`` / ``is_cover_relation``). The
+                        # work_artist is still published so the review's title
+                        # bar can EXPLAIN a comparative verdict — see
+                        # ``metadata_proposal_service._cover_verdict`` — but it
+                        # must never by itself set ``is_cover``.
+                        _performer_wrote_work = bool(
                             release_artist_key
                             and work_artist_key
-                            and release_artist_key != work_artist_key
-                        ):
-                            entry["is_cover"] = True
-                            entry["original_cover_artist"] = work_artist
-                            if work.get("title"):
-                                entry["original_title"] = str(work["title"])
+                            and release_artist_key == work_artist_key
+                        )
+                        if _performer_wrote_work:
+                            entry["work_artist_is_performer"] = True
+                        if work.get("title"):
+                            entry["original_title"] = str(work["title"])
                 if composers:
                     entry["composer"] = ", ".join(dict.fromkeys(composers))
                 if lyricists:

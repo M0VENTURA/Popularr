@@ -1508,12 +1508,18 @@ def get_album_mbid_guard_config() -> dict[str, Any]:
 
 #: How many MUSICAL genres are written onto a track's metadata.
 #:
-#: Three is the reported requirement ("select the top 3 genres from the most
-#: used across sources, then apply those to the metadata"). Filter markers —
-#: Cover / Live / Acoustic / Remaster / Christmas / Holiday — are appended ON
-#: TOP of these and never consume one of the slots, so the stored list can be
-#: longer than this number.
-GENRE_TRACK_LIMIT_DEFAULT = 3
+#: FOUR, raised from three. The selection pipeline now takes a wider candidate
+#: POOL (``genres.selection.selection_pool``, default 6), applies the cleanup
+#: rules (outlier rejection, metal-over-rock, redundant parents/ancestors) and
+#: only then trims to this final count — so the extra slot is filled by a genre
+#: that survived every rule rather than by whatever happened to rank fourth.
+#: Each position still has to earn its place via its confidence and relative
+#: floors, so a weakly-supported genre never fills it.
+#:
+#: Filter markers — Cover / Live / Acoustic / Remaster / Christmas / Holiday —
+#: are appended ON TOP of these and never consume one of the slots, so the
+#: stored list can be longer than this number.
+GENRE_TRACK_LIMIT_DEFAULT = 4
 
 
 def get_genre_track_limit() -> int:
@@ -1832,7 +1838,27 @@ def get_playlists_config() -> dict[str, Any]:
             p.get("genre_playlists_name_template") or "{genre} - Top Tracks"
         ),
         "genre_playlists_min_stars": max(1, int(p.get("genre_playlists_min_stars", 4) or 4)),
-        "genre_playlists_max_genres": max(1, int(p.get("genre_playlists_max_genres", 3) or 3)),
+        # ⚠️ DEFAULTS TO THE TRACK LIMIT, not a hardcoded 3.
+        #
+        # This is how many of a track's FINAL genres may pool into a playlist.
+        # While the track wrote 3 musical genres and this capped at 3 the two
+        # agreed by luck; raising the track limit to 4 made the fourth genre
+        # invisible to the playlist builder — the track showed four genres in
+        # Navidrome but only ever appeared in three genre playlists, which is
+        # the reported "the playlists don't match the Final Genres".
+        #
+        # Deriving it means the two cannot drift again. An explicit value in
+        # config still wins, so a user who WANTS a narrower pooling set keeps it.
+        "genre_playlists_max_genres": max(
+            1,
+            int(
+                p.get(
+                    "genre_playlists_max_genres",
+                    get_genre_track_limit(),
+                )
+                or get_genre_track_limit()
+            ),
+        ),
         "genre_playlists_create_threshold": max(
             1, int(p.get("genre_playlists_create_threshold", 100) or 100)
         ),
@@ -2169,6 +2195,14 @@ def get_genre_aggregation_config() -> dict[str, Any]:
     }
 
 
+#: Rock genres kept beside Nu Metal under the metal-over-rock policy.
+#:
+#: Deliberately a SHORT list: Nu Metal is a metal/rock hybrid, so stripping its
+#: rock companion would delete the crossover the tag names. Extending this to
+#: every rock genre would make the exception swallow the policy.
+_DEFAULT_NU_METAL_COMPANIONS: tuple[str, ...] = ("hard_rock", "alternative_rock")
+
+
 def get_genre_selection_config() -> dict[str, Any]:
     """Get the genre SELECTION engine's tuning.
 
@@ -2250,9 +2284,26 @@ def get_genre_selection_config() -> dict[str, Any]:
                 out.append([a.strip(), b.strip()])
         return out
 
+    def _companions() -> list[str]:
+        """Rock genres kept beside Nu Metal, canonicalised through the vocabulary.
+
+        Accepts ids ("hard_rock") or display names ("Hard Rock"), so a
+        hand-edited config cannot silently disable the exception by writing the
+        readable spelling.
+        """
+        listed = selection.get("nu_metal_rock_companions")
+        if not isinstance(listed, list):
+            return list(_DEFAULT_NU_METAL_COMPANIONS)
+        out: list[str] = []
+        for item in listed:
+            text = str(item or "").strip()
+            if text and text not in out:
+                out.append(text)
+        return out or list(_DEFAULT_NU_METAL_COMPANIONS)
+
     return {
         "enabled": bool(selection.get("enabled", True)),
-        "max_genres": max(1, _int("max_genres", 3)),
+        "max_genres": max(1, _int("max_genres", 4)),
         "source_weights": _weights("source_weights"),
         "entity_weights": _weights("entity_weights"),
         "agreement_2": _num("agreement_2", 0.30),
@@ -2266,11 +2317,32 @@ def get_genre_selection_config() -> dict[str, Any]:
             "first": _threshold("first", 0.60),
             "second": _threshold("second", 0.45),
             "third": _threshold("third", 0.35),
+            # Present because the final count is up to four now.
+            "fourth": _threshold("fourth", _threshold("third", 0.35)),
         },
         "family_slot_limit": max(1, _int("family_slot_limit", 2)),
         "family_override_sources": max(1, _int("family_override_sources", 2)),
         "keep_together": _pairs("keep_together"),
         "conditional_keep": _pairs("conditional_keep"),
+
+        # ── Candidate pool and collection policy ──────────────────────────
+        # ``selection_pool`` is taken from the ranking BEFORE cleanup, so the
+        # policy has alternatives to promote when it removes a genre.
+        "selection_pool": max(1, _int("selection_pool", 6)),
+        # An accepted metal genre (other than Nu Metal) removes rock-family
+        # genres from the final musical set.
+        "metal_suppresses_rock": bool(
+            selection.get("metal_suppresses_rock", True)
+        ),
+        # Nu Metal alone is a metal/rock hybrid, so it keeps its approved
+        # companions instead of suppressing them.
+        "nu_metal_exception": bool(selection.get("nu_metal_exception", True)),
+        "nu_metal_rock_companions": _companions(),
+        # Drop a specificity-0 family root when a more specific genre of the
+        # same family is selected.
+        "remove_generic_parents": bool(
+            selection.get("remove_generic_parents", True)
+        ),
     }
 
 

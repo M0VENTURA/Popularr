@@ -191,11 +191,16 @@ class TestTheChristmasPoolStillExists:
 # ---------------------------------------------------------------------------
 
 
-class TestThreeGenresAreWritten:
-    def test_the_default_is_three(self) -> None:
+class TestSeveralGenresAreWritten:
+    def test_the_default_is_four(self) -> None:
+        """Raised from three by the wider-pool pipeline.
+
+        Six candidates are selected, cleaned by the outlier / metal-over-rock /
+        redundancy rules, then trimmed to this final count.
+        """
         from helpers.config_helpers import GENRE_TRACK_LIMIT_DEFAULT
 
-        assert GENRE_TRACK_LIMIT_DEFAULT == 3
+        assert GENRE_TRACK_LIMIT_DEFAULT == 4
 
     def test_the_getter_honours_the_configured_ceiling(self, monkeypatch) -> None:
         import helpers.config_helpers as ch
@@ -215,7 +220,7 @@ class TestThreeGenresAreWritten:
     def test_a_nonsense_value_is_clamped(self, monkeypatch) -> None:
         import helpers.config_helpers as ch
 
-        for raw, expected in ((0, 1), (-3, 1), (99, 10), ("abc", 3)):
+        for raw, expected in ((0, 1), (-3, 1), (99, 10), ("abc", 4)):
             monkeypatch.setattr(
                 ch, "get_config", lambda raw=raw: {"genres": {"max_genres_per_track": raw}}
             )
@@ -241,6 +246,54 @@ class TestThreeGenresAreWritten:
         source = inspect.getsource(module.sync_various_artists_track_genres)
         assert "max_genres=_genre_track_limit()" in source
         assert "max_genres=2" not in source
+
+    # ── The PLAYLIST side of the same question ────────────────────────────
+    #
+    # REPORTED: "The top genre's playlists are meant to be based on the Final
+    # Genres ... but the playlists don't seem to be matching that."
+    #
+    # The pool builder reads only the first N of a track's final genres. While
+    # the track wrote 3 and the pool read 3 the two agreed by luck; raising the
+    # track limit to 4 left the fourth genre visible in Navidrome but invisible
+    # to every playlist. The pool limit is therefore DERIVED from the track
+    # limit rather than defaulting to its own number.
+
+    def test_the_playlist_pool_limit_covers_every_final_genre(self) -> None:
+        """The pool must be able to read every genre the track writes."""
+        import helpers.config_helpers as ch
+        from services.popularity.stages import finalise_stage as fs
+
+        assert ch.get_playlists_config()["genre_playlists_max_genres"] >= (
+            ch.get_genre_track_limit()
+        ), (
+            "a track's last final genre would never pool into a playlist, so "
+            "the playlists cannot match the Final Genres"
+        )
+        assert fs._playlist_pool_genre_limit() >= ch.get_genre_track_limit()
+
+    def test_an_explicit_pool_limit_still_wins(self, monkeypatch) -> None:
+        """A deliberate narrower pooling set is still honoured."""
+        import helpers.config_helpers as ch
+        from services.popularity.stages import finalise_stage as fs
+
+        monkeypatch.setattr(
+            ch,
+            "get_config",
+            lambda: {"playlists": {"genre_playlists_max_genres": 2}},
+        )
+        assert ch.get_playlists_config()["genre_playlists_max_genres"] == 2
+        assert fs._playlist_pool_genre_limit() == 2
+
+    def test_the_finalise_callsites_share_one_helper(self) -> None:
+        """Three copies of the same default is how they drifted apart."""
+        from services.popularity.stages import finalise_stage as fs
+
+        assert "_playlist_pool_genre_limit(" in inspect.getsource(
+            fs._create_genre_top_track_playlists
+        )
+        assert "_playlist_pool_genre_limit(" in inspect.getsource(
+            fs._genre_refresh_config
+        )
 
     def test_the_aggregator_appends_markers_on_top_of_the_limit(self) -> None:
         """Filter tags are EXTRAS — the count is a ceiling on musical genres.

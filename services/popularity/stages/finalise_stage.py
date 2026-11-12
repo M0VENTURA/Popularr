@@ -5000,6 +5000,43 @@ def _playlist_genres_from_rows(
     return affected
 
 
+def _playlist_pool_genre_limit(cfg: dict[str, Any] | None = None) -> int:
+    """How many of a track's FINAL genres may POOL into a playlist.
+
+    ⚠️ THIS IS NOT AN INDEPENDENT NUMBER. It is how much of ``tracks.genres``
+    the pool builder is allowed to read, so it must cover what the track
+    actually writes — otherwise a genre the track carries (and Navidrome shows)
+    silently never pools, and the playlists stop matching the Final Genres.
+
+    Resolution order:
+      1. an explicit ``playlists.genre_playlists_max_genres`` (a deliberate
+         choice to pool by fewer genres than the track carries), else
+      2. the track limit itself, so the two cannot drift.
+
+    The ``1`` floor keeps the old falsy-value trap away: a configured 0 was
+    meant to be "no limit" but ``int(0 or 3)`` silently became 3.
+    """
+    if cfg is None:
+        try:
+            from helpers.config_helpers import get_config
+
+            cfg = (get_config() or {}).get("playlists") or {}
+        except Exception:
+            cfg = {}
+    configured = (cfg or {}).get("genre_playlists_max_genres")
+    if configured is None:
+        try:
+            from helpers.config_helpers import get_genre_track_limit
+
+            return max(1, int(get_genre_track_limit()))
+        except Exception:
+            return 3
+    try:
+        return max(1, int(configured))
+    except (TypeError, ValueError):
+        return 3
+
+
 def _genre_refresh_config() -> tuple[int, int]:
     try:
         from helpers.config_helpers import get_config
@@ -5007,8 +5044,7 @@ def _genre_refresh_config() -> tuple[int, int]:
     except Exception:
         _cfg = {}
     min_stars = max(1, int(_cfg.get("genre_playlists_min_stars", 4) or 4))
-    max_genres = max(1, int(_cfg.get("genre_playlists_max_genres", 3) or 3))
-    return min_stars, max_genres
+    return min_stars, _playlist_pool_genre_limit(_cfg)
 
 
 def refresh_genre_playlists_for_album(
@@ -5279,7 +5315,7 @@ def _create_genre_top_track_playlists(
         cfg = {}
 
     min_stars = max(1, int(cfg.get("genre_playlists_min_stars", 4) or 4))
-    max_genres = max(1, int(cfg.get("genre_playlists_max_genres", 3) or 3))
+    max_genres = _playlist_pool_genre_limit(cfg)
     create_threshold = max(1, int(cfg.get("genre_playlists_create_threshold", 100) or 100))
     delete_threshold = max(1, int(cfg.get("genre_playlists_delete_threshold", 80) or 80))
     max_tracks = _resolve_genre_max_tracks(cfg)
@@ -5477,6 +5513,30 @@ def _create_genre_top_track_playlists(
     _cover_flag_off = False
     _cover_enabled = False
 
+    # ⭐ EVERY AFFECTED GENRE MUST BE VISITED, INCLUDING ONE THAT IS NOW EMPTY.
+    #
+    # ``pools`` only contains genres that still have tracks, so iterating it
+    # alone skipped a genre whose tracks had ALL lost it — and its playlist on
+    # Navidrome kept those tracks forever. That is the reported "some of the
+    # playlists are being generated from tracks that have had genres removed,
+    # but the tracks are still on the playlist": the genre MOVED (or was
+    # suppressed by the metal-over-rock policy), the tracks were correctly
+    # re-tagged, and the playlist was simply never updated because nothing
+    # visited its key.
+    #
+    # The affected set is already computed by the callers (``only_genres``), so
+    # a genre in it with no tracks left is an EMPTY pool that must be synced
+    # down to nothing.
+    _empty_genre_keys: list[str] = []
+    if norm_only_genres:
+        for _token in sorted(norm_only_genres):
+            if _token in pools:
+                continue
+            # A seasonal pool key is "christmas <genre>"; accept that shape too.
+            if f"christmas {_token}" in pools:
+                continue
+            _empty_genre_keys.append(_token)
+
     for norm_key, tracks in pools.items():
         if norm_only_genres is not None and norm_key not in norm_only_genres:
             # A seasonal track's pool key is "christmas <genre>"; the affected
@@ -5639,6 +5699,65 @@ def _create_genre_top_track_playlists(
                 "playlists' in Config ▸ Playlists (adding the Gemini key alone "
                 "does not enable them)"
             )
+
+    # ── Clear playlists whose genre NO LONGER HAS ANY TRACKS ──────────────
+    #
+    # The pool loop above only visits genres that still have qualifying tracks.
+    # An affected genre that lost ALL of them never reached it, so its
+    # Navidrome playlist kept the removed tracks indefinitely — the reported
+    # "tracks that have had genres removed are still on the playlist".
+    #
+    # These are synced DOWN TO EMPTY rather than deleted, and only when the
+    # playlist already exists on the server (``create_if_missing=False``): the
+    # genre may simply have dropped below the star floor for now, and an empty
+    # playlist that is legitimately empty must not be conjured on a server that
+    # never had one. A fitted playlist is swept by the global rebuild once the
+    # pool stays below the delete threshold.
+    if not prune_only:
+        for _token in _empty_genre_keys:
+            _empty_display = _display_genre(_token)
+            _empty_name = _genre_playlist_name(_empty_display)
+            if _empty_name.casefold() not in existing_playlists:
+                logger.debug(
+                    "Emptied genre has no playlist on the server — nothing to clear",
+                    genre=_empty_display,
+                )
+                continue
+            try:
+                _empty_res = _sync_playlist_to_navidrome(
+                    _empty_name,
+                    [],
+                    rows=[],
+                    existing_playlist_id=existing_playlist_ids.get(
+                        _empty_name.casefold()
+                    ),
+                    server_confirmed_exists=True,
+                    # Never CREATE the playlist: only remove its entries from a
+                    # playlist that is really there.
+                    create_if_missing=False,
+                )
+                if _playlist_sync_succeeded(_empty_res):
+                    written += 1
+                    log_unified(
+                        f"📄 Playlist: cleared '{_empty_name}' — no tracks carry "
+                        f"'{_empty_display}' any more"
+                    )
+                else:
+                    logger.warning(
+                        "Genre playlist could not be cleared after its genre was "
+                        "removed — Navidrome keeps its previous contents",
+                        genre=_empty_display,
+                        playlist=_empty_name,
+                        failed_clients=(
+                            _empty_res.get("failed")
+                            if isinstance(_empty_res, dict) else None
+                        ),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Genre playlist clear failed",
+                    genre=_empty_display, playlist=_empty_name, error=str(exc),
+                )
 
     if delete_enabled and only_genres is None and cleanup_orphans:
         if pools:
@@ -6864,6 +6983,7 @@ def post_album_star_ratings(
             _attempted = 0
             _synced = 0
             _stale = 0
+            _deferred = 0
             _skipped = 0
             _sync_clients: list[Any] | None = None
             _consecutive_failures = 0
@@ -6907,6 +7027,21 @@ def post_album_star_ratings(
                             )
                         except Exception:
                             pass
+                    elif _rating_status == "deferred":
+                        # ⭐ THE IMPORT GATE SKIPPED THIS REQUEST — nothing was
+                        # rejected and the server is healthy. Counting it as a
+                        # failure aborted the artist with "Navidrome
+                        # unreachable?" after three tracks whenever a Navidrome
+                        # import overlapped the scan (the reported warning, with
+                        # ``code=None message=None`` proving no error came back).
+                        # Retryable next scan, so it is neither a failure nor
+                        # evidence about the connection.
+                        _deferred += 1
+                        _consecutive_failures = 0
+                        logger.debug(
+                            "Navidrome rating deferred (import running) — will retry",
+                            track_id=track_id, artist=str(artist or "").strip(),
+                        )
                     elif _rating_status == "not_found":
                         # ⭐ STALE Navidrome song id (Subsonic code 70), NOT an
                         # outage and NOT a credential problem. Counting it as a
@@ -6939,19 +7074,25 @@ def post_album_star_ratings(
                             )
                             break
 
-            _failed = _attempted - _synced - _stale
+            # ``deferred`` is excluded: the import gate skipped those requests,
+            # so counting them as failures produced "N failed · check
+            # credentials" for a healthy server whenever an import overlapped
+            # the scan.
+            _failed = _attempted - _synced - _stale - _deferred
             try:
                 from helpers import scan_log as _scan_log
 
                 _scan_log.log_event(
                     "ratings.updated",
                     f"🔗 Navidrome ratings: {_synced} synced · {_failed} failed · "
-                    f"{_stale} stale id(s) · {_skipped} unchanged for '{artist}'.",
+                    f"{_stale} stale id(s) · {_deferred} deferred (import running) · "
+                    f"{_skipped} unchanged for '{artist}'.",
                     level="warn" if _failed else "info",
                     attempted=_attempted,
                     synced=_synced,
                     failed=_failed,
                     stale_ids=_stale,
+                    deferred=_deferred,
                     unchanged=_skipped,
                 )
             except Exception:
@@ -6965,6 +7106,12 @@ def post_album_star_ratings(
                 log_unified(
                     f"🔗 Navidrome: {_stale} track(s) have stale song IDs — "
                     "re-run the Navidrome import scan to refresh them."
+                )
+            if _deferred > 0:
+                # Not a fault: the import gate held these back deliberately.
+                log_unified(
+                    f"🔗 Navidrome: {_deferred} rating(s) deferred for '{artist}' "
+                    "— a Navidrome import was running; they sync on the next scan."
                 )
             if _failed > 0:
                 logger.warning(
@@ -7443,7 +7590,7 @@ def _create_genre_covers_playlists(
             _COVERS_GENRE_DEFAULT_MAX_TRACKS,
         ) or _COVERS_GENRE_DEFAULT_MAX_TRACKS
     ))
-    max_genres = max(1, int(cfg.get("genre_playlists_max_genres", 3) or 3))
+    max_genres = _playlist_pool_genre_limit(cfg)
     selected = _covers_genre_selection(cfg)
 
     buckets: dict[str, dict[str, Any]] = {}

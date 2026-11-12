@@ -86,6 +86,32 @@ def _normalize_people(value: Any) -> list[str]:
         raw = value.strip()
         if not raw:
             return []
+        # ⚠️ A tag holding a JSON ARRAY is a LIST of names, not one string with
+        # separators. Splitting it on commas cut through the JSON syntax and
+        # produced the malformed names ``["A"`` and ``"B"]`` — which then got
+        # stored, written back to the file, and re-split on the next import, so
+        # every scan reported a writer change the user had to re-save. Parsing
+        # first is what breaks that cycle at the entry point.
+        if raw.startswith("[") or raw.startswith("{"):
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                parsed = list(parsed.values())
+            if isinstance(parsed, list):
+                names = []
+                for item in parsed:
+                    if isinstance(item, dict):
+                        candidate = str(item.get("name", "")).strip()
+                    else:
+                        candidate = str(item).strip()
+                    # A list nested inside the array is flattened, not stringified.
+                    if isinstance(item, (list, tuple)):
+                        names.extend(_normalize_people(list(item)))
+                    elif candidate:
+                        names.append(candidate)
+                return names
         if "\\" in raw or ";" in raw or "," in raw:
             normalised = raw.replace("\\", ",").replace(";", ",")
             return [part.strip() for part in normalised.split(",") if part.strip()]

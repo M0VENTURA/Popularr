@@ -1383,7 +1383,8 @@ class NavidromeClient:
     def set_rating_status(self, track_id: str, rating: int) -> str:
         """Push one rating and CLASSIFY the outcome.
 
-        Returns ``"ok"``, ``"not_found"``, ``"auth"`` or ``"failed"``.
+        Returns ``"ok"``, ``"not_found"``, ``"deferred"``, ``"auth"`` or
+        ``"failed"``.
 
         ⭐ Subsonic code 70 ("data not found") for ``setRating`` means the song
         id does not exist in Navidrome — a STALE ID (renamed/moved file, or
@@ -1392,6 +1393,16 @@ class NavidromeClient:
         and let a Navidrome import re-adopt the id. Counting it as a failure
         aborted the whole artist after three tracks and reported "Navidrome
         unreachable? check credentials" for a perfectly healthy server.
+
+        ⭐ ``"deferred"`` — the IMPORT GATE skipped this request.
+        ``_get_subsonic_response`` returns ``{}`` (no ``status``, no ``error``)
+        while a Navidrome import is running, so the call never reached the
+        server. That empty dict used to fall through to ``"failed"`` with
+        ``code=None message=None``, and three of them aborted the artist with
+        "Navidrome unreachable?" — the reported warning, produced against a
+        perfectly healthy server purely because an import happened to be
+        running. Deferral is EXPECTED and retryable; it must not count as a
+        failure nor trip the consecutive-failure breaker.
         """
         try:
             rating = max(0, min(5, int(rating)))
@@ -1400,6 +1411,18 @@ class NavidromeClient:
             )
             if data.get("status") == "ok":
                 return "ok"
+            # An EMPTY response is the import gate's "not sent, try later" — not
+            # a rejection. Checked before the error branches because there is no
+            # error to inspect; a real rejection always carries ``status:
+            # failed`` and an error code.
+            if not data:
+                logger.debug(
+                    "Navidrome setRating deferred (import running) — will retry",
+                    track_id=track_id,
+                    rating=rating,
+                    username=self.username or None,
+                )
+                return "deferred"
             error = data.get("error") or {}
             code = error.get("code")
             try:

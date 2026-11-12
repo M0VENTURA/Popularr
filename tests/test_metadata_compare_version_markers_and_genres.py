@@ -578,17 +578,37 @@ class TestTheWorkRelationshipCoverVerdict:
     def test_a_work_by_the_same_artist_disproves_a_cover_marker(self):
         """The false-cover case from the report.
 
-        The work HAS an artist-credit (``work_artist``) and ``is_cover`` was
-        therefore computed and came back False — that is what makes the
-        negative verdict legitimate.
+        Positive evidence: the work is credited to the PERFORMER themselves, so
+        they demonstrably wrote it. ``work_artist_is_performer`` is what
+        ``_flatten_release`` now sets for that — a differing work credit means
+        the work names a COMPOSER, which says nothing about cover status.
         """
         note = _title_note(
             "Song (Cover Version)", "Song",
-            {"work_mbid": "work-1", "work_artist": "Nirvana"},
+            {"work_mbid": "work-1", "work_artist": "Nirvana",
+             "work_artist_is_performer": True},
         )
         assert note == "not a cover (work relationship)", (
             "a work relationship exists and credits the same artist, so the "
             "(Cover Version) marker is unsupported and the user must be told"
+        )
+
+    def test_a_work_credited_to_a_songwriter_says_nothing(self):
+        """The reported Flaw / Janet Gardner case.
+
+        Janet Gardner is credited as a WRITER on "Persistence" and the other
+        tracks of Flaw's OWN "Vol IV Because of the Brave". A work credit that
+        differs from the performer means "someone else wrote this song", NOT
+        "the performer is covering it" — so it must not produce a verdict in
+        either direction.
+        """
+        note = _title_note(
+            "Persistence (Janet Gardner Cover)", "Persistence",
+            {"work_mbid": "work-1", "work_artist": "Janet Gardner"},
+        )
+        assert note is None, (
+            "a work credited to a songwriter is not evidence of a cover; "
+            "claiming 'not a cover' here is how the false verdict was justified"
         )
 
     def test_a_work_with_no_artist_credit_says_nothing(self):

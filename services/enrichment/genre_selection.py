@@ -55,6 +55,7 @@ from services.enrichment.genre_vocabulary import (
     KIND_GENRE,
     Vocabulary,
     get_vocabulary,
+    normalize_token,
 )
 
 logger = structlog.get_logger(__name__)
@@ -142,7 +143,26 @@ class Candidate:
 class SelectionSettings:
     """Every tunable, with the report's recommended starting values."""
 
-    max_genres: int = 3
+    #: How many MUSICAL genres survive cleanup and reach the tag. This is the
+    #: stored cardinality, not the pool — see :attr:`selection_pool`.
+    max_genres: int = 4
+    #: How many candidates are taken from the ranking BEFORE the collection
+    #: policy runs. The policy needs a few alternatives to choose between: with
+    #: only the final count in hand, suppressing a rock genre leaves an empty
+    #: slot that cannot be back-filled by the next-best candidate.
+    selection_pool: int = 6
+    #: The collection policy: an accepted metal genre (other than Nu Metal)
+    #: removes rock-family genres from the final set.
+    metal_suppresses_rock: bool = True
+    #: Nu Metal on its own is a metal/rock crossover, so it does NOT suppress
+    #: the approved rock companions below.
+    nu_metal_exception: bool = True
+    #: Genres kept beside Nu Metal. Deliberately a short list: extending it to
+    #: every rock genre would make the exception swallow the whole policy.
+    nu_metal_rock_companions: tuple[str, ...] = ("hard_rock", "alternative_rock")
+    #: Drop a specificity-0 family root ("Metal", "Rock") when a more specific
+    #: genre of the same family is also selected.
+    remove_generic_parents: bool = True
     #: source -> weight (the report's "recommended starting weights").
     source_weights: dict[str, float] = field(default_factory=dict)
     #: entity level -> weight.
@@ -156,8 +176,10 @@ class SelectionSettings:
     artist_only_penalty: float = 0.15
     #: Subtracted from a microgenre (specificity 3) with a single source.
     microgenre_single_source_penalty: float = 0.10
-    #: Confidence floors, by position (1-based).
-    thresholds: tuple[float, ...] = (0.60, 0.45, 0.35)
+    #: Confidence floors, by position (1-based). The fourth entry exists because
+    #: the final count is now up to four; a position beyond this tuple reuses the
+    #: last value rather than dropping its requirement entirely.
+    thresholds: tuple[float, ...] = (0.60, 0.45, 0.35, 0.35)
     #: Each position must also reach this fraction of the position ABOVE it,
     #: measured on raw score.
     #:
@@ -167,7 +189,7 @@ class SelectionSettings:
     #: example is the checkable statement, so ~45% is used for both and the value
     #: is configurable. The rule's JOB is to stop a much weaker candidate taking
     #: a slot, and 45% does that; 55% additionally rejects the report's own case.
-    relative_floors: tuple[float, ...] = (0.0, 0.45, 0.45)
+    relative_floors: tuple[float, ...] = (0.0, 0.45, 0.45, 0.45)
     #: At most this many genres from one family branch...
     family_slot_limit: int = 2
     #: ...unless the extra one has track-level evidence from this many sources.
@@ -223,8 +245,13 @@ DEFAULT_ENTITY_WEIGHTS: dict[str, float] = {
 #: genre: the more specific alternative metal replaces its alternative-rock
 #: ancestor even when the rock tag scores higher. The reported "Alternative
 #: Rock, Alternative Metal, Cover" is the regression this prevents.
+#:
+#: ⚠️ ``gothic_rock`` + ``gothic_metal`` was REMOVED deliberately. It used to be
+#: kept as "different aspects of a sound", but the collection policy is that an
+#: accepted metal genre suppresses its rock counterpart, and Gothic Metal /
+#: Gothic Rock is exactly that case. ``keep_together`` would have exempted it
+#: from the policy and preserved both.
 DEFAULT_KEEP_TOGETHER: frozenset[tuple[str, str]] = frozenset({
-    ("gothic_rock", "gothic_metal"),
     ("industrial", "industrial_metal"),
     ("pop_punk", "emo"),
     ("metalcore", "melodic_death_metal"),
@@ -296,8 +323,12 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         t1 = float(thresholds.get("first", 0.60))
         t2 = float(thresholds.get("second", 0.45))
         t3 = float(thresholds.get("third", 0.35))
+        # A fourth floor exists because the final count is up to four now.
+        # Defaulting it to the third's value keeps a three-entry config working
+        # unchanged while still requiring the fourth slot to earn itself.
+        t4 = float(thresholds.get("fourth", t3))
     except (TypeError, ValueError):
-        t1, t2, t3 = 0.60, 0.45, 0.35
+        t1, t2, t3, t4 = 0.60, 0.45, 0.35, 0.35
 
     def _pairs(key: str, default: frozenset[tuple[str, str]]) -> frozenset[tuple[str, str]]:
         listed = raw.get(key)
@@ -324,8 +355,60 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         except (TypeError, ValueError):
             return default
 
+    def _bool(key: str, default: bool) -> bool:
+        """A config flag, accepting the YAML spellings the Config page writes.
+
+        ``bool("false")`` is True, so a string value written by the page must be
+        interpreted rather than coerced — otherwise switching the policy OFF in
+        the UI would silently leave it ON.
+        """
+        value = raw.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().casefold()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+        return default
+
+    def _companions() -> tuple[str, ...]:
+        """The genres kept beside Nu Metal, canonicalised through the vocabulary.
+
+        Accepts ids ("hard_rock") or display names ("Hard Rock"), so a
+        hand-edited config cannot quietly disable the exception by writing the
+        readable spelling.
+        """
+        listed = raw.get("nu_metal_rock_companions")
+        if not isinstance(listed, list):
+            return DEFAULT_NU_METAL_COMPANIONS
+        vocab = get_vocabulary()
+        out: list[str] = []
+        for item in listed:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            key = text.casefold().replace(" ", "_")
+            gid = key if key in vocab.genres else vocab.genre_lookup.get(
+                normalize_token(text), ""
+            )
+            # An unknown spelling is kept as an id: the policy simply will not
+            # match a genre that is not in the vocabulary, which is the safe
+            # direction (it cannot permit an unintended genre).
+            gid = gid or key
+            if gid not in out:
+                out.append(gid)
+        return tuple(out) if out else DEFAULT_NU_METAL_COMPANIONS
+
     return SelectionSettings(
-        max_genres=max(1, _int("max_genres", 3)),
+        max_genres=max(1, _int("max_genres", 4)),
+        selection_pool=max(1, _int("selection_pool", 6)),
+        metal_suppresses_rock=_bool("metal_suppresses_rock", True),
+        nu_metal_exception=_bool("nu_metal_exception", True),
+        nu_metal_rock_companions=_companions(),
+        remove_generic_parents=_bool("remove_generic_parents", True),
         source_weights=source_weights,
         entity_weights=entity_weights,
         agreement_2=_num("agreement_2", 0.30),
@@ -333,8 +416,8 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         specificity_bonus=_num("specificity_bonus", 0.05),
         artist_only_penalty=_num("artist_only_penalty", 0.15),
         microgenre_single_source_penalty=_num("microgenre_single_source_penalty", 0.10),
-        thresholds=(t1, t2, t3),
-        relative_floors=(0.0, 0.45, 0.45),
+        thresholds=(t1, t2, t3, t4),
+        relative_floors=(0.0, 0.45, 0.45, 0.45),
         family_slot_limit=max(1, _int("family_slot_limit", 2)),
         family_override_sources=max(1, _int("family_override_sources", 2)),
         family_consensus_min_share=_num("family_consensus_min_share", 0.30),
@@ -484,6 +567,265 @@ def score_candidates(
 
 
 # ---------------------------------------------------------------------------
+# Removal reasons
+# ---------------------------------------------------------------------------
+# Every dropped candidate carries ONE reason code, so "why is my genre missing?"
+# is answerable without re-running the engine. The code is the stable contract;
+# the trigger names the genre that caused the removal.
+
+REASON_OUTSIDE_FINAL_LIMIT = "OUTSIDE_FINAL_LIMIT"
+REASON_LOW_CONFIDENCE = "LOW_CONFIDENCE"
+REASON_FAMILY_OUTLIER = "INCOMPATIBLE_OUTLIER"
+REASON_REDUNDANT_GENERIC_PARENT = "REDUNDANT_GENERIC_PARENT"
+REASON_REDUNDANT_ANCESTOR = "REDUNDANT_ANCESTOR"
+REASON_ROCK_SUPPRESSED_BY_METAL = "ROCK_SUPPRESSED_BY_METAL"
+REASON_ROCK_NOT_ALLOWED_BY_NU_METAL = "ROCK_NOT_ALLOWED_BY_NU_METAL_EXCEPTION"
+REASON_EXCLUSIVE_CONFLICT = "EXCLUSIVE_CONFLICT"
+REASON_MANUAL_OVERRIDE_LIMIT = "MANUAL_GENRE_KEPT"
+
+
+FAMILY_METAL = "metal"
+FAMILY_ROCK = "rock"
+
+#: The one metal genre that does NOT suppress rock: it is a metal/rock
+#: crossover by definition, so removing its rock companion would strip the
+#: identity the tag is describing.
+NU_METAL_ID = "nu_metal"
+
+#: Rock genres that survive alongside Nu Metal. Kept short on purpose — see
+#: ``SelectionSettings.nu_metal_rock_companions``.
+DEFAULT_NU_METAL_COMPANIONS: tuple[str, ...] = ("hard_rock", "alternative_rock")
+
+
+def _removal(candidate: Candidate, reason: str, trigger: str = "") -> dict[str, Any]:
+    """One removal record — what was dropped, why, and by what."""
+    return {
+        "genre": candidate.display,
+        "id": candidate.genre_id,
+        "reason": reason,
+        "trigger": trigger,
+    }
+
+
+def _family_members(
+    candidates: Iterable[Candidate], family: str
+) -> list[Candidate]:
+    return [c for c in candidates if (c.family or "") == family]
+
+
+def apply_metal_over_rock_policy(
+    candidates: list[Candidate],
+    *,
+    settings: SelectionSettings | None = None,
+) -> tuple[list[Candidate], list[dict[str, Any]]]:
+    """The collection policy: metal outranks rock. Returns ``(kept, removed)``.
+
+    This is deliberately NOT a majority-family rule. Once an accepted metal
+    genre is present, the rock side of the same track is redundant — that is the
+    requested outcome:
+
+        Folk Metal + Folk Rock      -> Folk Metal
+        Gothic Metal + Gothic Rock  -> Gothic Metal
+        Progressive Metal + Prog Rock -> Progressive Metal
+
+    ⭐ TWO BOUNDARIES THAT MUST NOT MOVE.
+
+    1. **Nu Metal alone is exempt.** Nu Metal is a metal/rock hybrid; stripping
+       ``Hard Rock`` from a Nu Metal track deletes the crossover the tag exists
+       to name. When Nu Metal is the ONLY accepted metal genre, the approved
+       companions in ``settings.nu_metal_rock_companions`` survive.
+    2. **Only ROCK-family genres are removed.** The policy says nothing about
+       punk, post-hardcore, electronic, hip-hop, pop or R&B — a metalcore track
+       keeps its ``Post-Hardcore`` tag, and a nu-metal/electronic track keeps
+       ``Hardstyle``. Suppressing those would turn a metal-preference into a
+       metal-only filter.
+
+    A MANUAL genre is never removed: an explicit user correction outranks the
+    collection policy, which is the whole point of it being manual.
+    """
+    settings = settings or _settings_from_config(None)
+    if not settings.metal_suppresses_rock:
+        return candidates, []
+
+    metal = [c for c in _family_members(candidates, FAMILY_METAL)]
+    rock = [c for c in _family_members(candidates, FAMILY_ROCK)]
+    if not metal or not rock:
+        return candidates, []
+
+    metal_ids = {c.genre_id for c in metal}
+    non_nu_metal = [c for c in metal if c.genre_id != NU_METAL_ID]
+
+    removed: list[dict[str, Any]] = []
+
+    if non_nu_metal:
+        # Strongest metal genre names the trigger, so the reason explains which
+        # genre actually won the conflict.
+        trigger = max(non_nu_metal, key=lambda c: (c.confidence, c.score)).display
+        permitted = frozenset()
+        reason = REASON_ROCK_SUPPRESSED_BY_METAL
+    elif NU_METAL_ID in metal_ids and settings.nu_metal_exception:
+        trigger = next(c.display for c in metal if c.genre_id == NU_METAL_ID)
+        permitted = frozenset(settings.nu_metal_rock_companions)
+        reason = REASON_ROCK_NOT_ALLOWED_BY_NU_METAL
+    else:
+        # Only Nu Metal, but the exception is switched off: the policy applies.
+        trigger = next(c.display for c in metal if c.genre_id == NU_METAL_ID)
+        permitted = frozenset()
+        reason = REASON_ROCK_SUPPRESSED_BY_METAL
+
+    drop: set[str] = set()
+    for candidate in rock:
+        if candidate.manual:
+            continue
+        if candidate.genre_id in permitted:
+            continue
+        drop.add(candidate.genre_id)
+        removed.append(_removal(candidate, reason, trigger))
+
+    if not drop:
+        return candidates, []
+
+    logger.debug(
+        "Genre metal-over-rock policy applied",
+        removed=sorted(r["id"] for r in removed),
+        reason=reason,
+        trigger=trigger,
+    )
+    return [c for c in candidates if c.genre_id not in drop], removed
+
+
+def remove_generic_parents(
+    candidates: list[Candidate],
+    *,
+    settings: SelectionSettings | None = None,
+) -> tuple[list[Candidate], list[dict[str, Any]]]:
+    """Drop a family ROOT when a more specific genre of that family is present.
+
+    ``Metal`` beside ``Melodic Death Metal`` (or ``Death Metal``) spends a slot
+    restating the family name: once the evidence names a concrete subgenre, the
+    umbrella adds no information. This is the plan's confirmed rule —
+
+        Metal; Death Metal          -> Death Metal
+        Rock; Alternative Rock      -> Alternative Rock
+        Punk; Hardcore Punk         -> Hardcore Punk
+        Electronic; House           -> House
+
+    ⚠️ DELIBERATELY UNCONDITIONAL — the ratio does NOT apply here. The generic
+    root usually SCORES HIGHER than its child (``metal`` often leads the list),
+    so a "the child must be at least as well supported" guard would keep the
+    umbrella almost every time and the rule would never fire. The ratio exists
+    for :func:`remove_redundant_ancestors`, where the question is whether a
+    NARROWER genre genuinely replaces a different, still-meaningful one. Here
+    the pair is a set and its own subset, so support is not the question.
+
+    A child is NEVER inferred from the root, and manual genres are untouched.
+    """
+    settings = settings or _settings_from_config(None)
+    if not settings.remove_generic_parents:
+        return candidates, []
+
+    drop: set[str] = set()
+    removed: list[dict[str, Any]] = []
+
+    for candidate in candidates:
+        if candidate.specificity != 0 or candidate.manual:
+            continue
+        family = candidate.family or candidate.genre_id
+        more_specific = [
+            other
+            for other in candidates
+            if other.genre_id != candidate.genre_id
+            and (other.family or other.genre_id) == family
+            and other.specificity > 0
+        ]
+        if not more_specific:
+            continue
+        drop.add(candidate.genre_id)
+        trigger = max(more_specific, key=lambda c: (c.confidence, c.score)).display
+        removed.append(_removal(candidate, REASON_REDUNDANT_GENERIC_PARENT, trigger))
+
+    if not drop:
+        return candidates, []
+    return [c for c in candidates if c.genre_id not in drop], removed
+
+
+def trim_to_final(
+    candidates: list[Candidate],
+    *,
+    settings: SelectionSettings | None = None,
+    limit: int | None = None,
+) -> tuple[list[Candidate], list[dict[str, Any]]]:
+    """Keep up to ``limit`` of the CLEANED set. Returns ``(kept, removed)``.
+
+    ⚠️ DELEGATES to :func:`select_genres` — the ONE implementation of "each
+    position must earn its place". It is not a plain top-N slice: every position
+    keeps its confidence floor and its relative floor against the leader.
+    Without that, raising the final count from 3 to 4 filled the extra slot with
+    whatever happened to be next — a lone ``Bebop`` beside a well-supported
+    Death Metal track.
+
+    This function only adds the REMOVAL RECORDS, working out which candidates
+    ``select_genres`` dropped and why, so a result stays explainable. It must
+    not re-implement the selection itself: two copies of these floors would
+    drift, and the verbose one always wins by accident.
+    """
+    settings = settings or _settings_from_config(None)
+    if limit is not None:
+        settings = SelectionSettings(
+            **{**settings.__dict__, "max_genres": max(1, int(limit))}
+        )
+
+    selected = select_genres(candidates, settings=settings)
+    kept_ids = {c.genre_id for c in selected}
+    cap = settings.max_genres
+
+    ranked = sorted(
+        candidates,
+        key=lambda c: (c.confidence, c.score, c.specificity),
+        reverse=True,
+    )
+    leader = ranked[0] if ranked else None
+    leader_score = leader.score if leader else 0.0
+
+    removed: list[dict[str, Any]] = []
+    for candidate in ranked:
+        if candidate.genre_id in kept_ids:
+            continue
+        # The reason is REPORTING only — ``select_genres`` already decided.
+        # Reporting the most specific explanation available keeps the preview
+        # useful without letting it influence the outcome.
+        position = len(kept_ids)
+        if position >= cap:
+            removed.append(
+                _removal(candidate, REASON_OUTSIDE_FINAL_LIMIT, f"top {cap}")
+            )
+        elif not candidate.manual and candidate.confidence < _floor_for(settings, position):
+            removed.append(
+                _removal(
+                    candidate,
+                    REASON_LOW_CONFIDENCE,
+                    f"floor {_floor_for(settings, position):.2f}",
+                )
+            )
+        elif (
+            leader is not None
+            and leader_score > 0
+            and (candidate.score / leader_score) < _relative_floor_for(settings, position)
+        ):
+            removed.append(
+                _removal(
+                    candidate,
+                    REASON_LOW_CONFIDENCE,
+                    f"below {_relative_floor_for(settings, position):.0%} of {leader.display}",
+                )
+            )
+        else:
+            removed.append(_removal(candidate, REASON_LOW_CONFIDENCE, "not selected"))
+
+    return selected, removed
+
+
+# ---------------------------------------------------------------------------
 # Condensation
 # ---------------------------------------------------------------------------
 
@@ -503,6 +845,7 @@ def remove_redundant_ancestors(
     *,
     vocab: Vocabulary | None = None,
     settings: SelectionSettings | None = None,
+    reasons: list[dict[str, Any]] | None = None,
 ) -> list[Candidate]:
     """Drop a selected genre when a MORE SPECIFIC selected genre covers it.
 
@@ -522,8 +865,27 @@ def remove_redundant_ancestors(
     vocab = vocab or get_vocabulary()
     settings = settings or _settings_from_config(None)
 
+    # ⭐ An APPROVED Nu Metal companion is exempt from ancestor condensation.
+    #
+    # ``alternative_rock`` is an ancestor of ``nu_metal`` (through
+    # ``alternative_metal``), so this rule deleted it before the metal-over-rock
+    # policy ever saw it — the Nu Metal exception could therefore never keep the
+    # very genre it exists to keep. If the exception is enabled and an accepted
+    # Nu Metal genre is present, its approved companions stand.
+    _nu_metal_companions: frozenset[str] = frozenset()
+    if settings.nu_metal_exception:
+        has_nu_metal = any(
+            c.genre_id == NU_METAL_ID for c in candidates
+        )
+        if has_nu_metal:
+            _nu_metal_companions = frozenset(settings.nu_metal_rock_companions)
+
     drop: set[str] = set()
+    triggers: dict[str, tuple[str, str]] = {}
     for candidate in candidates:
+        if candidate.genre_id in _nu_metal_companions:
+            # Kept for the Nu Metal exception; the policy makes the final call.
+            continue
         for other in candidates:
             if other.genre_id == candidate.genre_id:
                 continue
@@ -535,6 +897,9 @@ def remove_redundant_ancestors(
                 # Unconditional: the exclusive pair must not co-exist, even
                 # when the broader ancestor has more support.
                 drop.add(candidate.genre_id)
+                triggers[candidate.genre_id] = (
+                    REASON_EXCLUSIVE_CONFLICT, other.display,
+                )
                 break
             if _pair_is_kept(candidate.genre_id, other.genre_id, settings.keep_together):
                 continue
@@ -549,9 +914,16 @@ def remove_redundant_ancestors(
             ):
                 continue
             drop.add(candidate.genre_id)
+            triggers[candidate.genre_id] = (REASON_REDUNDANT_ANCESTOR, other.display)
             break
 
     if drop:
+        if reasons is not None:
+            for candidate in candidates:
+                hit = triggers.get(candidate.genre_id)
+                if hit is None:
+                    continue
+                reasons.append(_removal(candidate, hit[0], hit[1]))
         logger.debug("Genre hierarchy condensation", dropped=sorted(drop))
     return [c for c in candidates if c.genre_id not in drop]
 
@@ -626,6 +998,7 @@ def remove_family_outliers(
     candidates: list[Candidate],
     *,
     settings: SelectionSettings | None = None,
+    reasons: list[dict[str, Any]] | None = None,
 ) -> list[Candidate]:
     """Drop a genre family that is only a tiny minority of the evidence.
 
@@ -635,6 +1008,13 @@ def remove_family_outliers(
     total score is below ``family_consensus_min_share`` of the strongest
     family is an outlier — the reported ``alternative rock`` beside a large
     pop/dance-pop/synth-pop cluster — and is removed before selection.
+
+    ⭐ ORDER IS LOAD-BEARING: this runs BEFORE the metal-over-rock policy. An
+    isolated, weakly supported metal tag must be rejected as an outlier rather
+    than being allowed to delete a well-supported rock cluster (the reported
+    Offspring case: ``Punk Rock; Punk; Rock`` plus one weak ``Death Metal``).
+    Suppressing on an outlier makes the outlier effect STRONGER than its own
+    evidence, which is the opposite of validating the evidence first.
     """
     settings = settings or _settings_from_config(None)
     if not candidates:
@@ -655,14 +1035,42 @@ def remove_family_outliers(
         if candidate.manual
         or family_scores.get(candidate.family or candidate.genre_id, 0.0) >= floor
     ]
-    dropped = [c.display for c in candidates if c not in kept]
+    dropped = [c for c in candidates if c not in kept]
     if dropped:
+        if reasons is not None:
+            for candidate in dropped:
+                reasons.append(
+                    _removal(
+                        candidate,
+                        REASON_FAMILY_OUTLIER,
+                        f"family below {settings.family_consensus_min_share:.0%} of the strongest",
+                    )
+                )
         logger.debug(
             "Genre family outlier removed",
-            dropped=dropped,
+            dropped=[c.display for c in dropped],
             family_scores={k: round(v, 3) for k, v in family_scores.items()},
         )
     return kept
+
+
+def _floor_for(settings: SelectionSettings, position: int) -> float:
+    """The confidence floor for a 1-based POSITION (clamped to the tuple).
+
+    Shared by :func:`select_genres` and the removal-reporting in
+    :func:`trim_to_final`, so the recorded reason always quotes the floor that
+    actually applied.
+    """
+    floors = settings.thresholds
+    if not floors:
+        return 0.0
+    return floors[position] if position < len(floors) else floors[-1]
+
+
+def _relative_floor_for(settings: SelectionSettings, position: int) -> float:
+    """The relative floor for a position (0.0 when the tuple does not cover it)."""
+    floors = settings.relative_floors
+    return floors[position] if position < len(floors) else 0.0
 
 
 def select_genres(
@@ -670,18 +1078,18 @@ def select_genres(
     *,
     settings: SelectionSettings | None = None,
 ) -> list[Candidate]:
-    """Rank, condense, and select up to ``max_genres``.
+    """Rank and select up to ``max_genres``, each position earning its place.
 
-    THREE IS A MAXIMUM, NOT A TARGET (§12). Each position has to EARN its place:
-    a confidence floor plus a relative floor against the position above it, so a
+    THE COUNT IS A MAXIMUM, NOT A TARGET (§12). Each position has to EARN its
+    place: a confidence floor plus a relative floor against the leader, so a
     weak artist-only fallback cannot fill a blank slot.
 
     A manual/locked genre is never subject to the thresholds — an explicit user
     choice outranks the model, which is the point of making it manual.
 
-    ``candidates`` should already be ranked and condensed (see
-    :func:`rank_and_condense`); they are re-sorted here so the function is safe
-    to call on its own.
+    ``candidates`` should already be ranked and CLEANED (see the pipeline in
+    :func:`select_album_or_track_genres`); they are re-sorted here so the
+    function is safe to call on its own.
     """
     settings = settings or _settings_from_config(None)
 
@@ -701,11 +1109,7 @@ def select_genres(
             continue
 
         position = len(selected)
-        floor = (
-            settings.thresholds[position]
-            if position < len(settings.thresholds)
-            else settings.thresholds[-1]
-        )
+        floor = _floor_for(settings, position)
         if candidate.confidence < floor:
             logger.debug(
                 "Genre below the confidence floor — not filling the position",
@@ -716,11 +1120,7 @@ def select_genres(
             break
 
         if selected:
-            relative = (
-                settings.relative_floors[position]
-                if position < len(settings.relative_floors)
-                else 0.0
-            )
+            relative = _relative_floor_for(settings, position)
             # ⚠️ The ratio uses RAW SCORES, not confidences. Confidence is
             # clamped at 1.0, so a leader at score 2.85 and a runner-up at 1.38
             # both read 1.0 — comparing those makes every relative floor
@@ -746,6 +1146,21 @@ def select_genres(
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _vocabulary_version(vocab: Vocabulary) -> Any:
+    """The taxonomy version from the vocabulary file, or ``None``.
+
+    Best-effort: a version is diagnostics, never a decision input, so an
+    unreadable file must not fail a scan.
+    """
+    try:
+        import json
+
+        with open(vocab.source_path, encoding="utf-8") as handle:
+            return json.load(handle).get("version")
+    except Exception:
+        return None
+
+
 def select_album_or_track_genres(
     source_map: dict[str, Any],
     *,
@@ -755,34 +1170,89 @@ def select_album_or_track_genres(
 ) -> dict[str, Any]:
     """The whole pipeline. Returns the selection plus what was set aside.
 
-    ``{"genres": [display…], "candidates": [...], "moved": {...}, "engine": "v2"}``
+    ``{"genres": [display…], "candidates": [...], "moved": {...},
+       "removed": [...], "engine": "v2", "algorithm_version": "2.1"}``
 
     ``candidates`` is the FULL ranked, post-condensation set — each entry marked
     ``selected`` — so a genre that did not make the cut can still be explained.
     Each carries its score, confidence, sources, entity levels and raw evidence:
     the report's §15 provenance, so a result is accountable rather than a bare
     list of words.
+
+    ⭐ THE ORDER BELOW IS THE REQUIREMENT, not an implementation detail:
+
+    1. rank, then reject weak family OUTLIERS — evidence is validated first;
+    2. take a POOL of the best candidates;
+    3. apply the metal-over-rock COLLECTION POLICY;
+    4. remove redundant generic parents and ancestors;
+    5. trim the cleaned pool to the final count.
+
+    Reversing 1 and 3 would let an isolated bad metal tag delete a
+    well-supported rock cluster. Reversing 4 and 5 would let the trim decide
+    which genre "wins" a redundancy conflict, so a redundant parent could
+    survive by outscoring its own child.
     """
     settings = settings or _settings_from_config(None)
     if max_genres is not None:
+        # ``max_genres`` is the FINAL cardinality; the pool scales with it so a
+        # caller asking for one genre still has alternatives to clean up from.
         settings = SelectionSettings(
             **{**settings.__dict__, "max_genres": max(1, int(max_genres))}
         )
 
+    vocab = vocab or get_vocabulary()
+    removed: list[dict[str, Any]] = []
+
+    # ── 1. Evidence first ────────────────────────────────────────────────
     candidates, moved = collect_candidates(source_map, vocab=vocab, settings=settings)
     score_candidates(candidates, settings=settings)
     ranked = rank_and_condense(candidates, vocab=vocab, settings=settings)
-    ranked = remove_family_outliers(ranked, settings=settings)
-    ranked = enforce_family_diversity(ranked, settings=settings)
-    selected = select_genres(ranked, settings=settings)
-    selected = remove_redundant_ancestors(selected, vocab=vocab, settings=settings)
+    ranked = remove_family_outliers(ranked, settings=settings, reasons=removed)
+
+    # ── 2. The pool: more candidates than the final count, so the policy has
+    # something to promote when it removes a genre.
+    pool_size = max(settings.selection_pool, settings.max_genres)
+    pool = ranked[:pool_size]
+    overflow = ranked[pool_size:]
+
+    # ── 3. Collection policy ─────────────────────────────────────────────
+    pool, policy_removed = apply_metal_over_rock_policy(pool, settings=settings)
+    removed.extend(policy_removed)
+
+    # ── 4. Redundancy ────────────────────────────────────────────────────
+    pool, generic_removed = remove_generic_parents(pool, settings=settings)
+    removed.extend(generic_removed)
+
+    pool = remove_redundant_ancestors(
+        pool, vocab=vocab, settings=settings, reasons=removed
+    )
+    pool = enforce_family_diversity(pool, settings=settings)
+
+    # ── 5. Final cardinality ─────────────────────────────────────────────
+    selected, trim_removed = trim_to_final(pool, settings=settings)
+    removed.extend(trim_removed)
+
     winners = {c.genre_id for c in selected}
+    # Candidates outside the pool are still explained rather than discarded.
+    for candidate in overflow:
+        if candidate.genre_id in winners:
+            continue
+        removed.append(
+            _removal(
+                candidate,
+                REASON_OUTSIDE_FINAL_LIMIT,
+                f"pool of {pool_size}",
+            )
+        )
 
     return {
         "engine": "v2",
+        "algorithm_version": "2.1",
+        "taxonomy_version": _vocabulary_version(vocab),
         "genres": [c.display for c in selected],
         "candidates": [
             {**c.to_dict(), "selected": c.genre_id in winners} for c in ranked
         ],
+        "removed": removed,
         "moved": {kind: values for kind, values in moved.items() if values},
     }

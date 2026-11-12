@@ -530,13 +530,35 @@ class TestCondensation:
         })
         assert result == ["Heavy Metal"], result
 
-    def test_a_conditional_pair_survives_with_support(self) -> None:
+    def test_rock_is_suppressed_by_a_non_nu_metal_genre_even_with_support(self) -> None:
+        """The collection policy now outranks ``conditional_keep`` for rock/metal.
+
+        ``hard_rock`` + ``heavy_metal`` used to survive when the rock side had
+        its own track/album evidence. Under the metal-over-rock policy an
+        accepted non-Nu-Metal genre removes the rock side regardless, so the
+        track keeps ONE identity from the pair.
+        """
         result = select({
             "lastfm@track": ["hard rock"],
             "musicbrainz@album": ["heavy metal"],
             "listenbrainz@track": ["hard rock", "heavy metal"],
         })
-        assert "Hard Rock" in result and "Heavy Metal" in result, result
+        assert result == ["Heavy Metal"], result
+
+    def test_conditional_keep_still_applies_between_non_rock_families(self) -> None:
+        """``metalcore`` + ``hardcore_punk`` are NOT a rock/metal pair.
+
+        The metal-over-rock policy only touches rock-family genres, so this
+        conditional pair keeps its own rule: both survive when the narrower one
+        stands on track evidence.
+        """
+        result = select({
+            "lastfm@track": ["metalcore"],
+            "musicbrainz@album": ["hardcore punk"],
+            "listenbrainz@track": ["metalcore", "hardcore punk"],
+        })
+        assert "Metalcore" in result, result
+        assert "Hardcore Punk" in result, result
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +635,107 @@ class TestSelection:
 
 
 # ---------------------------------------------------------------------------
+# Stage 8a: the pool → cleanup → final pipeline
+# ---------------------------------------------------------------------------
+
+class TestThePoolThenCleanupPipeline:
+    """Six candidates are ranked, cleaned, then trimmed to at most four.
+
+    The point of the extra pool width is that CLEANUP has alternatives: with only
+    the final count in hand, suppressing a redundant genre leaves a hole that
+    cannot be back-filled by the next-best candidate.
+    """
+
+    def test_the_final_count_is_four_by_default(self) -> None:
+        settings = gs.SelectionSettings(
+            source_weights=gs.DEFAULT_SOURCE_WEIGHTS,
+            entity_weights=gs.DEFAULT_ENTITY_WEIGHTS,
+        )
+        assert settings.max_genres == 4
+        assert settings.selection_pool == 6
+
+    def test_a_sibling_is_not_collapsed(self) -> None:
+        """Groove Metal + Melodic Death Metal describe different sounds.
+
+        Both sit in the metal family, so neither the ancestor rule nor the
+        metal-over-rock policy may merge them.
+        """
+        result = select({
+            "musicbrainz@track": ["groove metal", "melodic death metal"],
+            "lastfm@track": ["groove metal", "melodic death metal"],
+            "listenbrainz@track": ["groove metal", "melodic death metal"],
+        })
+        assert "Groove Metal" in result, result
+        assert "Melodic Death Metal" in result, result
+
+    def test_a_generic_root_is_removed_when_a_child_is_present(self) -> None:
+        result = full({
+            "musicbrainz@track": ["metal", "death metal"],
+            "lastfm@track": ["metal", "death metal"],
+            "listenbrainz@track": ["metal", "death metal"],
+        })
+        assert "Death Metal" in result["genres"], result["genres"]
+        assert "Metal" not in result["genres"], result["genres"]
+        reasons = {r["id"]: r for r in result["removed"]}
+        assert reasons["metal"]["reason"] == gs.REASON_REDUNDANT_GENERIC_PARENT
+
+    def test_a_replaceable_root_is_not_kept_just_because_it_scores_higher(self) -> None:
+        """The generic-parent rule is UNCONDITIONAL, and that is deliberate.
+
+        ``Metal`` (or ``Pop``) usually SCORES HIGHER than its own child, so a
+        "the child must be at least as well supported" guard would keep the
+        umbrella almost every time and the rule would never fire. A generic root
+        beside a specific genre of the same family is a set and its own subset —
+        support is not the question.
+        """
+        result = full({
+            "musicbrainz@track": ["metal", "death metal"],
+            "lastfm@track": ["metal", "death metal"],
+            "listenbrainz@track": ["metal", "death metal"],
+        })
+        # ``Metal`` leads the score ranking, yet it is still the redundant one.
+        by_id = {c["id"]: c for c in result["candidates"]}
+        assert by_id["metal"]["score"] > by_id["death_metal"]["score"]
+        assert "Death Metal" in result["genres"], result["genres"]
+        assert "Metal" not in result["genres"], result["genres"]
+
+    def test_an_unrelated_family_child_does_not_remove_the_root(self) -> None:
+        """Only a genre of the SAME family may replace a generic root."""
+        result = full({
+            "musicbrainz@track": ["pop", "synthpop"],
+            "lastfm@track": ["pop", "synthpop"],
+            "listenbrainz@track": ["pop", "synthpop"],
+        })
+        assert "Pop" in result["genres"], result["genres"]
+
+    def test_every_removal_carries_a_reason_code(self) -> None:
+        result = full({
+            "musicbrainz@track": ["metal", "death metal", "folk rock"],
+            "lastfm@track": ["metal", "death metal", "folk rock"],
+            "listenbrainz@track": ["metal", "death metal"],
+        })
+        assert result["removed"], "expected at least one removal record"
+        for record in result["removed"]:
+            assert record["reason"], record
+            assert record["genre"], record
+
+    def test_the_result_declares_its_versions(self) -> None:
+        result = full({"lastfm@track": ["death metal"]})
+        assert result["algorithm_version"] == "2.1"
+        assert result["taxonomy_version"] == 2
+
+    def test_an_unselected_candidate_is_still_explained(self) -> None:
+        """A genre that lost is reported, not discarded."""
+        result = full({
+            "musicbrainz@track": ["death metal", "bebop"],
+            "lastfm@track": ["death metal", "bebop"],
+            "listenbrainz@track": ["death metal", "bebop"],
+        })
+        ids = {c["id"] for c in result["candidates"]}
+        assert {"death_metal", "bebop"} <= ids
+
+
+# ---------------------------------------------------------------------------
 # Stage 8b: family diversity
 # ---------------------------------------------------------------------------
 
@@ -667,7 +790,16 @@ class TestFamilyConsensus:
 
     def test_pop_survives_a_weaker_synthpop_and_alt_rock_is_dropped(self) -> None:
         """Regression: alphabetical rank made alt rock win, then a weaker
-        synthpop deleted Pop during ancestor condensation."""
+        synthpop deleted Pop during ancestor condensation.
+
+        ⚠️ ``Pop`` is no longer asserted to SURVIVE. It is the pop family's
+        generic root, and the accepted children (``Dance-Pop``, ``Europop``,
+        ``Teen Pop``) are present, so the generic-parent rule removes it — the
+        plan's confirmed behaviour ("Electronic; House -> House"). The original
+        bug this test guarded is still covered: ``Synthpop`` is ELECTRONIC-family
+        and must not be able to delete a pop-family genre, and the outlier
+        ``Alternative Rock`` must stay dropped.
+        """
         tags = [
             "alternative rock", "ambient", "ballad", "contemporary r&b",
             "dance-pop", "electro", "electronic", "europop", "hip hop", "jazz",
@@ -679,8 +811,19 @@ class TestFamilyConsensus:
             "discogs@album": ["Pop"],
         })
 
-        assert "Pop" in result, result
+        # A specific pop-family genre represents the root, so the root is gone.
+        assert "Dance-Pop" in result, result
+        # The reported bug: an outlier rock genre must not win a slot.
         assert "Alternative Rock" not in result, result
+
+    def test_a_generic_root_survives_when_only_an_unrelated_child_is_present(self) -> None:
+        """``Synthpop`` is electronic-family: it must not delete ``Pop``."""
+        result = select({
+            "listenbrainz@track": ["pop", "synth-pop"],
+            "musicbrainz@album": ["pop", "synth-pop"],
+            "discogs@album": ["Pop"],
+        })
+        assert "Pop" in result, result
 
 
 class TestFamilyDiversity:
@@ -925,9 +1068,20 @@ class TestConfig:
 
         cfg = get_genre_selection_config()
         assert cfg["enabled"] is True
-        assert cfg["max_genres"] == 3
+        # Raised from 3: a wider POOL is selected, cleaned, then trimmed to 4.
+        assert cfg["max_genres"] == 4
+        assert cfg["selection_pool"] == 6
         assert cfg["thresholds"]["first"] == 0.60
         assert cfg["source_weights"] == {}, "an empty block means 'use the built-in defaults'"
+
+    def test_the_collection_policy_defaults_are_on(self) -> None:
+        from helpers.config_helpers import get_genre_selection_config
+
+        cfg = get_genre_selection_config()
+        assert cfg["metal_suppresses_rock"] is True
+        assert cfg["nu_metal_exception"] is True
+        assert cfg["remove_generic_parents"] is True
+        assert cfg["nu_metal_rock_companions"] == ["hard_rock", "alternative_rock"]
 
     def test_the_engine_defaults_lead_with_musicbrainz(self) -> None:
         assert gs.DEFAULT_SOURCE_WEIGHTS["musicbrainz"] == 1.00
@@ -959,7 +1113,7 @@ class TestConfig:
         from helpers.config_helpers import get_genre_selection_config
 
         cfg = get_genre_selection_config()
-        assert cfg["max_genres"] == 3
+        assert cfg["max_genres"] == 4
         assert cfg["thresholds"]["first"] == 0.60
 
     def test_config_survives_a_scalar_selection_block(self, monkeypatch) -> None:

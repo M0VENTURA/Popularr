@@ -99,7 +99,8 @@ def get_rating_sync_clients() -> list[Any]:
 
 
 def _client_rating_status(client: Any, track_id: str, stars: int) -> str:
-    """One client's outcome: ``ok`` / ``not_found`` / ``auth`` / ``failed``."""
+    """One client's outcome: ``ok`` / ``not_found`` / ``deferred`` / ``auth``
+    / ``failed``."""
     fn = getattr(client, "set_rating_status", None)
     if callable(fn):
         try:
@@ -120,9 +121,17 @@ def rating_status_for_track(
     * any ``ok``                     → ``ok``
     * otherwise any real failure/auth → ``failed``
     * ALL ``not_found``              → ``not_found`` (a stale song id)
+    * ALL ``deferred``               → ``deferred`` (an import was running)
 
     ``not_found`` must NOT count as an outage: it is per-track, and the scan
     keeps syncing the album's remaining tracks.
+
+    ``deferred`` likewise must not: the IMPORT GATE skipped the request (see
+    ``NavidromeClient.set_rating_status``), so nothing was rejected and nothing
+    is wrong with the server. Reporting it as a failure aborted the artist with
+    "Navidrome unreachable?" after three tracks whenever a Navidrome import
+    overlapped the scan. It is checked BEFORE the failure branch only when every
+    client deferred — a mix of deferred and genuinely failed is still a failure.
     """
     if not clients:
         return "failed"
@@ -133,6 +142,8 @@ def rating_status_for_track(
         return "ok"
     if any(status in {"failed", "auth"} for status in statuses):
         return "failed"
+    if all(status == "deferred" for status in statuses):
+        return "deferred"
     if all(status == "not_found" for status in statuses):
         return "not_found"
     return "failed"

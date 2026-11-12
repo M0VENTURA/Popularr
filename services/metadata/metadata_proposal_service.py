@@ -237,10 +237,15 @@ def _genre_sets_equal(current: Any, proposed: Any) -> bool:
 def _cover_verdict(mb_track: dict[str, Any], current: str, proposed: str) -> str:
     """Cover verdict for a title change, from the WORK RELATIONSHIP.
 
-    ``_flatten_release`` derives ``is_cover`` by comparing the work's artist
-    credit against the track artist, so this is only as good as the work
-    relationships the release fetch actually returned — when the recording
-    carries no work at all we say NOTHING rather than guess.
+    ⚠️ ``mb_track["is_cover"]`` now comes ONLY from MusicBrainz's ``cover``
+    attribute on the recording's performance relation (see
+    ``musicbrainz_service._flatten_release``). It used to be derived by
+    comparing the performing artist with the WORK's artist-credit — but a
+    work's credit names the COMPOSER, not the original performer, so a band
+    performing a song it did not write read as a cover of its songwriter (every
+    track of Flaw's own "Vol IV" became "(Janet Gardner Cover)"). That
+    comparison now only produces ``work_artist`` / ``work_artist_is_performer``
+    for the explanation below.
 
     Returned on the title change because that is the bar a cover claim shows up
     on: a local "(Cover Version)" against MusicBrainz's bare title is exactly
@@ -254,14 +259,18 @@ def _cover_verdict(mb_track: dict[str, Any], current: str, proposed: str) -> str
         # No work relationship → nothing to base a verdict on.
         return ""
     if not _as_text(mb_track.get("work_artist")):
-        # A work with NO artist-credit means ``_flatten_release`` never ran the
-        # comparison, so ``is_cover`` is ABSENT rather than False. Claiming
-        # "not a cover" from that asserts a negative out of missing data — which
-        # is how covers on Various-Artists compilations were mislabelled: the
-        # work existed, no credit came back, and silence became certainty.
+        # A work with NO artist-credit means the comparison never ran.
         return ""
-    if has_cover_marker(current) or has_cover_marker(proposed):
-        return "not a cover (work relationship)"
+    if mb_track.get("work_artist_is_performer"):
+        # The work is credited to the performer themselves: positive evidence
+        # that they wrote it, so a local "(Cover Version)" marker is unsupported.
+        if has_cover_marker(current) or has_cover_marker(proposed):
+            return "not a cover (work relationship)"
+        return ""
+    # The work is credited to someone ELSE — that is the song's WRITER, which
+    # says nothing either way about whether this performance is a cover. The
+    # old code returned "not a cover" here only because a differing credit used
+    # to set ``is_cover``; now it must stay silent rather than infer.
     return ""
 
 

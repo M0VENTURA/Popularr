@@ -195,6 +195,85 @@ def test_a_legacy_only_album_artist_is_not_removed() -> None:
     )
 
 
+def test_the_plural_album_artist_is_the_same_field() -> None:
+    """``ALBUMARTISTS``/``*_CREDIT`` are spellings of ALBUMARTIST, not new fields.
+
+    Reported: after a Lookup MBID corrected the album artist, the file still
+    said ``albumartists: Various Artists`` (and the ``_credit`` twins) beside
+    ``albumartist: Alessandra`` and the album re-imported as Various Artists.
+
+    ⚠️ WHY THE PLURAL WINS: Navidrome resolves album artists with
+    ``getArtistValues(single=albumartist, multi=albumartists)``, which returns
+    the MULTI value whenever it is populated. So a stale plural is not cosmetic
+    — it overrides the corrected singular on the very next scan. A write must
+    therefore clear it, which means it has to be a declared spelling.
+    """
+    for field in ("albumartists", "albumartist_credit", "albumartists_credit"):
+        assert canonical_tag_name(field) == "ALBUMARTIST", field
+        assert is_variant_of(field, "ALBUMARTIST"), field
+
+    # The sort names are separate fields and must NOT be swept up by this.
+    assert canonical_tag_name("albumartistsort") is None
+    assert canonical_tag_name("albumartistssort") is None
+
+
+def test_clearing_album_artist_removes_the_plural_and_credit_twins() -> None:
+    audio = {
+        "albumartist": ["Alessandra"],
+        "ALBUMARTISTS": ["Various Artists"],
+        "albumartists_credit": ["Various Artists"],
+        "ALBUMARTISTSORT": ["Various Artists"],
+        "ARTIST": ["Alessandra ft. Steve Brickman"],
+    }
+
+    clear_vorbis_variants(audio, "album_artist")
+
+    assert "ALBUMARTISTS" not in audio, "the stale plural survived — it wins on rescan"
+    assert "albumartists_credit" not in audio, "the stale credit twin survived"
+    assert "albumartist" not in audio
+    assert audio.get("ALBUMARTISTSORT") == ["Various Artists"], (
+        "the sort tag is its own field and must be left alone"
+    )
+    assert audio.get("ARTIST") == ["Alessandra ft. Steve Brickman"]
+
+
+def test_a_flac_write_heals_the_plural_beside_the_singular() -> None:
+    from services.metadata.tag_file_service import (
+        _heal_duplicate_album_artist_tags,
+    )
+
+    audio = {
+        "albumartist": ["Alessandra"],
+        "ALBUMARTISTS": ["Various Artists"],
+        "ARTIST": ["Alessandra ft. Steve Brickman"],
+    }
+
+    _heal_duplicate_album_artist_tags(audio)
+
+    assert audio == {
+        "albumartist": ["Alessandra"],
+        "ARTIST": ["Alessandra ft. Steve Brickman"],
+    }
+
+
+def test_the_mp3_writer_clears_the_plural_txxx_frame() -> None:
+    """TPE2 alone left ``TXXX:ALBUMARTISTS`` standing — Navidrome read that one."""
+    from services.metadata import tag_file_service as tfs
+
+    tag_obj = _FakeID3()
+    tag_obj["TXXX:ALBUMARTISTS"] = [_FakeTXXX("ALBUMARTISTS", "Various Artists")]
+    tag_obj["TXXX:ALBUM ARTISTS CREDIT"] = [
+        _FakeTXXX("ALBUM ARTISTS CREDIT", "Various Artists")
+    ]
+    tag_obj["TXXX:ALBUMARTISTSORT"] = [_FakeTXXX("ALBUMARTISTSORT", "Various Artists")]
+
+    tfs.clear_id3_variants(tag_obj, "ALBUMARTIST")
+
+    assert "TXXX:ALBUMARTISTS" not in tag_obj, "the stale plural frame survived"
+    assert "TXXX:ALBUM ARTISTS CREDIT" not in tag_obj, "the stale credit frame survived"
+    assert "TXXX:ALBUMARTISTSORT" in tag_obj, "the sort frame must be left alone"
+
+
 # ---------------------------------------------------------------------------
 # 2. Variant clearing — the part that removes the duplicates
 # ---------------------------------------------------------------------------

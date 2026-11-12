@@ -886,6 +886,23 @@ def _aggregate_genres_v2(
             junk=len(moved.get("junk") or []),
         )
 
+    # Removal diagnostics. DEBUG, not INFO: a full scan re-runs this for every
+    # track, and a genre that lost its slot is routine. The records are what
+    # make "why is my genre missing?" answerable without re-deriving the vote —
+    # see ``REASON_*`` in genre_selection.
+    removed = result.get("removed") or []
+    if removed:
+        logger.debug(
+            "Genre selection removed candidates",
+            selected=selected,
+            removed=[
+                f"{record.get('genre')}: {record.get('reason')}"
+                + (f" ({record['trigger']})" if record.get("trigger") else "")
+                for record in removed
+            ],
+            algorithm_version=result.get("algorithm_version"),
+        )
+
     return _append_extra_genres(
         selected,
         context_title,

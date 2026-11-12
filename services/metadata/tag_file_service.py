@@ -50,6 +50,7 @@ else:
 from db.repositories.tag_repository import get_track_tags
 from services.metadata.tag_names import (
     canonical_tag_name,
+    clear_keys_for,
     normalise_tag_name,
     clear_id3_variants,
     clear_vorbis_variants,
@@ -576,6 +577,17 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
                 _set_text_frame(tag_obj, "TALB", TALB, value)
             elif field in {"album_artist", "albumartist"}:
                 _set_text_frame(tag_obj, "TPE2", TPE2, value)
+                # ⚠️ TPE2 alone does NOT remove the other spellings, and
+                # Navidrome reads the PLURAL first: its scanner asks
+                # ``getArtistValues(single=albumartist, multi=albumartists)``,
+                # which returns ``albumartists`` whenever that tag is non-empty.
+                # A file therefore kept ``ALBUMARTISTS=Various Artists`` (a TXXX
+                # frame, and/or ``ALBUM ARTIST``) beside the corrected TPE2, and
+                # the next scan re-created the album from the stale plural —
+                # the reported "Lookup MBID corrects only the album artist and
+                # it re-imports as Various Artists again". Every declared
+                # spelling is cleared so the corrected value is the ONLY one.
+                clear_id3_variants(tag_obj, "ALBUMARTIST")
             elif field == "composer":
                 _set_text_frame(tag_obj, "TCOM", TCOM, value)
             elif field == "track_number":
@@ -720,7 +732,7 @@ def _set_flac_front_cover(audio: FLACType, data: bytes, mime: str) -> None:
 
 
 def _heal_duplicate_album_artist_tags(audio: Any) -> None:
-    """Collapse a file that holds BOTH ``ALBUM ARTIST`` and ``ALBUMARTIST``.
+    """Collapse a file that holds several spellings of the album artist.
 
     Vorbis treats them as different keys, so a Media Center/JRiver-tagged file
     can carry two album artists with different values. The app writes the
@@ -728,11 +740,22 @@ def _heal_duplicate_album_artist_tags(audio: Any) -> None:
     the value the app never saved. Keep the app's canonical spelling and remove
     the rest. A file that has ONLY the legacy spelling is left alone — there is
     no second value to prove which one is current.
+
+    ⚠️ THE PLURAL COUNTS AS A SPELLING, not as a separate field. Navidrome's
+    scanner resolves album artists through
+    ``getArtistValues(single=albumartist, multi=albumartists)``, which returns
+    ``albumartists`` as soon as it is populated — so
+    ``albumartists: Various Artists`` BESIDE ``albumartist: Alessandra`` made
+    the next scan rebuild the album as Various Artists, which is exactly the
+    reported "Lookup MBID fixes only the album artist and it re-imports as
+    Various Artists again". ``clear_vorbis_variants`` (called by the writer for
+    every canonical field) already removes them; this keeps the heal aligned so
+    the two paths cannot disagree about what "one album artist" means.
     """
     try:
         keys = [
             str(key) for key in list(audio.keys())
-            if normalise_tag_name(key) == "albumartist"
+            if normalise_tag_name(key) in clear_keys_for("ALBUMARTIST")
         ]
     except Exception:
         return
@@ -1093,6 +1116,111 @@ _ALBUM_MB_TAG_COLUMNS: tuple[str, ...] = (
 )
 
 
+#: Separators a LEGACY plain-string writer value may use. Deliberately no ``/``
+#: or ``&``: those are legal inside a name (``AC/DC``, ``Petters & Peters``),
+#: and this path WRITES the file tag — destroying a name here is not recoverable
+#: by re-reading.
+_WRITER_TEXT_SEPARATORS = re.compile(r"\s*[,;•·|]\s*")
+
+
+def _clean_credit_fragment(name: str) -> str:
+    """Strip JSON-array debris from ONE credit name.
+
+    A JSON array split on its own commas leaves fragments like ``["A"`` and
+    ``"B"]``. Debris is recognised by SYNTAX, never by "contains a quote", so a
+    genuine name survives intact: ``Tyler "T-Bone" Spencer`` keeps its quotes
+    (they are balanced) and ``[Unknown]`` keeps its brackets (also balanced).
+    ``AC/DC`` is never touched at all.
+
+    Debris test — either is true:
+      * a bracket is unbalanced (``["A"`` / ``"B"]``), or
+      * the quote count is ODD (``"A`` leaves one dangling quote), or
+      * the WHOLE name is wrapped in quotes (``"Chris Peters"`` — the middle
+        element of a comma-split array, which is balanced and would otherwise
+        be missed).
+    Each edge is then stripped until none holds.
+    """
+    text = str(name or "").strip()
+
+    for _ in range(4):
+        if not text:
+            return ""
+        quotes = text.count('"') + text.count("'")
+        open_unbalanced = text[0] in "[{" and text[-1] not in "]}"
+        close_unbalanced = text[-1] in "]}" and text[0] not in "[{"
+        fully_quoted = (
+            len(text) > 1 and text[0] in "\"'" and text[-1] == text[0]
+        )
+        if not (open_unbalanced or close_unbalanced or fully_quoted or quotes % 2):
+            return text
+        if text[0] in "[{\"'":
+            text = text[1:].lstrip()
+        if text and text[-1] in "]}\"'":
+            text = text[:-1].rstrip()
+    return text
+
+
+def _writer_names_text(value: Any) -> str:
+    """A writer value rendered as ONE comma-joined name string.
+
+    ``tracks.writer`` is TEXT holding a JSON array; a file tag is a plain
+    string. The array is parsed and joined by name — it is NOT re-split on
+    separators, because each element is already exactly one name and splitting
+    would damage names that contain one (``AC/DC``).
+
+    A plain (legacy) string is split on comma/semicolon/bullet, so a value that
+    was already corrupted on disk is repaired here as well as on import.
+    """
+    from services.scanning.metadata_extractor import credit_name_key
+
+    candidates: list[str] = []
+
+    def _add(item: Any) -> None:
+        if isinstance(item, dict):
+            item = item.get("name", "")
+        if isinstance(item, (list, tuple)):
+            for sub in item:
+                _add(sub)
+            return
+        text = _clean_credit_fragment(str(item or ""))
+        if text:
+            candidates.append(text)
+
+    parsed: Any = None
+    if isinstance(value, (list, tuple)):
+        parsed = list(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if stripped[:1] in ("[", "{"):
+            try:
+                import json as _json
+
+                candidate = _json.loads(stripped)
+            except Exception:
+                # Invalid JSON (already-corrupted text) — repair it as text.
+                candidate = None
+            if isinstance(candidate, dict):
+                candidate = list(candidate.values())
+            if isinstance(candidate, list):
+                parsed = candidate
+
+    if parsed is not None:
+        for item in parsed:
+            _add(item)
+    else:
+        for part in _WRITER_TEXT_SEPARATORS.split(str(value or "")):
+            _add(part)
+
+    seen: set[str] = set()
+    names: list[str] = []
+    for name in candidates:
+        key = credit_name_key(name)
+        if name and key and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return ", ".join(names)
+
+
 def build_tag_updates(payload: dict[str, Any]) -> dict[str, Any]:
     """Map a DB-column payload to tag-writer field names.
 
@@ -1107,6 +1235,23 @@ def build_tag_updates(payload: dict[str, Any]) -> dict[str, Any]:
         value = payload.get(column_name)
         if value is not None and str(value).strip() != "":
             tags[tag_name] = value
+
+    # ── WRITER: a NAME LIST, never a JSON array ────────────────────────────
+    # ``tracks.writer`` is TEXT holding a JSON array (``["A", "B"]``), and it
+    # was copied to the file tag VERBATIM. A file tag is a plain human-readable
+    # string, so the JSON brackets and quotes went on disk — and the Navidrome
+    # import then split that string on commas, producing the malformed names
+    # ``["A"`` and ``"B"]``. Re-encoding those stored them as
+    # ``["[\"A\"", "\"B\"]"]``, which the album page renders as
+    # ``["Tyler Spencer"`` / ``"Tyler Spencer"]``.
+    #
+    # That corruption is self-sustaining and is why albums kept reappearing as
+    # "needs resaving": every import garbled the names further, the review saw a
+    # writer it had not applied, and the auto-applied save rewrote the same
+    # garbage back to the file. Writing the names as ONE comma-joined string is
+    # the format the round trip already understands (``split_credit_names``).
+    if "writer" in tags:
+        tags["writer"] = _writer_names_text(tags["writer"])
 
     # ---- years ---------------------------------------------------------
     # The DATE/YEAR tag describes the RELEASE THE FILE IS FROM, so a 2026

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "_comment": [
     "Canonical genre/mood/geography/attribute vocabulary for genre aggregation.",
     "",
@@ -68,7 +68,8 @@
     {"id": "death_doom", "display": "Death-Doom", "parent": "doom_metal", "specificity": 3, "aliases": ["death doom", "death/doom", "death/doom metal"]},
     {"id": "funeral_doom", "display": "Funeral Doom", "parent": "doom_metal", "specificity": 3},
     {"id": "sludge_metal", "display": "Sludge Metal", "parent": "doom_metal", "specificity": 2, "aliases": ["sludge"]},
-    {"id": "stoner_metal", "display": "Stoner Metal", "parent": "doom_metal", "specificity": 2, "aliases": ["stoner rock"]},
+    {"id": "stoner_metal", "display": "Stoner Metal", "parent": "doom_metal", "specificity": 2},
+    {"id": "stoner_rock", "display": "Stoner Rock", "parent": "psychedelic_rock", "specificity": 2, "family": "rock", "aliases": ["desert rock"]},
     {"id": "power_metal", "display": "Power Metal", "parent": "heavy_metal", "specificity": 2},
     {"id": "symphonic_metal", "display": "Symphonic Metal", "parent": "heavy_metal", "specificity": 2},
     {"id": "gothic_metal", "display": "Gothic Metal", "parent": "heavy_metal", "specificity": 2, "aliases": ["goth metal"]},
@@ -95,7 +96,7 @@
     {"id": "mathcore", "display": "Mathcore", "parent": "metalcore", "specificity": 3},
     {"id": "grindcore", "display": "Grindcore", "parent": "hardcore_punk", "specificity": 2, "aliases": ["grind"]},
     {"id": "post_punk", "display": "Post-Punk", "parent": "punk", "specificity": 2},
-    {"id": "gothic_rock", "display": "Gothic Rock", "parent": "post_punk", "specificity": 2, "aliases": ["goth rock"]},
+    {"id": "gothic_rock", "display": "Gothic Rock", "parent": "post_punk", "specificity": 2, "family": "rock", "aliases": ["goth rock"]},
     {"id": "coldwave", "display": "Coldwave", "parent": "post_punk", "specificity": 3},
     {"id": "no_wave", "display": "No Wave", "parent": "post_punk", "specificity": 3},
 

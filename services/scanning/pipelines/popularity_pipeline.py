@@ -414,11 +414,24 @@ def _run_full_scan_as_artist_pipeline(
             "percent_complete": 0,
             # Mirror the artist counters onto the *_items keys the dashboard
             # actually renders, so the counter shows "0/80" from the very first
-            # frame instead of "0/?".  `total` is known here (the artist list
-            # has been loaded), so there is no reason to leave it unknown.
+            # frame instead of "0/?".
             "total_items": total,
             "processed_items": 0,
             "current_stage": "Metadata",
+            # ⭐ CLEAR the PREVIOUS run's abandonment list.
+            #
+            # ``write_progress_with_current_artist`` MERGES ``extra`` into the
+            # stored JSON, so a key it is not given keeps its old value. Nothing
+            # ever cleared ``abandoned_artists``: the completion write (below)
+            # and this starting write both omitted it, so the list from an
+            # earlier run survived into every later one.
+            #
+            # The result was the reported banner showing artists that had since
+            # been rescanned successfully — "the artists have been rescanned
+            # since" — and its × did not help, because the content was identical
+            # on every render. ``get_scan_progress`` only returns RUNNING scans,
+            # so the banner could ONLY ever be a stale list.
+            "abandoned_artists": {},
         },
     )
 

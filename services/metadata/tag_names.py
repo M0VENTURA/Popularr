@@ -64,6 +64,19 @@ CANONICAL_TAG_NAMES: dict[str, str] = {
     # file on its next tag write.
     "album_artist": "ALBUMARTIST",
     "albumartist": "ALBUMARTIST",
+    # The PLURAL is a different Vorbis key AND the tag Navidrome prefers: its
+    # scanner picks the album-artist PARTICIPANTS with
+    # ``getArtistValues(single=albumartist, multi=albumartists)``, which returns
+    # ``albumartists`` as soon as it has any value. So a file corrected to
+    # ``albumartist: Alessandra`` still reported
+    # ``albumartists: Various Artists`` beside it, and the next Navidrome scan
+    # built the album from the STALE plural — the reported "Lookup MBID fixes
+    # only the album artist and it re-imports as Various Artists again".
+    # ``_CREDIT`` is the same identity in Picard's credit-string form, so it is
+    # cleared too; the sort names are NOT touched (they are their own fields).
+    "albumartists": "ALBUMARTIST",
+    "albumartist_credit": "ALBUMARTIST",
+    "albumartists_credit": "ALBUMARTIST",
     # ── MusicBrainz entity IDs ────────────────────────────────────────────
     "musicbrainz_albumid": "MUSICBRAINZ_ALBUMID",
     "musicbrainz_album_mbid": "MUSICBRAINZ_ALBUMID",
@@ -166,6 +179,17 @@ def normalise_tag_name(name: Any) -> str:
 #: ``clear_keys_for`` turns both into the normalised key set a write must
 #: remove, so a synonym is never silently left behind as a "second tag".
 KNOWN_TAG_SPELLINGS: dict[str, tuple[str, ...]] = {
+    # ⚠️ SYNONYMS, not separator variants: ``ALBUMARTISTS`` normalises to
+    # ``albumartists``, which no key-folding equates with ``albumartist``. They
+    # must be declared or a write of ALBUMARTIST would leave the plural standing
+    # — and Navidrome prefers the plural, so the leftover beat the correction.
+    "ALBUMARTIST": (
+        "ALBUMARTISTS",
+        "ALBUMARTIST_CREDIT",
+        "ALBUMARTISTS_CREDIT",
+        "ALBUM ARTIST CREDIT",
+        "ALBUM ARTISTS CREDIT",
+    ),
     "MUSICBRAINZ_ALBUMID": ("MUSICBRAINZ ALBUM ID", "MUSICBRAINZ_ALBUM_ID"),
     "MUSICBRAINZ_ARTISTID": ("MUSICBRAINZ ARTIST ID", "MUSICBRAINZ_ARTIST_ID"),
     "MUSICBRAINZ_ALBUMARTISTID": ("MUSICBRAINZ ALBUM ARTIST ID", "MUSICBRAINZ_ALBUM_ARTIST_ID"),

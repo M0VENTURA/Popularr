@@ -385,11 +385,46 @@ _DB_OUTAGE_PROBE_INTERVAL_SECONDS = 5.0
 
 
 def db_outage_retry_after() -> float:
-    """Seconds until the breaker allows another probe (0 when closed)."""
+    """Seconds until the breaker will let another caller try a connection.
+
+    ⚠️ THIS MUST COVER THE PROBE GATE, NOT JUST THE OUTAGE DEADLINE — the two
+    must never disagree, because every caller's "pause" is built on this value:
+
+        is_db_outage_active()  ==  db_outage_retry_after() > 0
+        wait_for_db_available() sleeps while it is > 0
+
+    ``_claim_db_probe`` refuses a caller for THREE reasons, and only the first
+    was reflected here:
+
+      1. the outage window has not elapsed (``now < _DB_OUTAGE_UNTIL``);
+      2. another caller is currently probing (``_DB_OUTAGE_PROBE_IN_FLIGHT``);
+      3. the probe cooldown between attempts (``now < _DB_OUTAGE_PROBE_AT``).
+
+    Once the outage deadline passed, this returned 0 while 2/3 still refused, so
+    ``is_db_outage_active()`` read False and ``wait_for_db_available()`` returned
+    True INSTANTLY. The full-scan retry loop therefore re-entered
+    ``scan_artist_to_db`` immediately and got ``DatabaseUnavailable(... retry in
+    0s)`` again — the reported log storm of hundreds of identical failures per
+    second for one artist (``processed=0``) for as long as PostgreSQL was
+    recovering. Every probe-cooldown window spun instead of waiting.
+
+    ``_DB_OUTAGE_PROBE_INTERVAL_SECONDS`` is used for an in-flight probe because
+    it owns an attempt of unknown duration; reporting a flat positive wait keeps
+    those callers quiet until the next window opens.
+    """
+    now = time.monotonic()
     with _DB_OUTAGE_LOCK:
         if _DB_OUTAGE_UNTIL <= 0.0:
             return 0.0
-        return max(0.0, _DB_OUTAGE_UNTIL - time.monotonic())
+        if _DB_OUTAGE_PROBE_IN_FLIGHT:
+            return max(
+                0.0,
+                _DB_OUTAGE_UNTIL - now,
+                _DB_OUTAGE_PROBE_INTERVAL_SECONDS,
+            )
+        # Covers both the remaining outage window and the probe cooldown: a
+        # caller may only connect when BOTH have elapsed.
+        return max(0.0, _DB_OUTAGE_UNTIL - now, _DB_OUTAGE_PROBE_AT - now)
 
 
 def is_db_outage_active() -> bool:

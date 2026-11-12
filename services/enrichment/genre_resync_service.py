@@ -123,6 +123,47 @@ def _persist(changes: list[tuple[str, str]]) -> None:
                 )
 
 
+def _explain(
+    source_map: dict[str, Any], max_genres: int, proposed: list[str]
+) -> list[dict[str, Any]]:
+    """The removal records behind the ALREADY-COMPUTED *proposed* result.
+
+    The selector is run once per track by ``aggregate_genres``. Re-running it
+    here purely to read ``removed`` would double the work AND risk the
+    explanation disagreeing with the reported list if the vocabulary changed
+    between the two calls — so this returns nothing rather than guessing when
+    the engine cannot supply reasons. The authoritative records are produced by
+    the engine itself; this is a best-effort convenience for the preview.
+    """
+    try:
+        from services.enrichment.genre_selection import (
+            select_album_or_track_genres,
+        )
+
+        if not _selection_engine_v2_enabled():
+            return []
+        result = select_album_or_track_genres(source_map, max_genres=max_genres)
+        # Guard against a vocabulary edit landing between the two calls: only
+        # report reasons when the re-run agrees on the ANSWER.
+        if list(result.get("genres") or []) != list(proposed or []):
+            return []
+        return list(result.get("removed") or [])
+    except Exception as exc:
+        logger.debug("Genre removal explanation unavailable", error=str(exc))
+        return []
+
+
+def _selection_engine_v2_enabled() -> bool:
+    try:
+        from services.enrichment.genre_aggregation_service import (
+            _selection_engine_v2_enabled as _enabled,
+        )
+
+        return bool(_enabled())
+    except Exception:
+        return False
+
+
 def resync_genres(
     *,
     artist: str | None = None,
@@ -183,6 +224,8 @@ def resync_genres(
                 "album": str(row.get("album") or ""),
                 "before": str(existing or ""),
                 "after": proposed_str,
+                # WHY each candidate lost its slot — the preview's explanation.
+                "removed": _explain(source_map, max_genres, proposed),
             }
         )
 

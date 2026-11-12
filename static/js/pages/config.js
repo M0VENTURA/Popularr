@@ -1800,10 +1800,23 @@
       if (key && !Number.isNaN(value)) sourceWeights[key] = value;
     });
 
+    const companions = String(getValue('genre_selection_nu_companions', '') || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
     return {
       enabled: getChecked('genre_selection_enabled', true),
-      max_genres: parseInt(getValue('genre_selection_max', '3')) || 3,
-      family_slot_limit: parseInt(getValue('genre_selection_family_limit', '2')) || 2,
+      max_genres: parseInt(getValue('genre_selection_max', '4'), 10) || 4,
+      selection_pool: parseInt(getValue('genre_selection_pool', '6'), 10) || 6,
+      family_slot_limit: parseInt(getValue('genre_selection_family_limit', '2'), 10) || 2,
+      // Collection policy.
+      metal_suppresses_rock: getChecked('genre_selection_metal_suppresses_rock', true),
+      nu_metal_exception: getChecked('genre_selection_nu_metal_exception', true),
+      remove_generic_parents: getChecked('genre_selection_remove_generic_parents', true),
+      // Omitted when the box is cleared: the backend then falls back to its own
+      // default list rather than saving an empty one that permits nothing.
+      ...(companions.length ? { nu_metal_rock_companions: companions } : {}),
       entity_weights: entityWeights,
       source_weights: sourceWeights,
       thresholds: {
