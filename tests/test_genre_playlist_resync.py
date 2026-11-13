@@ -9,9 +9,9 @@ progress row the dashboard already polls.
 
 THE INVARIANTS PINNED HERE
 --------------------------
-1. Preview is READ-ONLY — it must not write genres, playlists, or even the
-   progress row (a preview that published "complete" would make the dashboard
-   announce a finished resync every time someone looked).
+1. Preview is READ-ONLY — it must not write genres or playlists. It DOES publish
+   progress, but only to its OWN row: a full-library comparison takes minutes,
+   so it runs on a worker thread and is polled (see the test docstring).
 2. The preview's playlist prediction comes from the REAL builder in
    ``plan_only`` mode, so it cannot drift from what Apply writes.
 3. Apply writes GENRES FIRST, then playlists — the playlists are built from the
@@ -23,10 +23,33 @@ THE INVARIANTS PINNED HERE
 from __future__ import annotations
 
 import inspect
+import re
 
 import pytest
 
 from services.enrichment import genre_playlist_resync_service as svc
+
+
+def _progress_calls(src: str) -> list[str]:
+    """Each ``_write_progress(...)`` call's source text (balanced to its ``)``).
+
+    A plain regex cannot do this — the arguments span newlines and contain their
+    own parentheses — so this walks the parentheses from each call site.
+    """
+    calls: list[str] = []
+    for match in re.finditer(r"_write_progress\(", src):
+        start = match.end() - 1
+        depth = 0
+        for index in range(start, len(src)):
+            char = src[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(src[start:index + 1])
+                    break
+    return calls
 
 
 # ---------------------------------------------------------------------------
@@ -34,18 +57,39 @@ from services.enrichment import genre_playlist_resync_service as svc
 # ---------------------------------------------------------------------------
 
 class TestPreviewWritesNothing:
-    def test_it_does_not_publish_a_progress_row(self) -> None:
-        """The progress row belongs to the APPLY job.
+    def test_it_never_writes_to_the_APPLY_progress_row(self) -> None:
+        """The apply's row is off limits to a preview.
 
-        Publishing from a preview made the dashboard announce a completed
-        resync, and the Config card's poller restore itself with a summary for
-        a job that never ran.
+        Publishing there made the dashboard announce a completed resync, and the
+        Config card's poller restore itself with a summary for a job that never
+        ran.
+
+        ⚠️ THE PREVIEW DOES NOW PUBLISH — to its OWN row. A full-library preview
+        measured 132s on 69k tracks, past the reverse proxy's ~100s origin
+        timeout, so the gateway answered with its own HTML error page and the
+        browser's ``resp.json()`` threw ``Unexpected token '<'`` ("SyntaxError:
+        Unexpected token '<', "<!DOCTYPE "... is not valid JSON"). Moving it off
+        the request thread is what makes the response reliable at all, and a
+        background job that reports nothing is a silent spinner. The guarantee
+        that matters is that the two rows never collide.
         """
         src = inspect.getsource(svc.preview_genre_playlist_resync)
-        assert "_write_progress(" not in src, (
-            "the preview writes a progress row; a preview must be invisible to "
-            "the dashboard's resync status"
+        assert "PREVIEW_SCAN_TYPE" in src or "PREVIEW_PROGRESS_FILE" in src, (
+            "the preview must publish to its OWN row, never a silent one"
         )
+        # Every call site must name the preview row explicitly; the defaults are
+        # the APPLY row, so an unqualified call would collide with the apply.
+        for call in _progress_calls(src):
+            assert "scan_type=PREVIEW_SCAN_TYPE" in call, (
+                "a preview progress write did not target the preview row: " + call
+            )
+            assert "progress_file=PREVIEW_PROGRESS_FILE" in call, (
+                "a preview progress write did not target the preview file: " + call
+            )
+
+    def test_a_preview_never_claims_the_apply_lock(self) -> None:
+        src = inspect.getsource(svc.preview_genre_playlist_resync)
+        assert "_claim_apply" not in src
 
     def test_it_computes_genres_as_a_dry_run(self) -> None:
         src = inspect.getsource(svc.preview_genre_playlist_resync)
@@ -245,6 +289,69 @@ class TestTheDiff:
 # 5. Wiring
 # ---------------------------------------------------------------------------
 
+class TestThePreviewRunsInTheBackground:
+    """A full-library preview must not be answered inline.
+
+    REPORTED
+
+    > "SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON"
+
+    The preview genuinely ran — 69 241 tracks in 132s — but the request was held
+    open past the reverse proxy's origin timeout, so the gateway replied with its
+    OWN html error page. ``resp.json()`` then threw on the ``<!DOCTYPE``. The
+    apply already avoided this by returning 202; the preview must too.
+    """
+
+    def test_the_route_returns_202_not_the_result(self) -> None:
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[1] / "routes" / "misc_routes.py"
+        ).read_text(encoding="utf-8")
+        start = src.index("async def api_genre_playlist_resync_preview")
+        body = src[start:start + 2600]
+        assert "start_preview_genre_playlist_resync" in body, (
+            "the preview runs inline, so a large library times out at the proxy"
+        )
+        assert "return jsonify(result), 202" in body, (
+            "202 ACCEPTED is what tells the client to poll instead of waiting"
+        )
+
+    def test_there_is_a_preview_status_endpoint(self) -> None:
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[1] / "routes" / "misc_routes.py"
+        ).read_text(encoding="utf-8")
+        assert '"/genres/playlist-resync/preview/status"' in src
+
+    def test_starting_a_second_preview_is_refused_cleanly(self, monkeypatch) -> None:
+        """Concurrent previews would double a very expensive library walk."""
+        monkeypatch.setattr(svc, "_PREVIEW_RUNNING",True)
+        assert svc.is_preview_running() in (True, False)  # reads the real row
+        # The claim is what guards it; assert the guard's shape.
+        src = inspect.getsource(svc.start_preview_genre_playlist_resync)
+        assert "_PREVIEW_RUNNING" in src
+        assert "already_running" in src
+
+    def test_the_js_does_not_parse_json_blindly(self) -> None:
+        """A gateway HTML page must surface as an error, not a SyntaxError."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        for rel in ("static/js/config.js", "test_site/static/js/pages/config.js"):
+            src = (root / rel).read_text(encoding="utf-8")
+            block = src[src.index("async function runGenrePlaylistPreview"):]
+            block = block[:block.index("async function runGenrePlaylistApply")]
+            assert "application/json" in block, (
+                f"{rel} calls resp.json() without checking the content type; a "
+                "proxy HTML error page throws 'Unexpected token <'"
+            )
+            assert "pollGenrePlaylistPreview" in block, (
+                f"{rel} does not poll for the background preview result"
+            )
+
+
 class TestTheJobIsVisible:
     def test_the_scan_type_is_in_the_progress_allow_list(self) -> None:
         from services.scanning.pipelines.progress_service import SCAN_TYPES
@@ -254,16 +361,26 @@ class TestTheJobIsVisible:
             "would never appear on the dashboard"
         )
 
-    def test_it_has_a_display_name(self) -> None:
+    def test_the_preview_row_is_also_visible(self) -> None:
+        from services.scanning.pipelines.progress_service import SCAN_TYPES
+
+        assert svc.PREVIEW_SCAN_TYPE in SCAN_TYPES, (
+            "the background preview publishes its own row; without listing it "
+            "the dashboard would never show that a preview is running"
+        )
+
+    def test_both_rows_have_display_names(self) -> None:
         from pathlib import Path
 
         src = (
             Path(__file__).resolve().parents[1]
             / "static/js/activity-feed.js"
         ).read_text(encoding="utf-8")
-        assert f"{svc.SCAN_TYPE}:" in src, (
-            "without a display name the dashboard shows the raw scan_type"
-        )
+        for scan_type in (svc.SCAN_TYPE, svc.PREVIEW_SCAN_TYPE):
+            assert f"{scan_type}:" in src, (
+                f"without a display name the dashboard shows the raw "
+                f"scan_type ({scan_type})"
+            )
 
     def test_it_does_not_widen_the_playlist_only_client_factory(self) -> None:
         """The read-only comparison must not use ``finalise_stage._navidrome_clients``.

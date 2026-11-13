@@ -53,9 +53,13 @@ logger = structlog.get_logger(__name__)
 
 __all__ = [
     "preview_genre_playlist_resync",
+    "start_preview_genre_playlist_resync",
     "apply_genre_playlist_resync",
     "SCAN_TYPE",
+    "PREVIEW_SCAN_TYPE",
+    "PREVIEW_PROGRESS_FILE",
     "is_resync_running",
+    "is_preview_running",
 ]
 
 #: The ``scan_states`` row this job writes. Kept apart from real scan types so it
@@ -63,6 +67,19 @@ __all__ = [
 SCAN_TYPE = "genre_playlist_resync"
 
 _PROGRESS_FILE = f"{SCAN_TYPE}_progress.json"
+
+#: ⚠️ THE PREVIEW GETS ITS OWN ROW, never the apply's.
+#:
+#: A preview must not make the dashboard announce a finished resync, nor let the
+#: Config card's poller restore itself with a summary for a job that never ran —
+#: which is why the apply row is off limits. But a full-library preview is ALSO
+#: long enough to outlive the proxy (~100s on 69k tracks, measured), so it cannot
+#: stay a synchronous request either: the gateway answers with its own HTML error
+#: page and the browser's ``resp.json()`` dies on ``Unexpected token '<'``. A
+#: dedicated row lets the preview report progress and be polled without touching
+#: the apply's state.
+PREVIEW_SCAN_TYPE = "genre_playlist_resync_preview"
+PREVIEW_PROGRESS_FILE = f"{PREVIEW_SCAN_TYPE}_progress.json"
 
 #: Phrases the phases report. Short: they render in the dashboard's one-line
 #: status bar next to the percentage.
@@ -87,9 +104,15 @@ def _write_progress(
     status: str | None = None,
     result: dict[str, Any] | None = None,
     error: str = "",
+    scan_type: str = SCAN_TYPE,
+    progress_file: str = _PROGRESS_FILE,
 ) -> None:
     """Publish one progress frame. Never fatal — a progress write must not
-    abort the job it is describing."""
+    abort the job it is describing.
+
+    ``scan_type``/``progress_file`` default to the APPLY row; the background
+    preview passes its own pair so the two never overwrite each other.
+    """
     try:
         from services.scanning.scan_state import write_progress_with_current_artist
 
@@ -109,10 +132,21 @@ def _write_progress(
         if error:
             extra["error"] = error
         write_progress_with_current_artist(
-            _PROGRESS_FILE, SCAN_TYPE, running, extra=extra
+            progress_file, scan_type, running, extra=extra
         )
     except Exception as exc:
         logger.debug("Genre/playlist resync progress write failed", error=str(exc))
+
+
+def is_preview_running() -> bool:
+    """True while the background PREVIEW holds its own progress row."""
+    try:
+        from services.scanning.scan_state import read_progress_file
+
+        state = read_progress_file(PREVIEW_PROGRESS_FILE) or {}
+        return bool(state.get("is_running"))
+    except Exception:
+        return False
 
 
 def is_resync_running() -> bool:
@@ -301,14 +335,23 @@ def _diff(after: list[str], before: list[str]) -> dict[str, Any]:
 # Public: preview
 # ---------------------------------------------------------------------------
 
-def preview_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str, Any]:
-    """Report what an apply WOULD change. Writes nothing, anywhere.
+def preview_genre_playlist_resync(
+    *, limit_tracks: int | None = None, report_progress: bool = False
+) -> dict[str, Any]:
+    """Report what an apply WOULD change. Writes no genres and no playlists.
 
-    ⚠️ DELIBERATELY WRITES NO PROGRESS ROW. The shared row is the APPLY job's
-    status: publishing a "complete" frame from a preview would make the
-    dashboard announce a finished resync (and the Config card's poller restore
-    itself with the wrong summary) every time someone pressed Preview. The
-    preview is a synchronous request, so its caller renders the result directly.
+    ⚠️ ``report_progress`` IS OFF FOR THE INLINE CALL AND ON FOR THE BACKGROUND
+    ONE.
+
+    A ``/preview`` click used to run this synchronously, and at 69k tracks that
+    measured 132s — past the proxy's ~100s origin timeout, so the gateway
+    answered with its own HTML error page and the browser's ``resp.json()`` threw
+    ``Unexpected token '<'``. The route now starts this on a worker thread and
+    polls (:func:`start_preview_genre_playlist_resync`), which is when the row is
+    wanted.
+
+    The row is the PREVIEW's own (``PREVIEW_SCAN_TYPE``) — never the apply's, so
+    a preview can never make the dashboard announce a resync that did not run.
 
     Returns::
 
@@ -321,15 +364,37 @@ def preview_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[st
     """
     started = time.monotonic()
 
+    def _frame(percent: float, phase: str, detail: str = "",
+               status: str = "running") -> None:
+        if not report_progress:
+            return
+        _write_progress(
+            running=status == "running",
+            percent=percent,
+            phase=phase,
+            detail=detail,
+            status=status,
+            scan_type=PREVIEW_SCAN_TYPE,
+            progress_file=PREVIEW_PROGRESS_FILE,
+        )
+
+    _frame(2.0, PHASE_GENRES, "Comparing stored genre evidence…")
+
     try:
         genre_result = _genre_changes(dry_run=True)
     except Exception as exc:
         logger.error("Genre/playlist resync preview failed at the genre step", error=str(exc))
+        _frame(0.0, "Failed", str(exc), status="failed")
         return {"ok": False, "error": f"genre step failed: {exc}"}
 
     changed_tracks = list(genre_result.get("changed_tracks") or [])
     if limit_tracks:
         changed_tracks = changed_tracks[: int(limit_tracks)]
+
+    _frame(
+        50.0, PHASE_PLAYLISTS,
+        f"{len(changed_tracks)} track genre change(s) found",
+    )
 
     # The genres the apply would write, so the playlist prediction describes the
     # state AFTER the rewrite rather than the one it is about to replace.
@@ -343,7 +408,10 @@ def preview_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[st
         planned = _plan_playlists(proposed_by_id)
     except Exception as exc:
         logger.error("Genre/playlist resync preview failed at the playlist step", error=str(exc))
+        _frame(0.0, "Failed", str(exc), status="failed")
         return {"ok": False, "error": f"playlist step failed: {exc}"}
+
+    _frame(80.0, PHASE_PLAYLISTS, "Comparing playlists with Navidrome…")
 
     current = _server_playlists()
 
@@ -386,7 +454,7 @@ def preview_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[st
 
     elapsed = round(time.monotonic() - started, 2)
 
-    return {
+    result = {
         "ok": True,
         "dry_run": True,
         "seconds": elapsed,
@@ -400,6 +468,79 @@ def preview_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[st
         "unmanaged_playlists": unmanaged,
         "summary": totals,
     }
+
+    if report_progress:
+        # The full result rides on the row: this is how a poll-only client gets
+        # the payload, since the originating request returned 202 long ago.
+        _write_progress(
+            running=False,
+            percent=100.0,
+            phase=PHASE_DONE,
+            processed=totals["playlists_touched"],
+            total=totals["playlists_touched"],
+            detail=(
+                f"{len(changed_tracks)} track change(s) · "
+                f"{totals['playlists_touched']} playlist(s) would change"
+            ),
+            status="complete",
+            result=result,
+            scan_type=PREVIEW_SCAN_TYPE,
+            progress_file=PREVIEW_PROGRESS_FILE,
+        )
+
+    return result
+
+
+#: One preview at a time. Separate from the apply's claim so a preview is not
+#: refused merely because an apply is running (and vice versa) — they touch
+#: different state, and the preview is read-only.
+_PREVIEW_LOCK = __import__("threading").Lock()
+_PREVIEW_RUNNING = False
+
+
+def start_preview_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str, Any]:
+    """STEP 1, in the BACKGROUND. Returns immediately with ``{"ok", "started"}``.
+
+    Same reasoning as the apply: a full-library preview takes longer than the
+    proxy will hold a request open, so the work moves to a worker thread and the
+    caller polls ``/genres/playlist-resync/preview/status``. Returns
+    ``started=False`` (not an error) when a preview is already running.
+    """
+    global _PREVIEW_RUNNING
+    with _PREVIEW_LOCK:
+        if _PREVIEW_RUNNING:
+            return {"ok": True, "started": False, "already_running": True}
+        _PREVIEW_RUNNING = True
+
+    _write_progress(
+        running=True, percent=1.0, phase=PHASE_GENRES,
+        detail="Starting…", status="running",
+        scan_type=PREVIEW_SCAN_TYPE, progress_file=PREVIEW_PROGRESS_FILE,
+    )
+
+    def _run() -> None:
+        global _PREVIEW_RUNNING
+        try:
+            preview_genre_playlist_resync(
+                limit_tracks=limit_tracks, report_progress=True
+            )
+        except Exception as exc:
+            logger.error("Background genre/playlist preview failed", error=str(exc))
+            _write_progress(
+                running=False, percent=0.0, phase="Failed", status="failed",
+                error=str(exc),
+                scan_type=PREVIEW_SCAN_TYPE, progress_file=PREVIEW_PROGRESS_FILE,
+            )
+        finally:
+            with _PREVIEW_LOCK:
+                _PREVIEW_RUNNING = False
+
+    import threading
+
+    threading.Thread(
+        target=_run, name="genre-playlist-preview", daemon=True
+    ).start()
+    return {"ok": True, "started": True}
 
 
 # ---------------------------------------------------------------------------

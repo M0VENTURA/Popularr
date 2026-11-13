@@ -60,8 +60,12 @@
     full_scan: 'Full Scan',
     library_scan: 'Library Scan',
     missing_releases_scan: 'Missing Releases Scan',
-    // The Config page's two-step genre → playlist resync.
+    // The Config page's two-step genre → playlist resync. The PREVIEW has its
+    // own row (it runs in the background too, because a full-library comparison
+    // outlives the proxy's request timeout), so it needs its own label or the
+    // dashboard would show the raw scan_type.
     genre_playlist_resync: 'Genre / Playlist Resync',
+    genre_playlist_resync_preview: 'Genre / Playlist Preview',
   };
 
   function scanDisplayName(type) {

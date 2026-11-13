@@ -239,9 +239,14 @@
    * STEP 1 of the genre → playlist resync: report what would change, write
    * nothing.
    *
-   * Two steps exist so a library-wide genre rewrite is never applied blind:
-   * the preview shows the per-track genre changes AND which tracks would enter
-   * or leave each genre playlist, then enables the Apply button.
+   * ⚠️ THE ENDPOINT RETURNS 202, NOT THE RESULT.
+   *
+   * A full-library preview takes ~2 minutes on 69k tracks — longer than a
+   * reverse proxy will hold a request open. Waiting inline meant the gateway
+   * answered with its own HTML error page, which is exactly the reported
+   * "SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON".
+   * The work runs on a worker thread and the result arrives via the preview
+   * status poll below.
    */
   async function runGenrePlaylistPreview() {
     const out = document.getElementById('genre_playlist_resync_output');
@@ -258,7 +263,8 @@
 
     [previewBtn, applyBtn].filter(Boolean).forEach(b => { b.disabled = true; });
     setState('Comparing…');
-    setOut('<span class="text-muted">Recomputing genres and comparing playlists…</span>');
+    setOut('<span class="text-muted">Recomputing genres and comparing playlists… '
+      + 'this can take a couple of minutes on a large library.</span>');
 
     try {
       const resp = await fetch('/api/genres/playlist-resync/preview', {
@@ -266,73 +272,144 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await resp.json();
-      if (!resp.ok || data.ok === false) {
-        setOut('<span class="text-danger">' + esc(data.error || ('HTTP ' + resp.status)) + '</span>');
+      // A gateway/error page is not JSON — surface it as the failure it is
+      // rather than letting resp.json() throw a bare SyntaxError.
+      const ctype = resp.headers.get('Content-Type') || '';
+      if (!ctype.includes('application/json')) {
+        setOut('<span class="text-danger">The server did not return JSON (HTTP '
+          + resp.status + '). It may still be running — check the dashboard.</span>');
         setState('Preview failed');
+        if (previewBtn) previewBtn.disabled = false;
         return;
       }
-
-      const g = data.genre_changes || {};
-      const summary = data.summary || {};
-      const genreRows = (g.tracks_detail || []).slice(0, 100).map(t => {
-        const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
-        return '<tr><td>' + esc(t.title || '') + '</td>'
-          + '<td class="text-muted">' + esc(label) + '</td>'
-          + '<td>' + esc(t.before || '—') + '</td>'
-          + '<td><strong>' + esc(t.after || '—') + '</strong></td></tr>';
-      }).join('');
-
-      const playlistRows = (data.playlist_changes || []).slice(0, 100).map(p => {
-        const badge = p.is_clear
-          ? '<span class="badge bg-warning text-dark">clear</span>'
-          : (p.is_new ? '<span class="badge bg-info text-dark">new</span>' : '');
-        return '<tr><td>' + esc(p.name) + ' ' + badge + '</td>'
-          + '<td class="text-end">' + p.count_before + ' &rarr; <strong>' + p.count_after + '</strong></td>'
-          + '<td class="text-success">+' + (p.added || []).length + '</td>'
-          + '<td class="text-danger">-' + (p.removed || []).length + '</td></tr>';
-      }).join('');
-
-      setOut(
-        '<div class="alert alert-info py-2 mb-2">'
-        + '<strong>Preview only — nothing was written.</strong> '
-        + (g.changed || 0) + ' of ' + (g.tracks || 0) + ' track(s) would have their genres changed. '
-        + (summary.playlists_touched || 0) + ' genre playlist(s) would change'
-        + (summary.playlists_cleared ? ' (' + summary.playlists_cleared + ' cleared)' : '')
-        + (summary.playlists_created ? ' (' + summary.playlists_created + ' created)' : '')
-        + ' — +' + (summary.tracks_gained || 0) + ' / -' + (summary.tracks_removed || 0) + ' tracks.'
-        + '</div>'
-        + (playlistRows
-          ? '<div class="fw-semibold mt-2">Playlists</div>'
-            + '<div style="max-height:18rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
-            + '<thead><tr><th>Playlist</th><th class="text-end">Tracks</th><th>Gains</th><th>Losses</th></tr></thead>'
-            + '<tbody>' + playlistRows + '</tbody></table></div>'
-          : '<div class="text-muted mt-2">No playlist membership changes.</div>')
-        + (genreRows
-          ? '<div class="fw-semibold mt-3">Tracks whose genres would change</div>'
-            + '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
-            + '<thead><tr><th>Track</th><th>Album</th><th>Before</th><th>After</th></tr></thead>'
-            + '<tbody>' + genreRows + '</tbody></table></div>'
-            + ((g.tracks_detail || []).length > 100
-              ? '<div class="text-muted mt-1">Showing first 100 of ' + g.tracks_detail.length + '.</div>'
-              : '')
-          : '')
-        + ((data.unmanaged_playlists || []).length
-          ? '<div class="text-muted mt-2">Not managed by this resync: '
-            + esc(data.unmanaged_playlists.slice(0, 10).join(', '))
-            + (data.unmanaged_playlists.length > 10 ? ' …' : '') + '</div>'
-          : '')
-      );
-
-      // The apply may only proceed once the user has SEEN the preview.
-      if (applyBtn) applyBtn.disabled = false;
-      setState('Preview ready (' + data.seconds + 's)');
+      const data = await resp.json();
+      if (!resp.ok || data.ok === false) {
+        // 409 = already running; that is not an error worth alarming about.
+        setOut('<span class="text-' + (resp.status === 409 ? 'warning' : 'danger') + '">'
+          + esc(data.error || ('HTTP ' + resp.status)) + '</span>');
+        setState(resp.status === 409 ? 'Already running' : 'Preview failed');
+        if (previewBtn) previewBtn.disabled = false;
+        if (resp.status === 409) pollGenrePlaylistPreview(false);
+        return;
+      }
+      // 202 ACCEPTED — poll until the worker publishes its result.
+      pollGenrePlaylistPreview(false);
     } catch (err) {
       setOut('<span class="text-danger">' + esc(String(err)) + '</span>');
       setState('Preview failed');
-    } finally {
       if (previewBtn) previewBtn.disabled = false;
     }
+  }
+
+  /** Poll the background preview and render its result when it finishes. */
+  async function pollGenrePlaylistPreview(silent) {
+    const out = document.getElementById('genre_playlist_resync_output');
+    const stateEl = document.getElementById('genre_playlist_resync_state');
+    const previewBtn = document.getElementById('genre_playlist_resync_preview_btn');
+    const applyBtn = document.getElementById('genre_playlist_resync_apply_btn');
+    const setOut = (html) => { if (out) out.innerHTML = html; };
+    const setState = (text) => { if (stateEl) stateEl.textContent = text || ''; };
+
+    try {
+      const resp = await fetch('/api/genres/playlist-resync/preview/status', { cache: 'no-store' });
+      if (!(resp.headers.get('Content-Type') || '').includes('application/json')) {
+        setState('Preview status unavailable');
+        if (previewBtn) previewBtn.disabled = false;
+        return;
+      }
+      const data = await resp.json();
+      if (!data || data.ok === false) {
+        setState('');
+        if (previewBtn) previewBtn.disabled = false;
+        return;
+      }
+      if (data.is_running) {
+        const pct = Math.round(Number(data.percent_complete || 0));
+        setState((data.current_stage || 'Comparing…')
+          + (pct ? ' · ' + pct + '%' : '')
+          + (data.current_item ? ' · ' + data.current_item : ''));
+        setTimeout(function () { pollGenrePlaylistPreview(false); }, 1500);
+        return;
+      }
+      if (silent) return;  // a stale finished row: leave the card untouched
+      if (previewBtn) previewBtn.disabled = false;
+
+      if (data.status === 'failed') {
+        setState('Preview failed');
+        setOut('<div class="alert alert-danger py-2 mb-0">'
+          + esc(data.error || 'Preview failed — see the logs.') + '</div>');
+        return;
+      }
+
+      const result = data.resync_result || null;
+      if (!result) {
+        setState('');
+        return;
+      }
+      renderGenrePlaylistPreview(result, data.seconds);
+      // The apply may only proceed once the user has SEEN the preview.
+      if (applyBtn) applyBtn.disabled = false;
+      setState('Preview ready');
+    } catch (_err) {
+      setState('');
+      if (previewBtn) previewBtn.disabled = false;
+    }
+  }
+
+  /** Render a completed preview payload into the card. */
+  function renderGenrePlaylistPreview(data, seconds) {
+    const out = document.getElementById('genre_playlist_resync_output');
+    if (!out) return;
+
+    const g = data.genre_changes || {};
+    const summary = data.summary || {};
+    const genreRows = (g.tracks_detail || []).slice(0, 100).map(t => {
+      const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
+      return '<tr><td>' + esc(t.title || '') + '</td>'
+        + '<td class="text-muted">' + esc(label) + '</td>'
+        + '<td>' + esc(t.before || '—') + '</td>'
+        + '<td><strong>' + esc(t.after || '—') + '</strong></td></tr>';
+    }).join('');
+
+    const playlistRows = (data.playlist_changes || []).slice(0, 100).map(p => {
+      const badge = p.is_clear
+        ? '<span class="badge bg-warning text-dark">clear</span>'
+        : (p.is_new ? '<span class="badge bg-info text-dark">new</span>' : '');
+      return '<tr><td>' + esc(p.name) + ' ' + badge + '</td>'
+        + '<td class="text-end">' + p.count_before + ' &rarr; <strong>' + p.count_after + '</strong></td>'
+        + '<td class="text-success">+' + (p.added || []).length + '</td>'
+        + '<td class="text-danger">-' + (p.removed || []).length + '</td></tr>';
+    }).join('');
+
+    out.innerHTML =
+      '<div class="alert alert-info py-2 mb-2">'
+      + '<strong>Preview only — nothing was written.</strong> '
+      + (g.changed || 0) + ' of ' + (g.tracks || 0) + ' track(s) would have their genres changed. '
+      + (summary.playlists_touched || 0) + ' genre playlist(s) would change'
+      + (summary.playlists_cleared ? ' (' + summary.playlists_cleared + ' cleared)' : '')
+      + (summary.playlists_created ? ' (' + summary.playlists_created + ' created)' : '')
+      + ' — +' + (summary.tracks_gained || 0) + ' / -' + (summary.tracks_removed || 0) + ' tracks.'
+      + '</div>'
+      + (playlistRows
+        ? '<div class="fw-semibold mt-2">Playlists</div>'
+          + '<div style="max-height:18rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+          + '<thead><tr><th>Playlist</th><th class="text-end">Tracks</th><th>Gains</th><th>Losses</th></tr></thead>'
+          + '<tbody>' + playlistRows + '</tbody></table></div>'
+        : '<div class="text-muted mt-2">No playlist membership changes.</div>')
+      + (genreRows
+        ? '<div class="fw-semibold mt-3">Tracks whose genres would change</div>'
+          + '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+          + '<thead><tr><th>Track</th><th>Album</th><th>Before</th><th>After</th></tr></thead>'
+          + '<tbody>' + genreRows + '</tbody></table></div>'
+          + ((g.tracks_detail || []).length > 100
+            ? '<div class="text-muted mt-1">Showing first 100 of ' + g.tracks_detail.length + '.</div>'
+            : '')
+        : '')
+      + ((data.unmanaged_playlists || []).length
+        ? '<div class="text-muted mt-2">Not managed by this resync: '
+          + esc(data.unmanaged_playlists.slice(0, 10).join(', '))
+          + (data.unmanaged_playlists.length > 10 ? ' …' : '') + '</div>'
+        : '');
   }
 
   /**
@@ -2638,6 +2715,11 @@
     // idle button.
     if (gpApply && document.getElementById('genre_playlist_resync_state')) {
       pollGenrePlaylistResync(true);
+    }
+    // A PREVIEW started from another tab (or still running from before a
+    // reload) keeps reporting into this card too — it has its own progress row.
+    if (gpPreview && document.getElementById('genre_playlist_resync_state')) {
+      pollGenrePlaylistPreview(true);
     }
     if (document.getElementById('excludedArtistsList')) {
       loadExcludedArtists();

@@ -2273,15 +2273,25 @@ def _resync_limit(payload: dict[str, Any]) -> int | None:
 
 @misc_api_bp.route("/genres/playlist-resync/preview", methods=["POST"])
 async def api_genre_playlist_resync_preview() -> Any:
-    """STEP 1 — report what a resync would change. Writes nothing.
+    """STEP 1 — start the comparison in the BACKGROUND and return immediately.
 
-    Read-only despite the POST: the body carries the options, and a large
-    library's comparison is not something to put in a URL. Returns the genre
-    changes per track AND the membership changes per genre playlist, both
-    computed by the code the Apply step will run.
+    Read-only: it writes no genres and no playlists.
+
+    ⚠️ IT USED TO RUN INLINE, AND THAT WAS THE BUG.
+
+    On a 69k-track library the comparison measured 132s. A reverse proxy closes
+    an origin request at ~100s and answers with its OWN html error page, so the
+    browser's ``resp.json()`` threw ``Unexpected token '<'`` — reported exactly
+    as "SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON".
+    The work is real and did complete; only the RESPONSE was lost.
+
+    ``202`` means ACCEPTED, not done — poll
+    ``/genres/playlist-resync/preview/status`` (or just the id above, which the
+    Config card's poller does).
     """
     from services.enrichment.genre_playlist_resync_service import (
-        preview_genre_playlist_resync,
+        is_preview_running,
+        start_preview_genre_playlist_resync,
     )
 
     try:
@@ -2289,18 +2299,41 @@ async def api_genre_playlist_resync_preview() -> Any:
     except Exception:
         payload = {}
 
+    if is_preview_running():
+        return jsonify({
+            "ok": False,
+            "error": "A preview is already running — wait for it to finish.",
+        }), 409
+
     try:
         result = await asyncio.to_thread(
-            preview_genre_playlist_resync,
+            start_preview_genre_playlist_resync,
             limit_tracks=_resync_limit(payload),
         )
     except Exception as exc:
-        logger.error("Genre/playlist resync preview failed", error=str(exc))
+        logger.error("Genre/playlist resync preview failed to start", error=str(exc))
         return jsonify({"ok": False, "error": str(exc)}), 500
 
     if not result.get("ok"):
         return jsonify(result), 400
-    return jsonify(result), 200
+    return jsonify(result), 202
+
+
+@misc_api_bp.route("/genres/playlist-resync/preview/status", methods=["GET"])
+def api_genre_playlist_resync_preview_status() -> Any:
+    """The background PREVIEW's progress row (never the apply's)."""
+    try:
+        from services.scanning.scan_state import read_progress_file
+        from services.enrichment.genre_playlist_resync_service import (
+            PREVIEW_PROGRESS_FILE,
+        )
+
+        state = read_progress_file(PREVIEW_PROGRESS_FILE) or {}
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    if not state:
+        return jsonify({"ok": True, "is_running": False, "status": "idle"}), 200
+    return jsonify({"ok": True, **state}), 200
 
 
 @misc_api_bp.route("/genres/playlist-resync/apply", methods=["POST"])

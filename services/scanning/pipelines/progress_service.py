@@ -45,8 +45,11 @@ SCAN_TYPES = [
     "mp3_import",
     # The Config page's two-step genre → playlist resync. It is NOT a scan, but
     # it publishes progress to the same ``scan_states`` row, so it must be listed
-    # here or the dashboard poller would never surface it.
+    # here or the dashboard poller would never surface it. The PREVIEW keeps its
+    # OWN row (it also runs in the background, since a full-library comparison
+    # outlives the proxy's request timeout), so it needs listing too.
     "genre_playlist_resync",
+    "genre_playlist_resync_preview",
 ]
 
 
