@@ -2259,6 +2259,20 @@ def get_genre_selection_config() -> dict[str, Any]:
         except (TypeError, ValueError):
             return default
 
+    def _ratio(key: str, default: float) -> float:
+        """A fraction, clamped to ``[0, 1]``.
+
+        Out-of-range values are clamped rather than accepted: a ``1.5`` here
+        would silently disable the metal-over-rock policy entirely (nothing can
+        exceed 150% of the rock score), and a negative one would make it
+        unconditional — the exact bug this setting exists to prevent.
+        """
+        try:
+            value = float(selection.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, min(1.0, value))
+
     def _weights(key: str) -> dict[str, float]:
         block = selection.get(key)
         if not isinstance(block, dict):
@@ -2334,6 +2348,9 @@ def get_genre_selection_config() -> dict[str, Any]:
         "metal_suppresses_rock": bool(
             selection.get("metal_suppresses_rock", True)
         ),
+        # ...but only when the metal evidence is comparable to the rock side.
+        # A thin metal tag must not delete a stronger rock body of evidence.
+        "metal_over_rock_min_ratio": _ratio("metal_over_rock_min_ratio", 0.8),
         # Nu Metal alone is a metal/rock hybrid, so it keeps its approved
         # companions instead of suppressing them.
         "nu_metal_exception": bool(selection.get("nu_metal_exception", True)),

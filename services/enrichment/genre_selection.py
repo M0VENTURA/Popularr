@@ -154,6 +154,21 @@ class SelectionSettings:
     #: The collection policy: an accepted metal genre (other than Nu Metal)
     #: removes rock-family genres from the final set.
     metal_suppresses_rock: bool = True
+    #: How much metal evidence the policy needs before it may overrule a STRONGER
+    #: rock body of evidence. Metal must reach this fraction of the rock side's
+    #: total score, or the policy declines and both sides stand.
+    #:
+    #: Without this the rule fired on the mere PRESENCE of a metal tag, so a
+    #: post-hardcore/emo track carrying two stray metal tags lost Alternative
+    #: Rock, Emo and Pop Rock — the genres that actually describe it — and came
+    #: out "Post-Hardcore, Alternative Metal, Heavy Metal".
+    #:
+    #: 0.8, not 1.0: the intended cases (Gothic Rock + Gothic Metal, Folk Rock +
+    #: Folk Metal) are close calls where the metal side is usually the LOWER
+    #: score, and requiring parity would switch the policy off for exactly the
+    #: pairs it exists to settle. Measured against the reported track, whose
+    #: metal/rock ratio is 0.62.
+    metal_over_rock_min_ratio: float = 0.8
     #: Nu Metal on its own is a metal/rock crossover, so it does NOT suppress
     #: the approved rock companions below.
     nu_metal_exception: bool = True
@@ -251,8 +266,14 @@ DEFAULT_ENTITY_WEIGHTS: dict[str, float] = {
 #: accepted metal genre suppresses its rock counterpart, and Gothic Metal /
 #: Gothic Rock is exactly that case. ``keep_together`` would have exempted it
 #: from the policy and preserved both.
+#:
+#: ⚠️ ``industrial`` + ``industrial_metal`` was REMOVED for the same reason. With
+#: the vocabulary's missing ``industrial`` parent edge added to
+#: ``industrial_metal``, ``Industrial`` IS its ancestor again — and an umbrella
+#: kept beside every one of its children is the reported violation ("industrial
+#: should be removed by industrial metal", 673 tracks in the export). It is not
+#: two aspects of one sound; the metal one names it precisely.
 DEFAULT_KEEP_TOGETHER: frozenset[tuple[str, str]] = frozenset({
-    ("industrial", "industrial_metal"),
     ("pop_punk", "emo"),
     ("metalcore", "melodic_death_metal"),
     ("folk_metal", "power_metal"),
@@ -421,6 +442,9 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         family_slot_limit=max(1, _int("family_slot_limit", 2)),
         family_override_sources=max(1, _int("family_override_sources", 2)),
         family_consensus_min_share=_num("family_consensus_min_share", 0.30),
+        # How much metal evidence is needed before the metal-over-rock policy may
+        # overrule a stronger rock body of evidence.
+        metal_over_rock_min_ratio=_num("metal_over_rock_min_ratio", 0.80),
         ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
         keep_together=_pairs("keep_together", DEFAULT_KEEP_TOGETHER),
         conditional_keep=_pairs("conditional_keep", DEFAULT_CONDITIONAL_KEEP),
@@ -652,6 +676,39 @@ def apply_metal_over_rock_policy(
     if not metal or not rock:
         return candidates, []
 
+    # ⭐⭐ THE POLICY NEEDS SUPPORT TO ACT, AND THIS GUARD IS WHY.
+    #
+    # "Metal outranks rock" was applied UNCONDITIONALLY the moment any metal
+    # genre survived. That is right for the cases it exists for — Gothic Rock
+    # beside Gothic Metal, Folk Rock beside Folk Metal — where the two describe
+    # the same sound at different specificity and the metal one is the answer.
+    #
+    # It is wrong when the rock evidence is the STRONGER body of evidence and
+    # metal is a minority tag. Reported on a Chiodos track (post-hardcore/emo)
+    # whose final genres came out "Post-Hardcore, Alternative Metal, Heavy
+    # Metal": its family scores were rock 3.85, metal 2.40, punk 2.00, and every
+    # rock genre — Alternative Rock, Emo, Pop Rock — was deleted because two
+    # stray metal tags were present. The track keeps Post-Hardcore (punk, which
+    # the policy correctly leaves alone) but loses the very tags that describe
+    # it, and then lands on the Alternative Metal playlist.
+    #
+    # Requiring the metal side to carry comparable weight keeps the intended
+    # outcome and makes a thin metal tag unable to dictate a track's identity —
+    # the same "one thin tag must not control the result" principle the outlier
+    # rejection already encodes.
+    _rock_score = sum(float(c.score or 0.0) for c in rock)
+    _metal_score = sum(float(c.score or 0.0) for c in metal)
+    if _rock_score > 0 and _metal_score < _rock_score * settings.metal_over_rock_min_ratio:
+        logger.debug(
+            "Genre metal-over-rock policy declined — the rock evidence is stronger",
+            rock_score=round(_rock_score, 3),
+            metal_score=round(_metal_score, 3),
+            required_ratio=settings.metal_over_rock_min_ratio,
+            metal=[c.display for c in metal],
+            rock=[c.display for c in rock],
+        )
+        return candidates, []
+
     metal_ids = {c.genre_id for c in metal}
     non_nu_metal = [c for c in metal if c.genre_id != NU_METAL_ID]
 
@@ -724,6 +781,8 @@ def remove_generic_parents(
     if not settings.remove_generic_parents:
         return candidates, []
 
+    vocab = get_vocabulary()
+
     drop: set[str] = set()
     removed: list[dict[str, Any]] = []
 
@@ -735,8 +794,19 @@ def remove_generic_parents(
             other
             for other in candidates
             if other.genre_id != candidate.genre_id
-            and (other.family or other.genre_id) == family
             and other.specificity > 0
+            # ⚠️ SAME FAMILY ONLY — deliberately.
+            #
+            # Families are the collection's own branches: ``metal`` sits under
+            # ``rock`` but is its own family, and ``punk`` likewise. Treating a
+            # hierarchy walk as the authority would let ``Synthpop`` (declared
+            # electronic-family) delete ``Pop`` (pop-family), because synthpop
+            # lists ``pop`` as a secondary parent — the reported "the final
+            # genres don't really match up" in reverse, and
+            # ``test_an_unrelated_family_child_does_not_remove_the_root`` plus
+            # ``test_a_generic_root_survives_when_only_an_unrelated_child_is_present``
+            # pin it.
+            and (other.family or other.genre_id) == family
         ]
         if not more_specific:
             continue
@@ -840,6 +910,36 @@ def _pair_is_kept(a: str, b: str, keep: frozenset[tuple[str, str]]) -> bool:
     return (a, b) in keep or (b, a) in keep
 
 
+def _names_parent(
+    parent: Candidate, child: Candidate, vocab: Vocabulary
+) -> bool:
+    """Does *child*'s NAME literally contain *parent*'s name?
+
+    Used only to decide whether a CROSS-FAMILY ancestor may be absorbed. The
+    vocabulary files several rock-family genres under their own branch
+    (``punk_rock`` -> punk family, ``pop_rock`` -> rock family), so a family
+    comparison alone cannot tell "Pop Rock restates Pop" from "Synthpop reaches
+    Pop through a secondary parent but is a different sound".
+
+    The names settle it, which is exactly how the collection described it:
+    "pop should be removed by pop rock", "folk should be removed by folk rock".
+    Word-bounded on the parent's display name, so ``Pop Rock`` matches ``Pop``
+    while ``Pop Punk`` (a punk genre, whose own display is "Pop Punk") matches
+    on "Pop" too and is then judged by its own family — and ``Synthpop`` does
+    not match at all.
+    """
+    parent_words = [w for w in parent.display.casefold().replace("-", " ").split() if w]
+    if not parent_words:
+        return False
+    child_name = child.display.casefold().replace("-", " ")
+    child_words = child_name.split()
+    # The child must name EVERY word of the parent, in order, as whole words.
+    for start in range(len(child_words) - len(parent_words) + 1):
+        if child_words[start:start + len(parent_words)] == parent_words:
+            return True
+    return False
+
+
 def remove_redundant_ancestors(
     candidates: list[Candidate],
     *,
@@ -882,6 +982,13 @@ def remove_redundant_ancestors(
 
     drop: set[str] = set()
     triggers: dict[str, tuple[str, str]] = {}
+
+    # Family totals, used to decide WHICH side of an exclusive pair survives.
+    _family_totals: dict[str, float] = {}
+    for candidate in candidates:
+        key = candidate.family or candidate.genre_id
+        _family_totals[key] = _family_totals.get(key, 0.0) + float(candidate.score or 0.0)
+
     for candidate in candidates:
         if candidate.genre_id in _nu_metal_companions:
             # Kept for the Nu Metal exception; the policy makes the final call.
@@ -891,11 +998,17 @@ def remove_redundant_ancestors(
                 continue
             if not _is_ancestor(candidate.genre_id, other.genre_id, vocab):
                 continue
+            # ⚠️ THE EXPLICIT PAIR RULES COME FIRST — they are statements about
+            # these two genres specifically, so no general heuristic may skip
+            # past them. The cross-family guard below is a heuristic; a
+            # ``mutually_exclusive`` pair is a decision.
             if _pair_is_kept(
                 candidate.genre_id, other.genre_id, settings.mutually_exclusive
             ):
                 # Unconditional: the exclusive pair must not co-exist, even
-                # when the broader ancestor has more support.
+                # when the broader ancestor has more support. A track keeps ONE
+                # "Alternative *" identity — the reported "Alternative Rock,
+                # Alternative Metal, Cover" is the regression this prevents.
                 drop.add(candidate.genre_id)
                 triggers[candidate.genre_id] = (
                     REASON_EXCLUSIVE_CONFLICT, other.display,
@@ -908,11 +1021,48 @@ def remove_redundant_ancestors(
                 # evidence rather than on the artist's own broad tags.
                 if other.has_entity(ENTITY_TRACK) or other.has_entity(ENTITY_ALBUM):
                     continue
-            if (
-                candidate.score > 0
-                and other.score < candidate.score * settings.ancestor_replace_min_ratio
-            ):
+
+            # ⚠️ FAMILIES ARE THE TRACK'S BRANCHES — crossing one is not A
+            # replacement, WITH ONE PRECISE EXCEPTION.
+            #
+            # ``synthpop`` lists ``pop`` as a secondary parent while being an
+            # ELECTRONIC-family genre, so a raw hierarchy walk let Synthpop
+            # delete Pop from a track whose pop evidence (3.05) outweighed it.
+            # That is a different sound and must not collapse.
+            #
+            # But ``Pop Rock``, ``Folk Rock`` and ``Punk Rock`` also cross
+            # families (rock-family children of pop/folk/rock) and DO need to
+            # absorb their parent — the reported "pop should be removed by pop
+            # rock", "folk should be removed by folk rock". The distinction that
+            # separates them is the one the request itself used: the child's NAME
+            # contains the parent's name. "Pop Rock" names Pop; "Synthpop"
+            # does not.
+            _cross_family = (
+                (other.family or other.genre_id)
+                != (candidate.family or candidate.genre_id)
+            )
+            if _cross_family and not _names_parent(candidate, other, vocab):
                 continue
+            # ⚠️ THE RATIO DOES NOT APPLY TO A TRUE ANCESTOR/DESCENDANT PAIR.
+            #
+            # ``ancestor_replace_min_ratio`` asks "is the narrower genre at least
+            # as well supported as the one it would replace?" — the right
+            # question for a candidate that shows up through the hierarchy but
+            # means something separate. It is the WRONG question for a genre that
+            # is literally a superset of the other: ``death metal`` contains
+            # ``melodic death metal`` by definition, so support cannot decide
+            # which of the two names the sound. Providers tag the umbrella more
+            # often, so the umbrella wins the ratio and BOTH survive — which is
+            # the reported "death metal should be removed by melodic death
+            # metal" (749 tracks in the export) and "grunge should be removed by
+            # post-grunge" (187).
+            #
+            # This matches ``remove_generic_parents``, which is already
+            # deliberately unconditional for exactly the same reason.
+            #
+            # The ratio still governs the pair types that genuinely need it,
+            # handled above: ``keep_together`` keeps distinct aspects together,
+            # and ``conditional_keep`` requires independent evidence.
             drop.add(candidate.genre_id)
             triggers[candidate.genre_id] = (REASON_REDUNDANT_ANCESTOR, other.display)
             break

@@ -400,6 +400,95 @@ def _genre_track_limit() -> int:
         return 3
 
 
+def _characterise_raw_genres(
+    source_map: dict[str, Any] | None,
+    *,
+    max_genres: int = 3,
+) -> list[str]:
+    """Last-resort genres from provider evidence, STILL POLICY-COMPLIANT.
+
+    The caller reaches this only when the normal selection produced no musical
+    genre at all — every candidate lost to a confidence floor, and the artist
+    catalogue had nothing. Its job is "never leave a track genreless".
+
+    ⚠️ IT MUST NOT BE A RAW FREQUENCY COUNT.
+
+    That was the old implementation, and it applied none of the collection
+    policy. Reported on a Rage Against the Machine track, whose stored value came
+    out ``Alternative Rock, Math Rock, Alternative Metal`` — the exact
+    frequency-then-provider order of the raw vote — even though the selector,
+    handed the same evidence, returns ``Alternative Metal`` alone. The same hole
+    let a stray ``Alternative Metal`` tag survive beside a Chiodos track's
+    ``Post-Hardcore``/``Emo`` and put it on the Alternative Metal playlist.
+
+    So this re-runs the REAL selector (``select_album_or_track_genres``) with the
+    confidence floors relaxed to zero, and with the pools left unconstrained.
+    Policy still applies — metal-over-rock, ancestor condensation and generic
+    parents all run inside it — only the "must earn its slot" gate is lifted,
+    which is precisely the gate that rejected everything in the first place.
+
+    Returns ``[]`` when the evidence contains no genre at all, so the caller's
+    marker-only list still stands.
+    """
+    if not source_map:
+        return []
+
+    try:
+        from services.enrichment.genre_selection import (
+            SelectionSettings,
+            _settings_from_config,
+            select_album_or_track_genres,
+        )
+
+        base = _settings_from_config(None)
+        relaxed = SelectionSettings(
+            **{
+                **base.__dict__,
+                # Zero floors: this path exists because the floors rejected
+                # everything. The policy above them is what we still want.
+                "thresholds": {
+                    position: 0.0 for position in base.thresholds
+                },
+                # Never let the relative floor re-introduce a rejection.
+                "ancestor_replace_min_ratio": 0.0,
+            }
+        )
+        result = select_album_or_track_genres(
+            source_map,
+            max_genres=max_genres,
+            settings=relaxed,
+        )
+        selected = [
+            str(g) for g in (result.get("genres") or [])
+            if str(g).strip() and not is_track_affiliation_tag(str(g))
+        ]
+        if selected:
+            return selected[:max_genres]
+    except Exception as exc:
+        logger.debug(
+            "Relaxed genre selection failed — falling back to raw provider order",
+            error=str(exc),
+        )
+
+    # Genuine last resort: the selector could not run at all. Keep the old
+    # behaviour rather than leaving the track with only its markers.
+    counts: dict[str, int] = {}
+    order: dict[str, int] = {}
+    for _src_key, raw_values in (source_map or {}).items():
+        for raw_genre in _parse_genre_input(raw_values):
+            value = str(raw_genre or "").strip()
+            if (
+                not value
+                or is_track_affiliation_tag(value)
+                or is_admin_genre(value)
+                or is_junk_genre(value)
+            ):
+                continue
+            counts[value] = counts.get(value, 0) + 1
+            order.setdefault(value, len(order))
+    return sorted(counts, key=lambda g: (-counts[g], order[g]))[:max_genres]
+
+
 def _album_top_genres(
     album_tracks: list[dict[str, Any]] | None,
     *,
@@ -3390,30 +3479,30 @@ def process_track(
                 # the artist catalogue had nothing, do not let a marker such as
                 # "Soundtrack" become the whole genre list while the detected
                 # "alternative rock"/"rock" chips are present.
+                #
+                # ⚠️ IT MUST STILL GO THROUGH THE SELECTOR, NOT A RAW VOTE COUNT.
+                #
+                # This used to rank the raw provider values by frequency and
+                # take the top N, which applied NONE of the collection policy —
+                # no metal-over-rock, no ancestor condensation, no generic-parent
+                # removal. Reported on a Rage Against the Machine track: the
+                # stored value came out "Alternative Rock, Math Rock, Alternative
+                # Metal" (that exact order — frequency, then provider order)
+                # even though the selector, given the same evidence, returns
+                # "Alternative Metal" alone.
+                #
+                # Re-running the selector with its confidence floors RELAXED is
+                # what keeps the fallback's original purpose (never leave a
+                # track genreless because the floors are strict) without letting
+                # it contradict the policy every other path obeys.
                 _musical_now = [
                     g for g in (aggregated or [])
                     if not is_track_affiliation_tag(g)
                 ]
                 if not _musical_now:
-                    _raw_counts: dict[str, int] = {}
-                    _raw_order: dict[str, int] = {}
-                    for _src_key, _raw_values in (source_map or {}).items():
-                        _parsed_values = _parse_genre_input(_raw_values)
-                        for _raw_genre in _parsed_values:
-                            _g = str(_raw_genre or "").strip()
-                            if (
-                                not _g
-                                or is_track_affiliation_tag(_g)
-                                or is_admin_genre(_g)
-                                or is_junk_genre(_g)
-                            ):
-                                continue
-                            _raw_counts[_g] = _raw_counts.get(_g, 0) + 1
-                            _raw_order.setdefault(_g, len(_raw_order))
-                    _raw_musical = sorted(
-                        _raw_counts,
-                        key=lambda g: (-_raw_counts[g], _raw_order[g]),
-                    )[:_genre_track_limit()]
+                    _raw_musical = _characterise_raw_genres(
+                        source_map, max_genres=_genre_track_limit()
+                    )
                     if _raw_musical:
                         _markers = [
                             g for g in (aggregated or [])

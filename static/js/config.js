@@ -2272,6 +2272,11 @@ async function runGenreResync(dryRun) {
       + '<strong>' + data.changed + '</strong> genre set(s) ' + (dryRun ? 'would change' : 'changed')
       + ' in ' + data.seconds + 's.'
       + (data.skipped_no_evidence ? ' ' + data.skipped_no_evidence + ' had no stored evidence and were left alone.' : '')
+      + (!dryRun
+        ? ' <strong>' + (data.files_written || 0) + '</strong> file(s) written'
+          + (data.files_failed ? ', ' + data.files_failed + ' failed' : '')
+          + (data.navidrome_rescan === false ? ' — Navidrome rescan not requested.' : '')
+        : '')
       + '</div>'
       + (rows
         ? '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'

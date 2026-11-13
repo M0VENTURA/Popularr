@@ -164,12 +164,121 @@ def _selection_engine_v2_enabled() -> bool:
         return False
 
 
+def _resync_tag_options() -> tuple[bool, bool]:
+    """``(write_file_tags, sync_navidrome)`` for the genre re-evaluation.
+
+    ⭐⭐ THE DATABASE IS NOT WHY THE REPORTED BUG EXISTED.
+
+    > "Final Genres show this, but they haven't been pushed to the tracks in
+    > Navidrome — Post-Hardcore, Alternative Metal, Heavy Metal"
+
+    ``tracks.genres`` was correct and the episode was real: this job only ever
+    wrote the COLUMN. Nothing touched the audio files, so the ``TCON``/genre
+    frame kept whatever the last scan wrote, and Navidrome — which reads the
+    FILES — kept showing the old genres forever. The Config page promised
+    "recomputes each track's final genres"; to the user that means what
+    Navidrome displays.
+
+    Default ON, matching the Star Rating Resync card: a re-evaluation the user
+    has to re-run through a full scan to see any effect is a half-done job. Both
+    can be switched off for a database-only pass.
+    """
+    try:
+        from helpers.config_helpers import get_config
+
+        cfg = get_config() or {}
+        block = ((cfg.get("genres") or {}).get("resync") or {})
+    except Exception:
+        block = {}
+
+    def _flag(key: str) -> bool:
+        value = block.get(key, True)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    return _flag("write_file_tags"), _flag("sync_navidrome")
+
+
+def _push_to_files(
+    changed_rows: list[dict[str, Any]],
+    *,
+    write_file_tags: bool,
+    sync_navidrome: bool,
+) -> dict[str, Any]:
+    """Write the new genres onto the audio files, then nudge Navidrome.
+
+    Returns ``{"files_written", "files_failed", "navidrome"}`` so the caller can
+    report what actually reached the library rather than only what the DB says.
+    """
+    out: dict[str, Any] = {"files_written": 0, "files_failed": 0, "navidrome": None}
+
+    if write_file_tags and changed_rows:
+        try:
+            from services.metadata.tag_file_service import (
+                _resolve_music_file_path,
+                update_file_tags,
+            )
+        except Exception as exc:
+            logger.warning("Genre resync: tag writer unavailable", error=str(exc))
+        else:
+            for row in changed_rows:
+                track_id = str(row.get("track_id") or "")
+                if not track_id:
+                    continue
+                try:
+                    path = _resolve_track_file_path(track_id)
+                    if not path:
+                        out["files_failed"] += 1
+                        continue
+                    resolved = _resolve_music_file_path(path) or path
+                    if update_file_tags(resolved, {"genres": row.get("after") or ""}):
+                        out["files_written"] += 1
+                    else:
+                        out["files_failed"] += 1
+                except Exception as exc:
+                    out["files_failed"] += 1
+                    logger.debug(
+                        "Genre resync: tag write failed",
+                        track_id=track_id, error=str(exc),
+                    )
+
+    if sync_navidrome:
+        # A rescan is what makes Navidrome re-read the files it now holds. It is
+        # fire-and-forget by design (the rescan is coalesced and must not block
+        # this job), so the result is "requested", not "complete".
+        try:
+            from services.scanning.navidrome_rescan_service import request_rescan
+
+            out["navidrome"] = bool(request_rescan())
+        except Exception as exc:
+            logger.debug("Genre resync: Navidrome rescan request failed", error=str(exc))
+
+    return out
+
+
+def _resolve_track_file_path(track_id: str) -> str | None:
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text("SELECT file_path FROM tracks WHERE CAST(id AS TEXT) = :id"),
+                {"id": track_id},
+            ).fetchone()
+    except Exception as exc:
+        logger.debug("Genre resync: file path lookup failed", track_id=track_id, error=str(exc))
+        return None
+    value = row[0] if row else None
+    return str(value).strip() if value and str(value).strip() else None
+
+
 def resync_genres(
     *,
     artist: str | None = None,
     album: str | None = None,
     limit_tracks: int | None = None,
     dry_run: bool = False,
+    write_file_tags: bool | None = None,
+    sync_navidrome: bool | None = None,
 ) -> dict[str, Any]:
     """Recompute final genres for stored tracks from their stored evidence.
 
@@ -178,13 +287,29 @@ def resync_genres(
         album: Restrict to one album title (combine with ``artist``).
         limit_tracks: Cap the number of tracks examined (smoke tests).
         dry_run: Compute and report only; write nothing at all.
+        write_file_tags: Override the configured file-tag behaviour. Without
+            this the column changed but Navidrome kept showing the old genres,
+            because Navidrome reads the FILES.
+        sync_navidrome: Override the configured rescan request.
 
     Returns:
         ``{"ok", "dry_run", "tracks", "with_evidence", "changed",
-        "skipped_no_evidence", "changed_tracks", "seconds"}``.
+        "skipped_no_evidence", "changed_tracks", "files_written",
+        "files_failed", "navidrome", "seconds"}``.
     """
     started = time.monotonic()
     max_genres = _track_limit()
+
+    _cfg_tags, _cfg_navidrome = _resync_tag_options()
+    if write_file_tags is None:
+        write_file_tags = _cfg_tags
+    if sync_navidrome is None:
+        sync_navidrome = _cfg_navidrome
+    if dry_run:
+        # A preview must not touch a single file, whatever the config says.
+        write_file_tags = False
+        sync_navidrome = False
+
     rows = _load_rows(artist, album)
     if limit_tracks:
         rows = rows[: int(limit_tracks)]
@@ -229,14 +354,30 @@ def resync_genres(
             }
         )
 
+    pushed: dict[str, Any] = {
+        "files_written": 0, "files_failed": 0, "navidrome": None,
+    }
     if not dry_run:
         _persist(changes)
+        # ⭐ THE COLUMN ALONE IS NOT THE JOB. Navidrome reads the FILES, so a
+        # pass that only updated the database left the library showing the old
+        # genres forever ("Final Genres show this, but they haven't been pushed
+        # to the tracks in Navidrome").
+        pushed = _push_to_files(
+            changed_rows,
+            write_file_tags=bool(write_file_tags),
+            sync_navidrome=bool(sync_navidrome),
+        )
 
     elapsed = round(time.monotonic() - started, 2)
     logger.info(
         "Genre resync finished",
         tracks=len(rows), with_evidence=with_evidence,
-        changed=len(changes), dry_run=dry_run, seconds=elapsed,
+        changed=len(changes), dry_run=dry_run,
+        files_written=pushed.get("files_written"),
+        files_failed=pushed.get("files_failed"),
+        navidrome=pushed.get("navidrome"),
+        seconds=elapsed,
     )
     return {
         "ok": True,
@@ -246,6 +387,10 @@ def resync_genres(
         "changed": len(changes),
         "skipped_no_evidence": len(rows) - with_evidence,
         "changed_tracks": changed_rows,
+        # What actually reached the library, not just the database.
+        "files_written": int(pushed.get("files_written") or 0),
+        "files_failed": int(pushed.get("files_failed") or 0),
+        "navidrome_rescan": pushed.get("navidrome"),
         "seconds": elapsed,
     }
 
