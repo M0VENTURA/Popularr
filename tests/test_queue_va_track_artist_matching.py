@@ -215,7 +215,26 @@ class TestMissingTracksAcrossAlbums:
             "Various Artists", _ALBUM, release_mbid="rel-1",
         )
 
-    def test_a_track_owned_on_another_album_is_not_missing(self, monkeypatch):
+    def test_a_track_owned_on_another_album_is_missing_but_annotated(self, monkeypatch):
+        """Owned ELSEWHERE is not owned HERE.
+
+        ⚠️ THIS ASSERTED ``missing_tracks == []`` AND WAS WRONG.
+
+        It came from the queue-matching request — "as long as the Track Artist
+        and song name are matching the queue, they should be able to match
+        correctly" — which is about not RE-QUEUEING a track. It was applied to
+        the album's missing list as well, where the question is different: does
+        THIS album's folder hold the file?
+
+        Reported on a Various Artists compilation: a disc-2 gap never appeared
+        on the missing list because the recording also existed on the band's own
+        album, so the album looked complete ("Missing tracks on the second disk
+        aren't populating").
+
+        The row is now listed and annotated with ``owned_on_album``, which is
+        also what makes Add useful: the queue's library-copy path re-imports the
+        owned file into THIS album instead of fetching it from Soulseek.
+        """
         _seed_track("t1", title="Yellow", album=_OTHER_ALBUM)
 
         result = self._status(monkeypatch, [{
@@ -223,8 +242,15 @@ class TestMissingTracksAcrossAlbums:
             "track_number": "5", "disc_number": 1,
         }])
 
-        assert result["missing_tracks"] == []
-        assert result["excluded"]["in_library"] == 1
+        assert [m["title"] for m in result["missing_tracks"]] == ["Yellow"], (
+            "a recording owned on another album is still absent from this one"
+        )
+        assert result["missing_tracks"][0]["owned_on_album"] == _OTHER_ALBUM, (
+            "the row must say where the copy already lives"
+        )
+        assert result["excluded"]["in_library"] == 0, (
+            "the owning copy is an annotation, not a presence gate"
+        )
 
     def test_a_genuinely_absent_track_is_still_missing(self, monkeypatch):
         _seed_track("t1", title="Yellow", artist="Coldplay")

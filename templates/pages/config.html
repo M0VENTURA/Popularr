@@ -2680,31 +2680,6 @@
       </div>
 
       <hr class="my-3">
-
-      <div class="border rounded p-3" id="genre-playlist-resync">
-        <h6 class="mb-1">Genre → Playlist Resync</h6>
-        <p class="text-muted small mb-3">
-          Two steps, so nothing is written blind. <strong>Preview</strong> recomputes each track's
-          Final Genres from the genre evidence already stored in the database and reports what that
-          would change — per track and per genre playlist — then <strong>Apply</strong> writes the
-          genres and rebuilds the playlists in the background. No provider calls.
-        </p>
-        <div class="row g-3 mb-3">
-          <div class="col-12 col-sm-6 col-lg-3">
-            <label class="form-label form-label-sm" for="genre_playlist_resync_limit">Limit Tracks (0 = all)</label>
-            <input type="number" step="1" min="0" class="form-control form-control-sm" id="genre_playlist_resync_limit" placeholder="0" value="0">
-            <small class="form-text text-muted">Use a small number for a first run. 0 = every track.</small>
-          </div>
-          <div class="col-12">
-            <button type="button" class="btn btn-outline-secondary btn-sm" id="genre_playlist_resync_preview_btn">1 · Preview Changes</button>
-            <button type="button" class="btn btn-warning btn-sm ms-2" id="genre_playlist_resync_apply_btn" disabled>2 · Apply &amp; Rebuild Playlists</button>
-            <span class="small text-muted ms-2" id="genre_playlist_resync_state"></span>
-            <div id="genre_playlist_resync_output" class="small mt-2"></div>
-          </div>
-        </div>
-      </div>
-
-      <hr class="my-3">
       <h6 class="mb-3">3 · Score Adjustments</h6>
       <div class="row g-3">
         <div class="col-12 col-sm-6 col-lg-3">
@@ -3331,6 +3306,36 @@
 
         <!-- ===== TAB: PLAYLISTS ===== -->
         <div class="tab-pane fade" id="tab-playlists" role="tabpanel">
+
+  {# Genre → Playlist Resync — an ACTION, not a setting, so it sits beside the
+     genre-playlist controls it rewrites. Two steps so a library-wide genre
+     rewrite is never applied blind. #}
+  <div class="card shadow-sm mb-3" id="genre-playlist-resync">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-arrow-repeat"></i> Genre → Playlist Resync</h5>
+      <small class="text-muted">Recompute Final Genres from the stored evidence, then rebuild the genre playlists</small>
+    </div>
+    <div class="card-body config-section">
+      <p class="text-muted small mb-3">
+        <strong>Preview</strong> recomputes each track's Final Genres from the genre evidence already stored in the
+        database and reports what that would change — per track and per genre playlist. <strong>Apply</strong> then
+        writes the genres and rebuilds the playlists in the background. No provider calls.
+      </p>
+      <div class="row g-3 mb-3">
+        <div class="col-12 col-sm-6 col-lg-3">
+          <label class="form-label form-label-sm" for="genre_playlist_resync_limit">Limit Tracks (0 = all)</label>
+          <input type="number" step="1" min="0" class="form-control form-control-sm" id="genre_playlist_resync_limit" placeholder="0" value="0">
+          <small class="form-text text-muted">Use a small number for a first run. 0 = every track.</small>
+        </div>
+        <div class="col-12">
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="genre_playlist_resync_preview_btn">1 · Preview Changes</button>
+          <button type="button" class="btn btn-warning btn-sm ms-2" id="genre_playlist_resync_apply_btn" disabled>2 · Apply &amp; Rebuild Playlists</button>
+          <span class="small text-muted ms-2" id="genre_playlist_resync_state"></span>
+          <div id="genre_playlist_resync_output" class="small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Essential Playlists Section -->
   <div class="card shadow-sm mb-3" id="playlists">

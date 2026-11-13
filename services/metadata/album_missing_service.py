@@ -27,7 +27,7 @@ from helpers.normalization_service import (
     normalize_title_for_compare,
     normalize_title_for_lucene_query,
 )
-from helpers.track_ordering import album_track_sort_key
+from helpers.track_ordering import album_track_sort_key, leading_int
 
 logger = structlog.get_logger(__name__)
 
@@ -244,7 +244,7 @@ def _queued_coverage(
             ):
                 generic_title_keys.setdefault(title_key, status)
             qtn = str(q.get("track_number") or "").strip()
-            qd = int(q.get("disc_number") or 1) if q.get("disc_number") not in (None, "", "0", 0) else 1
+            qd = _disc_of(q.get("disc_number"))
             if qtn:
                 positions.setdefault((qd, qtn), status)
     except Exception as _qexc:
@@ -255,6 +255,25 @@ def _queued_coverage(
 #: A track the release labels as a bonus/extra. The title marker is enough on
 #: its own; the position rule below handles unlabelled bonus cuts.
 _BONUS_TITLE_RE = re.compile(r"\bbonus\b", re.IGNORECASE)
+
+
+def _disc_of(value: Any) -> int:
+    """The numeric disc a tag means, defaulting to 1.
+
+    ``disc_number`` is TEXT, and a "n of m" tag stores ``"2/2"``. A bare
+    ``int(...)`` raised ``ValueError`` on exactly those rows — the exception
+    escaped ``get_missing_tracks`` and the album's missing list was never
+    produced, so a gap on that disc was simply never reported. The album page
+    already groups discs through the same tolerant ``leading_int`` (``"2/2"``
+    is disc 2), so reading the tag any other way is what made the page show a
+    "Disc 2" section whose tracks the missing check could not see.
+
+    A blank or ``0`` disc is disc 1 — the reported "disc 1 and disc 0" split.
+    """
+    disc = leading_int(value)
+    if disc is None or disc < 1:
+        return 1
+    return disc
 
 
 def _numeric_track_number(value: Any) -> int | None:
@@ -287,7 +306,7 @@ def is_bonus_missing_track(
         return True
 
     try:
-        disc = int(mb_track.get("disc_number") or 1)
+        disc = _disc_of(mb_track.get("disc_number"))
     except (TypeError, ValueError):
         disc = 1
     number = _numeric_track_number(mb_track.get("track_number"))
@@ -387,7 +406,7 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         title = r.get("title") or ""
         if title:
             lib_norm.add(_title_match_key(title))
-        disc = int(r.get("disc_number") or 1) if r.get("disc_number") not in (None, "", "0", 0) else 1
+        disc = _disc_of(r.get("disc_number"))
         tn = str(r.get("track_number") or "").strip()
         if tn:
             # The DURATION travels with the position so the pairing rule can
@@ -436,16 +455,27 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     # ── Cross-album library ownership ─────────────────────────────────────
     # The SAME track artist + title may already be owned on ANOTHER release
     # (the studio album, a different compilation, a Various Artists album whose
-    # album artist differs). It is the same recording, so it is not "missing"
-    # for this release — the same rule ``find_library_track`` applies when the
-    # Add button checks whether a track is already owned.
-    _cross_album_library: set[tuple[str, str]] = set()
+    # album artist differs). It is the same recording, so it is not a
+    # re-download — the same rule ``find_library_track`` applies when the Add
+    # button checks whether a track is already owned.
+    #
+    # ⚠️ BUT IT IS STILL MISSING FROM *THIS* ALBUM, and that is the question
+    # this function answers. Reported on a Various Artists compilation: a gap on
+    # disc 2 was absent from the library while the same recording existed on the
+    # band's own album, so this gate excluded it and the missing list came back
+    # EMPTY — "Missing tracks on the second disk aren't populating". Owning a
+    # song elsewhere is not owning this album's copy of it.
+    #
+    # The set is therefore only used to ANNOTATE the row (``owned_elsewhere``),
+    # which lets the UI say where the recording already lives without pretending
+    # the album is complete.
+    _cross_album_library: dict[tuple[str, str], str] = {}
     try:
         if _mb_track_artists:
             with db_session() as session:
                 _owner_rows = session.execute(
                     text("""
-                        SELECT title, artist, album_artist
+                        SELECT title, artist, album_artist, album
                         FROM tracks
                         WHERE LOWER(COALESCE(NULLIF(artist, ''), album_artist)) IN :artists
                            OR LOWER(COALESCE(NULLIF(album_artist, ''), artist)) IN :artists
@@ -456,10 +486,20 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
                 _owner_title = _title_match_key(_owner.get("title") or "")
                 if not _owner_title:
                     continue
+                # A row on THIS album is already handled by the position/title
+                # gates above; only another release counts as "elsewhere".
+                _owner_album = str(_owner.get("album") or "")
+                if _owner_album and _album_key(_owner_album) == _album_key(album):
+                    continue
                 for _credit in (_owner.get("artist"), _owner.get("album_artist")):
                     _credit_key = _artist_match_key(_credit)
-                    if _credit_key:
-                        _cross_album_library.add((_credit_key, _owner_title))
+                    if not _credit_key:
+                        continue
+                    _key = (_credit_key, _owner_title)
+                    # Prefer a NAMED owning album: a row with no album is still
+                    # "owned elsewhere", but it cannot tell the user where.
+                    if _key not in _cross_album_library or not _cross_album_library[_key]:
+                        _cross_album_library[_key] = _owner_album
     except Exception as _owner_exc:
         logger.debug("Cross-album library ownership check failed", error=str(_owner_exc))
 
@@ -473,7 +513,7 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         if not mb_title:
             continue
         norm = _title_match_key(mb_title)
-        mb_disc = int(mt.get("disc_number") or 1)
+        mb_disc = _disc_of(mt.get("disc_number"))
         mb_num = str(mt.get("track_number") or "").strip()
 
         position_occupied = bool(mb_num) and (mb_disc, mb_num) in lib_by_position
@@ -504,10 +544,10 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             continue
 
         _mb_artist_key = _artist_match_key(mt.get("artist") or artist)
-        if (_mb_artist_key, norm) in _cross_album_library:
-            # Owned on another release — same performer and song.
-            excluded["in_library"] += 1
-            continue
+        # Owned on another release (same performer, same song). It is NOT this
+        # album's copy, so it is still listed; the album name rides along so the
+        # UI can point at the copy the user already has.
+        _owned_elsewhere = _cross_album_library.get((_mb_artist_key, norm))
 
         # Same album first, then TRACK ARTIST + TITLE (which also covers a row
         # queued from a different release), then a compilation row that only
@@ -530,7 +570,7 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         entry = {
             "title": mb_title,
             "track_number": mt.get("track_number"),
-            "disc_number": mt.get("disc_number", 1),
+            "disc_number": _disc_of(mt.get("disc_number")),
             "recording_mbid": mt.get("recording_mbid"),
             "track_artist": mt.get("artist") or artist,
             "year": mb_release.get("release_year") or mb_release.get("year"),
@@ -540,6 +580,10 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         }
         if queue_status:
             entry["queue_status"] = queue_status
+        if _owned_elsewhere:
+            # An annotation, not a visibility gate: the recording is already on
+            # this album name, so the UI can offer a copy instead of a search.
+            entry["owned_on_album"] = _owned_elsewhere
         missing.append(entry)
 
     # Persist missing tracks so they survive refreshes.  A track already
@@ -577,6 +621,31 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     }
 
 
+def _version_recommendation(tracks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Which duplicate copy to keep, or a tie. Never raises.
+
+    Advisory only: the scan reads files on disk to rate audio quality, which can
+    be slow or unavailable (network mounts, a moved file). A failure degrades to
+    "no recommendation" rather than breaking the duplicate list, because the
+    BADGE is the primary feature and this is the enhancement.
+    """
+    try:
+        from services.metadata.duplicate_version_service import (
+            recommend_duplicate_keeper,
+        )
+
+        return recommend_duplicate_keeper(tracks)
+    except Exception as exc:
+        logger.debug("Duplicate version recommendation failed", error=str(exc))
+        return {
+            "keep_track_id": "",
+            "remove_track_ids": [],
+            "confidence": "n/a",
+            "reason": "Could not evaluate these copies.",
+            "copies": [],
+        }
+
+
 def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
     """Tracks on THIS album that exist more than once (downloaded twice).
 
@@ -600,7 +669,12 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
         rows = session.execute(
             text(
                 "SELECT id, album, title, track_number, disc_number, file_path, "
-                "COALESCE(NULLIF(artist, ''), '—') AS track_artist "
+                "COALESCE(NULLIF(artist, ''), '—') AS track_artist, "
+                # Columns the version recommendation scores on. ``bitrate`` is
+                # NOT here because it is not a stored column — file quality is
+                # read from the file itself by the shared scorer.
+                "duration, stars, recording_mbid, isrc, musicbrainz_albumid, "
+                "year, composer, writer, genres, recordlabel "
                 "FROM tracks "
                 "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
             ),
@@ -639,6 +713,11 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
             "disc_number": disc_number,
             "count": len(tracks),
             "track_ids": [str(t.get("id") or "") for t in tracks],
+            # WHICH copy to keep, and why. A duplicate badge that only says
+            # "×2" leaves the user to compare durations and tags by eye; the
+            # recommendation names the better copy and the reason, and NEVER
+            # deletes anything.
+            "recommendation": _version_recommendation(tracks),
         })
 
     # ``disc_number``/``track_number`` are TEXT (and stored as TEXT in this
@@ -823,7 +902,7 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
     lib_norm = {_title_match_key(str(r.get("title") or "")) for r in library_rows if r.get("title")}
     lib_by_position: dict[tuple[int, str], str] = {}
     for r in library_rows:
-        disc = int(r.get("disc_number") or 1) if r.get("disc_number") not in (None, "", "0", 0) else 1
+        disc = _disc_of(r.get("disc_number"))
         tn = str(r.get("track_number") or "").strip()
         if tn:
             lib_by_position[(disc, tn)] = str(r.get("title") or "")
@@ -835,7 +914,7 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
             continue
         norm = _title_match_key(title)
         tn = str(row.get("track_number") or "").strip()
-        disc = int(row.get("disc_number") or 1)
+        disc = _disc_of(row.get("disc_number"))
         if norm in lib_norm:
             continue
         position_key = (disc, tn) if tn else None
@@ -1050,9 +1129,20 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
 
             library_count = session.execute(
                 text(
-                    "SELECT COUNT(*) FROM tracks "
-                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                    "  AND LOWER(COALESCE(album, '')) = LOWER(:album)"
+                    # DISTINCT recordings, not rows: a double download puts two
+                    # rows on one album, and the count is shown next to the
+                    # release size — so a duplicate reported "N+1 of N" and made
+                    # the album look like it had a stray extra track.
+                    "SELECT COUNT(*) FROM ("
+                    "  SELECT DISTINCT "
+                    "    LOWER(TRIM(COALESCE(title, ''))), "
+                    "    LOWER(TRIM(COALESCE(artist, ''))), "
+                    "    COALESCE(TRIM(CAST(disc_number AS TEXT)), ''), "
+                    "    COALESCE(TRIM(CAST(track_number AS TEXT)), '') "
+                    "  FROM tracks "
+                    "  WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "    AND LOWER(COALESCE(album, '')) = LOWER(:album)"
+                    ") AS distinct_tracks"
                 ),
                 {"artist": artist, "album": album},
             ).scalar() or 0
@@ -1212,7 +1302,7 @@ def _persist_missing_tracks(artist: str, album: str, missing: list[dict[str, Any
                 continue
 
             tn = str(m.get("track_number") or "").strip()
-            disc = int(m.get("disc_number") or 1)
+            disc = _disc_of(m.get("disc_number"))
             title = str(m.get("title") or "").strip()
             if not title:
                 continue

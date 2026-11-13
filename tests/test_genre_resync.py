@@ -165,6 +165,77 @@ def test_a_row_with_no_evidence_is_left_alone(monkeypatch):
     assert updates == []
 
 
+class TestCommaSeparatedEvidenceIsRead:
+    """A comma-joined genre list must yield candidates, not one unknown token.
+
+    REPORTED
+
+    > "I ran the genre Re-evaluation, but it didn't seem to do what I expected."
+    > ... 11,842 tracks whose Final Genres still violate the cleanup rules.
+
+    ``tracks.genres`` and every provider column are written with
+    ``", ".join(genres)``, but ``tokenize_values`` only split on ``;``, ``|``,
+    ``\\``, ``/`` and ``&``. A comma-joined value therefore stayed ONE token,
+    was classified ``unknown``, and contributed NO candidate — so the selector
+    returned an empty list and the resync skipped the track entirely. Stale
+    genres survived a "successful" re-evaluation, which is exactly the report.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Industrial Metal, Rock, Nu Metal",
+            "Industrial Metal; Rock; Nu Metal",
+            '["Industrial Metal", "Rock", "Nu Metal"]',
+            ["Industrial Metal", "Rock", "Nu Metal"],
+        ],
+        ids=["comma", "semicolon", "json", "list"],
+    )
+    def test_every_stored_shape_yields_the_same_clean_set(self, raw):
+        from services.enrichment.genre_aggregation_service import aggregate_genres
+
+        out = aggregate_genres({"musicbrainz@track": raw}, max_genres=4)
+        assert out == ["Industrial Metal", "Nu Metal"], (
+            f"{raw!r} did not parse into candidates; a comma-joined list is "
+            "silently skipped by the resync"
+        )
+
+    def test_a_comma_does_not_break_a_single_genre_name(self):
+        """A name with a comma inside would be split only as a last resort."""
+        from services.enrichment.genre_vocabulary import tokenize_values
+
+        vocab = get_vocabulary()
+        # ``K-pop`` style values and multi-word names must survive whole.
+        assert tokenize_values("Melodic Death Metal", vocab) == ["Melodic Death Metal"]
+        assert tokenize_values("Rock, Pop", vocab) == ["Rock", "Pop"]
+
+    def test_the_resync_actually_rewrites_comma_joined_sources(self, monkeypatch):
+        """End-to-end: the stale set is replaced, not left alone."""
+        rows = [
+            _row(
+                id="1",
+                genres="industrial metal; rock; metal; hard rock; punk",
+                musicbrainz_genres="Industrial Metal, Nu Metal, Heavy Metal, Rock",
+                listenbrainz_genres="Industrial Metal, Nu Metal",
+                lastfm_tags="Industrial Metal, Nu Metal, Rock",
+            )
+        ]
+        result, updates = _run(monkeypatch, rows, dry_run=False)
+
+        assert result["changed"] == 1, (
+            "comma-joined provider columns produced no candidates, so the "
+            "resync skipped the track and left its stale genres in place"
+        )
+        _statement, params = updates[0]
+        # ``_persist`` batches the rewrites, so the payload is a LIST of dicts.
+        batch = params if isinstance(params, list) else [params]
+        after_text = ", ".join(str((p or {}).get("genres") or "") for p in batch)
+        assert "Industrial Metal" in after_text
+        assert "rock" not in after_text.lower(), (
+            f"the rock family should have been condensed away, got {after_text!r}"
+        )
+
+
 class TestWiring:
     def test_the_route_exists_and_offloads(self):
         source = (REPO_ROOT / "routes" / "misc_routes.py").read_text(encoding="utf-8")

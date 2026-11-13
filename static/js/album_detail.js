@@ -1323,6 +1323,15 @@ function _buildMissingTrackRow(trackComp, data) {
             + ` title="In the download queue (${escapeHtml(queueStatus)})">`
             + `<i class="bi bi-download me-1"></i>${escapeHtml(_queueStatusLabel(queueStatus))}</span>`
         : `<span class="badge bg-warning text-dark ms-2" style="font-size: 0.65rem;">Missing</span>`;
+    // The recording is already in the library on a DIFFERENT album. It is still
+    // missing here, so this annotates rather than hides: without it the row
+    // reads as "why is this missing, I own that song?".
+    const ownedOnAlbum = String(trackComp.owned_on_album || '').trim();
+    const ownedBadge = ownedOnAlbum
+        ? `<span class="badge bg-secondary-subtle text-secondary-emphasis ms-2"`
+            + ` style="font-size: 0.65rem;" title="The file for this recording is already in your library on: ${escapeHtml(ownedOnAlbum)}">`
+            + `<i class="bi bi-collection me-1"></i>on ${escapeHtml(ownedOnAlbum)}</span>`
+        : '';
     const addTitle = isQueued
         ? `Already in the download queue (${escapeHtml(queueStatus)})`
         : 'Add to download queue';
@@ -1345,6 +1354,7 @@ function _buildMissingTrackRow(trackComp, data) {
             ${safeTitle}
             ${showArtist ? `<small class="text-muted ms-1">— ${escapeHtml(trackArtist)}</small>` : ''}
             ${missingBadge}
+            ${ownedBadge}
         </td>
         <td class="text-center text-muted small fst-italic">${shownDuration}</td>
         <td class="text-center text-warning"><span class="text-muted">—</span></td>
@@ -1725,6 +1735,10 @@ function _missingRowToTrackComp(row) {
         // An undelivered queue row: the track IS listed, it is just not
         // offered for download a second time.
         queue_status: row.queue_status || '',
+        // The same recording already exists in the library on ANOTHER album.
+        // It is still missing from THIS one, so the row stays — this only tells
+        // the user where the copy they already own lives.
+        owned_on_album: row.owned_on_album || '',
     };
 }
 
@@ -1877,14 +1891,19 @@ window.loadAlbumDuplicateFlags = function () {
         .then(data => {
             tbody.querySelectorAll('.album-duplicate-badge').forEach(b => b.remove());
             const counts = new Map();
+            // track_id -> recommendation for its group.
+            const recs = new Map();
             ((data && data.duplicates) || []).forEach(group => {
+                const rec = group.recommendation || {};
                 (group.track_ids || []).forEach(id => {
                     counts.set(String(id), Number(group.count) || 0);
+                    recs.set(String(id), rec);
                 });
             });
             if (!counts.size) return;
             tbody.querySelectorAll('tr[data-track-id]').forEach(row => {
-                const count = counts.get(String(row.getAttribute('data-track-id') || ''));
+                const trackId = String(row.getAttribute('data-track-id') || '');
+                const count = counts.get(trackId);
                 if (!count) return;
                 const titleCell = row.cells && row.cells[1];
                 if (!titleCell) return;
@@ -1897,6 +1916,28 @@ window.loadAlbumDuplicateFlags = function () {
                 const anchor = titleCell.querySelector('a');
                 if (anchor) anchor.insertAdjacentElement('afterend', badge);
                 else titleCell.insertAdjacentElement('afterbegin', badge);
+
+                // ⭐ WHICH copy to keep. Advisory only — nothing is deleted, and
+                // the user still decides. A badge that only says "×2" makes them
+                // compare durations and tags by eye.
+                const rec = recs.get(trackId) || {};
+                const keepId = String(rec.keep_track_id || '');
+                const confidence = String(rec.confidence || '');
+                if (keepId && keepId === trackId) {
+                    const keep = document.createElement('span');
+                    keep.className = 'badge bg-success ms-1 album-duplicate-keep';
+                    keep.style.fontSize = '0.65rem';
+                    keep.textContent = 'Suggested keep';
+                    keep.title = rec.reason || 'This copy looks better.';
+                    badge.insertAdjacentElement('afterend', keep);
+                } else if (keepId) {
+                    // This is the copy the recommendation would drop. Marked
+                    // with a WRENCH, not an error: it is a suggestion, and the
+                    // file is still on disk.
+                    row.classList.add('album-duplicate-drop');
+                    badge.title += ' — the other copy is suggested to keep: '
+                        + (rec.reason || '');
+                }
             });
         })
         .catch(err => console.warn('Could not flag duplicate tracks:', err));

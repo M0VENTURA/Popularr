@@ -625,8 +625,15 @@ _SAFE_SPLIT = re.compile(r"[;|\\]+")
 #: only split when the WHOLE value failed to match anything.
 _UNSAFE_SPLIT = re.compile(r"[/&]+")
 
+#: ``", "`` is how this codebase WRITES a genre list into a TEXT column
+#: (``", ".join(genres)`` in the album blend, the VA sync and the genre resync).
+#: A comma is therefore a separator too — but only once the whole value has
+#: failed to match, because it is the one delimiter a real genre name never
+#: contains and the last resort is already "this is a list".
+_COMMA_SPLIT = re.compile(r"\s*,\s*")
+
 #: A serialized array (``['Doom Metal', 'Rock']``). Inside one, commas ARE
-#: separators — that is the only context where splitting on ``,`` is safe.
+#: separators — that is one context where splitting on ``,`` is safe outright.
 _ARRAY_LIKE = re.compile(r"^\s*[\[{]")
 _ALL_SPLIT = re.compile(r"[,;|\\/]+")
 _STRIP_CHARS = " \t\r\n[]{}'\"\u2018\u2019\u201c\u201d"
@@ -700,6 +707,17 @@ def tokenize_values(raw: Any, vocab: "Vocabulary") -> list[str]:
             parts = _SAFE_SPLIT.split(text)
             if len(parts) == 1:
                 parts = _UNSAFE_SPLIT.split(text)
+            if len(parts) == 1:
+                # ⚠️ LAST RESORT, and it must come AFTER ``/`` and ``&``.
+                #
+                # A comma is how a genre LIST is stored in ``tracks.genres``
+                # and every provider column (``", ".join(...)``), but it is
+                # never inside a single genre name. Without this step the
+                # whole comma-joined string was classified as ONE unknown
+                # token, so the selector saw NO candidates and returned an
+                # empty list — every such track was skipped by the resync
+                # ("0 changed") and kept whatever stale genres it had.
+                parts = _COMMA_SPLIT.split(text)
 
         for part in parts:
             cleaned = part.strip(_STRIP_CHARS)

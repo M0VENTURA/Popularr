@@ -464,14 +464,30 @@ def _resolve_mb_release(tracks: list[dict[str, Any]]) -> tuple[str, dict[tuple[i
 
 
 def _is_perfect_match(tracks: list[dict[str, Any]], mb_index: dict[Any, Any], mb_count: int) -> bool:
+    """Every position this album holds exists on the release, with nothing extra.
+
+    ⚠️ THE COUNT COMPARISON IS OVER DISTINCT POSITIONS, NOT ROWS.
+
+    A double download puts two ROWS on one album for the same ``(disc, track)``
+    position. ``len(tracks) == mb_count`` then failed by exactly the number of
+    duplicates, so a perfectly-matching album was never treated as perfect — and
+    the MusicBrainz identity tags (recording / release / release-group ids) are
+    only written when the tracklist matches perfectly. The album therefore kept
+    missing IDs, which is one of the ways a duplicate made the album look wrong.
+
+    Two genuinely different songs at different positions still count separately,
+    and a stray EXTRA position still fails the check.
+    """
     if not mb_index or mb_count <= 0 or not tracks:
         return False
+    seen_positions: set[tuple[int, int]] = set()
     for t in tracks:
         disc = _num(t.get("disc_number"), 1)
         tn = _num(t.get("track_number"), 0)
         if tn <= 0 or (disc, tn) not in mb_index:
             return False
-    return len(tracks) == mb_count
+        seen_positions.add((disc, tn))
+    return len(seen_positions) == mb_count
 
 
 # ---------------------------------------------------------------------------

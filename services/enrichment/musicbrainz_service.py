@@ -2589,15 +2589,37 @@ def get_release_group_releases(release_group_mbid: str, include_track_counts: bo
 
 
 def _get_local_track_count(artist: str, album: str) -> int:
+    """How many DISTINCT tracks this album holds — duplicates counted ONCE.
+
+    ⚠️ A plain ``COUNT(*)`` counts ROWS, and a double download puts two rows on
+    one album. This number feeds the "does the stored release still match this
+    album?" guard below, which rejects a release when the local and MusicBrainz
+    counts differ by >= 4 — so one duplicated track inflated the local count and
+    could push a correct release past that threshold. The album then lost its
+    release identity, and the missing-track comparison ran against the wrong
+    release (or none), which is the reported "a duplicate makes it find extra
+    tracks as missing".
+
+    Distinctness is keyed on the same identity the duplicate detector uses:
+    title + track artist + disc/track position. Two genuinely different songs
+    keep their own row, so this does not merge real tracks.
+    """
     try:
         from db.engine import db_session
         from sqlalchemy import text
         with db_session() as session:
             row = session.execute(
                 text(
-                    "SELECT COUNT(*) FROM tracks "
-                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                    "AND LOWER(COALESCE(album, '')) = LOWER(:album)"
+                    "SELECT COUNT(*) FROM ("
+                    "  SELECT DISTINCT "
+                    "    LOWER(TRIM(COALESCE(title, ''))), "
+                    "    LOWER(TRIM(COALESCE(artist, ''))), "
+                    "    COALESCE(TRIM(CAST(disc_number AS TEXT)), ''), "
+                    "    COALESCE(TRIM(CAST(track_number AS TEXT)), '') "
+                    "  FROM tracks "
+                    "  WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "    AND LOWER(COALESCE(album, '')) = LOWER(:album)"
+                    ") AS distinct_tracks"
                 ),
                 {"artist": artist, "album": album},
             ).fetchone()
