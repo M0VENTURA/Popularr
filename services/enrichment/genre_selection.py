@@ -714,20 +714,40 @@ def apply_metal_over_rock_policy(
 
     removed: list[dict[str, Any]] = []
 
+    # ⚠️ THE COMPANIONS BELONG TO THE CROSSOVER METAL GENRES, NOT TO EVERY METAL.
+    #
+    # They used to apply ONLY when Nu Metal was the sole metal genre: adding
+    # ``Alternative Metal`` switched the exemption off, so ``Hard Rock`` was kept
+    # beside Nu Metal but deleted beside Alternative Metal. The collection
+    # reported that asymmetry directly — "other than Nu Metal and Hard Rock, most
+    # other rock genres wouldn't cross over with Alternative Metal" — and there is
+    # no musical reason for it.
+    #
+    # ⚠️ BUT WIDENING IT TO ALL METAL WOULD BE A REGRESSION. ``Death Metal`` and
+    # ``Thrash Metal`` must still suppress ``Alternative Rock``: that is the
+    # policy working as intended, not a crossover. So the exemption is scoped to
+    # the metal genres that ARE hybrids — Nu Metal (metal/rock) and Alternative
+    # Metal (metal/alternative rock).
+    _CROSSOVER_METAL = frozenset({NU_METAL_ID, "alternative_metal"})
+    _metal_is_crossover = bool(metal_ids & _CROSSOVER_METAL)
+
+    permitted = (
+        frozenset(settings.nu_metal_rock_companions)
+        if _metal_is_crossover and settings.nu_metal_exception
+        else frozenset()
+    )
+
     if non_nu_metal:
         # Strongest metal genre names the trigger, so the reason explains which
         # genre actually won the conflict.
         trigger = max(non_nu_metal, key=lambda c: (c.confidence, c.score)).display
-        permitted = frozenset()
         reason = REASON_ROCK_SUPPRESSED_BY_METAL
     elif NU_METAL_ID in metal_ids and settings.nu_metal_exception:
         trigger = next(c.display for c in metal if c.genre_id == NU_METAL_ID)
-        permitted = frozenset(settings.nu_metal_rock_companions)
         reason = REASON_ROCK_NOT_ALLOWED_BY_NU_METAL
     else:
         # Only Nu Metal, but the exception is switched off: the policy applies.
         trigger = next(c.display for c in metal if c.genre_id == NU_METAL_ID)
-        permitted = frozenset()
         reason = REASON_ROCK_SUPPRESSED_BY_METAL
 
     drop: set[str] = set()

@@ -147,6 +147,78 @@ class TestCrossFamilyAbsorptionUsesTheName:
         assert "Pop" in result, result
 
 
+class TestCrossoverGenresAreRecognised:
+    """REPORTED — "other than Nu Metal and Hard Rock, most other rock genres
+    wouldn't cross over with Alternative Metal".
+
+    Two gaps, both confirmed against the real vocabulary:
+
+    * ``rap metal`` / ``rapcore`` / ``rap rock`` were NOT in the vocabulary at
+      all. A Rage Against the Machine track — whose defining tag is exactly that
+      hybrid — had the tag silently discarded as "unknown", leaving only Funk
+      Metal and Alternative Metal.
+    * ``Hard Rock`` was kept beside Nu Metal and DELETED beside Alternative
+      Metal, because the companions only applied when Nu Metal was the sole
+      metal genre.
+    """
+
+    @pytest.mark.parametrize(
+        "value", ["rap metal", "rapcore", "rap rock", "rap-metal", "rap-rock"]
+    )
+    def test_rap_metal_is_a_recognised_genre(self, value) -> None:
+        vocab = get_vocabulary()
+        classification = vocab.classify(value)
+        assert classification.kind == "genre", (
+            f"{value!r} is discarded as unknown, so the tag is silently lost"
+        )
+        assert classification.canonical == "rap_metal"
+
+    def test_rap_metal_is_metal_family(self) -> None:
+        vocab = get_vocabulary()
+        entry = vocab.genres["rap_metal"]
+        assert (entry.family or "") == "metal"
+        # And it descends from both parents, so neither side is lost.
+        ancestors = entry.ancestors(vocab.genres)
+        assert "metal" in ancestors
+        assert "hip_hop" in ancestors
+
+    def test_a_ratm_style_track_keeps_its_rap_metal_tag(self) -> None:
+        """THE REPORT — the hybrid tag must survive, not be dropped."""
+        result = select({
+            "lastfm@track": ["rap metal", "funk metal", "alternative metal", "rock"],
+            "musicbrainz@track": ["rap metal", "funk metal", "alternative metal"],
+            "discogs@track": ["Rock", "Funk Metal"],
+        })
+        assert "Rap Metal" in result, (
+            f"the defining hybrid tag was lost: {result}"
+        )
+
+    def test_hard_rock_survives_beside_alternative_metal(self) -> None:
+        """The asymmetry: kept beside Nu Metal, deleted beside Alt Metal."""
+        result = select({
+            "musicbrainz@track": ["alternative metal", "hard rock"],
+            "lastfm@track": ["alternative metal", "hard rock"],
+            "listenbrainz@track": ["alternative metal", "hard rock"],
+        })
+        assert "Hard Rock" in result, result
+
+    @pytest.mark.parametrize("metal", ["death metal", "thrash metal", "heavy metal"])
+    def test_a_non_crossover_metal_still_suppresses_rock(self, metal) -> None:
+        """--- CONTROL ---
+
+        Widening the companions must NOT disable the policy. These three are not
+        hybrids, so Alternative Rock still goes.
+        """
+        result = select({
+            "musicbrainz@track": [metal, "alternative rock"],
+            "lastfm@track": [metal, "alternative rock"],
+            "listenbrainz@track": [metal, "alternative rock"],
+        })
+        assert "Alternative Rock" not in result, (
+            f"{metal} stopped suppressing rock, so the policy is switched off: {result}"
+        )
+
+
 class TestTheReportedTracks:
     def test_ratm_down_radio_does_not_keep_three_rock_and_metal_tags(self) -> None:
         """THE REPORT — "Alternative Metal, Alternative Rock and Math Rock"."""

@@ -171,15 +171,51 @@ class TestTheNuMetalException:
         removed = _reasons(result)
         assert removed["alternative_rock"]["reason"] == gs.REASON_LOW_CONFIDENCE
 
-    def test_a_second_metal_genre_cancels_the_exception(self) -> None:
-        """``Alternative Metal`` is NOT Nu Metal, so rock is suppressed again."""
+    def test_alternative_metal_keeps_hard_rock(self) -> None:
+        """``Alternative Metal`` IS a crossover, so it keeps the companions too.
+
+        ⚠️ THIS TEST USED TO ASSERT THE OPPOSITE — that adding Alternative Metal
+        beside Nu Metal cancelled the exemption and deleted Hard Rock. The
+        collection reported that asymmetry: "other than Nu Metal and Hard Rock,
+        most other rock genres wouldn't cross over with Alternative Metal."
+
+        Hard Rock crosses over with BOTH, so the companions now apply to either.
+        What must NOT change is that a non-crossover metal genre (thrash, death,
+        heavy) still suppresses rock — asserted in the next test.
+
+        ⚠️ Hard Rock is given EQUAL evidence here, deliberately. With only ONE
+        source it falls under the family-outlier floor (below 30% of the metal
+        family) and is removed by that rule instead — a different, correct rule
+        that has nothing to do with the crossover policy. Same convention as
+        ``test_nu_metal_keeps_both_approved_companions_when_both_are_supported``.
+        """
         result = select({
-            "musicbrainz@track": ["nu metal", "alternative metal", "hard rock"],
-            "lastfm@track": ["nu metal", "alternative metal", "hard rock"],
-            "listenbrainz@track": ["nu metal", "alternative metal"],
+            "musicbrainz@track": ["alternative metal", "hard rock"],
+            "lastfm@track": ["alternative metal", "hard rock"],
+            "listenbrainz@track": ["alternative metal", "hard rock"],
         })
         assert "Alternative Metal" in result, result
-        assert "Hard Rock" not in result, result
+        assert "Hard Rock" in result, result
+
+    def test_a_genuinely_non_crossover_metal_suppresses_the_companions(self) -> None:
+        """Death/Thrash/Heavy Metal are not hybrids: rock still goes.
+
+        Without this scoping, widening the companions to "any metal genre"
+        would let a death-metal track keep Alternative Rock — the policy
+        silently switched off for most of the library.
+        """
+        for metal in ("death metal", "thrash metal", "heavy metal"):
+            result = select({
+                "musicbrainz@track": [metal, "alternative rock"],
+                "lastfm@track": [metal, "alternative rock"],
+                "listenbrainz@track": [metal, "alternative rock"],
+            })
+            assert metal.title() in result or any(
+                metal.split()[0].title() in g for g in result
+            ), result
+            assert "Alternative Rock" not in result, (
+                f"{metal} must still suppress Alternative Rock: {result}"
+            )
 
     def test_a_non_approved_rock_genre_is_still_removed(self) -> None:
         """The exception is a SHORT list, not every rock genre."""

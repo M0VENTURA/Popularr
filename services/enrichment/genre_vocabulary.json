@@ -256,6 +256,7 @@
     {"id": "euro_house", "display": "Euro House", "parent": "house", "specificity": 2, "aliases": ["euro-house"]},
     {"id": "pop_rap", "display": "Pop Rap", "parent": "hip_hop", "specificity": 2, "aliases": ["pop-rap"]},
     {"id": "funk_metal", "display": "Funk Metal", "parents": ["metal", "funk"], "specificity": 2, "family": "metal", "aliases": ["funk-metal"]},
+    {"id": "rap_metal", "display": "Rap Metal", "parents": ["metal", "hip_hop"], "specificity": 2, "family": "metal", "aliases": ["rap-metal", "rapcore", "rap rock", "rap-rock"]},
     {"id": "sea_shanties", "display": "Sea Shanties", "parent": "folk", "specificity": 2, "aliases": ["sea shanty", "shanty", "shanties"]}
   ],
 

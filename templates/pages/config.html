@@ -3076,9 +3076,9 @@
           </div>
         </div>
         <div class="col-12 col-md-6">
-          <label class="form-label form-label-sm" for="genre_selection_nu_companions">Nu Metal Rock Companions</label>
+          <label class="form-label form-label-sm" for="genre_selection_nu_companions">Crossover Metal Rock Companions</label>
           <input type="text" class="form-control form-control-sm" id="genre_selection_nu_companions" placeholder="hard_rock, alternative_rock" value="{{ (config.get('genres', {}).get('selection', {}).get('nu_metal_rock_companions') or ['hard_rock', 'alternative_rock'])|join(', ') }}">
-          <small class="form-text text-muted">Comma-separated genre ids kept beside Nu Metal. Deliberately short — adding every rock genre would let the exception swallow the policy. Default: <strong>hard_rock, alternative_rock</strong></small>
+          <small class="form-text text-muted">Comma-separated genre ids kept beside a CROSSOVER metal genre (Nu Metal, Alternative Metal). Death, Thrash and Heavy Metal still suppress rock. Deliberately short — adding every rock genre would let the exception swallow the policy. Default: <strong>hard_rock, alternative_rock</strong></small>
         </div>
       </div>
 
