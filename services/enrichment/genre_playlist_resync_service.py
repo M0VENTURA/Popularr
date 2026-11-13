@@ -252,27 +252,40 @@ def _plan_playlists(proposed_by_id: dict[str, str] | None = None) -> dict[str, l
     return plan
 
 
-def _server_playlists() -> dict[str, list[str]]:
-    """Current ordered contents of every Popularr-managed playlist, by name.
+def _server_playlists(
+    only: set[str] | None = None,
+) -> tuple[dict[str, list[str]], dict[str, int]]:
+    """Current playlist contents, plus every playlist's declared size.
 
-    One listing call plus one content fetch per playlist. A playlist whose
-    contents cannot be read is OMITTED rather than assumed empty, so an
-    unreadable playlist never shows up as "everything would be removed".
+    Returns ``(contents_by_name, count_by_name)``.
 
-    ⚠️ DELIBERATELY NOT ``finalise_stage._navidrome_clients``.
+    ⚠️ CONTENTS ARE FETCHED ONLY FOR ``only`` — THE PLAYLISTS BEING COMPARED.
 
-    That factory is a PLAYLIST-ONLY scope guard: it collapses to one client per
-    SERVER, which is correct for playlist writes (server-scoped) but would
-    silently stop a second account syncing anything per-USER. A test pins its
-    caller set to ``finalise_stage.py`` alone. A read-only comparison does not
-    need that dedupe, so it builds one plain client from the configured account
-    rather than widening the guard.
+    This used to read EVERY playlist on the server, one ``getPlaylist`` at a
+    time. On a 659-playlist library that is 659 serial full-content reads, and it
+    measurably flooded Navidrome: the log showed the preview's reads timing out,
+    two consecutive timeouts opening the client's 60s HOST COOLDOWN, and that
+    cooldown then failing the unrelated playlist index ("host cooldown opened —
+    failing fast for 60s: 2 consecutive requests to 192.168.1.200 failed"). A
+    preview only ever diffs the genre playlists it plans to write, so the other
+    ~595 reads were pure load with no answer attached.
+
+    The LISTING already carries ``songCount``, so existence and size — all the
+    "is it new?" and "does it have tracks?" questions — cost nothing extra. Only
+    the ordered song IDs need the per-playlist call, and only for ``only``. Pass
+    ``only=None`` to fetch everything (nothing needs that today; it exists so a
+    caller cannot accidentally get a half-populated map by forgetting the arg).
+
+    A playlist whose contents cannot be read is OMITTED from ``contents`` rather
+    than assumed empty, so an unreadable playlist never shows up as "everything
+    would be removed".
     """
     from services.playlists.playlist_navidrome_service import (
         _current_song_ids,
     )
 
-    out: dict[str, list[str]] = {}
+    contents: dict[str, list[str]] = {}
+    counts: dict[str, int] = {}
     try:
         from api_clients.navidrome import NavidromeClient
         from helpers.config_helpers import get_navidrome_users_normalized
@@ -283,10 +296,10 @@ def _server_playlists() -> dict[str, list[str]]:
         ]
     except Exception as exc:
         logger.debug("Genre/playlist resync: Navidrome is not configured", error=str(exc))
-        return out
+        return contents, counts
 
     if not users:
-        return out
+        return contents, counts
 
     # ONE account is enough: playlist contents are server-scoped, so a second
     # account would return the same lists.
@@ -299,23 +312,33 @@ def _server_playlists() -> dict[str, list[str]]:
         )
     except Exception as exc:
         logger.debug("Genre/playlist resync: client build failed", error=str(exc))
-        return out
+        return contents, counts
 
     try:
         listings = client.fetch_all_playlists() or []
     except Exception as exc:
         logger.debug("Genre/playlist resync: playlist listing failed", error=str(exc))
-        return out
+        return contents, counts
 
     for entry in listings:
         name = str(entry.get("name") or "").strip()
-        if not name or name in out:
+        if not name:
             continue
+        try:
+            counts[name] = int(entry.get("songCount") or 0)
+        except (TypeError, ValueError):
+            counts[name] = 0
+
+        if only is not None and name not in only:
+            # Existence and size came free from the listing; the contents are
+            # only needed by the diff, and this playlist is not in it.
+            continue
+
         ids = _current_song_ids(client, str(entry.get("id") or ""))
         if ids is None:
             continue
-        out[name] = list(ids)
-    return out
+        contents[name] = list(ids)
+    return contents, counts
 
 
 def _diff(after: list[str], before: list[str]) -> dict[str, Any]:
@@ -413,7 +436,13 @@ def preview_genre_playlist_resync(
 
     _frame(80.0, PHASE_PLAYLISTS, "Comparing playlists with Navidrome…")
 
-    current = _server_playlists()
+    # ⚠️ ONLY THE PLANNED PLAYLISTS NEED THEIR CONTENTS READ.
+    #
+    # The listing carries every playlist's ``songCount`` for free, so "does this
+    # exist?" and "does it have tracks?" never need a getPlaylist call. Reading
+    # all 659 playlists serially is what flooded Navidrome and tripped the
+    # client's host cooldown, which then broke the unrelated playlist index.
+    current, server_counts = _server_playlists(only=set(planned))
 
     playlist_changes: list[dict[str, Any]] = []
     totals = {
@@ -425,8 +454,26 @@ def preview_genre_playlist_resync(
     }
 
     for name, after in sorted(planned.items()):
+        # ⚠️ "COULD NOT READ" IS NOT "EMPTY" AND NOT "MISSING".
+        #
+        # Only the planned playlists have their contents read, so absence from
+        # ``current`` now means one of two very different things: the playlist
+        # does not EXIST (a genuine create) or it exists but its contents timed
+        # out. The listing's ``songCount`` separates them. Treating a read
+        # failure as "new" would predict a create over a populated playlist;
+        # treating it as "empty" would report every track as a gain.
+        exists = name in server_counts
+        readable = name in current
+        if exists and not readable:
+            logger.debug(
+                "Genre/playlist resync preview: playlist contents unreadable, "
+                "not compared",
+                playlist=name, song_count=server_counts.get(name),
+            )
+            continue
+
         before = current.get(name, [])
-        is_new = name not in current
+        is_new = not exists
         is_clear = not after
         delta = _diff(after, before)
         if not is_new and not delta["added"] and not delta["removed"]:
@@ -445,11 +492,15 @@ def preview_genre_playlist_resync(
             {"name": name, "is_new": is_new, "is_clear": is_clear, **delta}
         )
 
-    # A playlist that EXISTS on the server and has tracks, but is not in the
+    # A playlist that EXISTS on the server and holds tracks, but is not in the
     # plan at all, is one this pass would stop managing. Reported separately:
     # the apply does not delete it (the orphan sweep owns deletion).
+    #
+    # Decided from ``server_counts`` — the listing — because unplanned playlists
+    # deliberately have no contents fetched.
     unmanaged = sorted(
-        name for name in current if name not in planned and current[name]
+        name for name, count in server_counts.items()
+        if name not in planned and count > 0
     )
 
     elapsed = round(time.monotonic() - started, 2)

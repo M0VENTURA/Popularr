@@ -142,7 +142,7 @@ class TestPreviewWritesNothing:
                                   "after": "Alternative Metal"},
                              ]},
         )
-        monkeypatch.setattr(svc, "_server_playlists", lambda: {})
+        monkeypatch.setattr(svc, "_server_playlists", lambda only=None: ({}, {}))
 
         svc.preview_genre_playlist_resync()
 
@@ -352,6 +352,48 @@ class TestThePreviewRunsInTheBackground:
             )
 
 
+class TestTheServerReadIsScoped:
+    """Reading every playlist flooded Navidrome and broke an unrelated job.
+
+    REPORTED (log)
+
+        WARNING api_clients.navidrome  getPlaylist failed ... timed out
+        WARNING api_clients.http_utils  host cooldown opened — failing fast for
+            60s: 2 consecutive requests to 192.168.1.200 failed (ReadTimeout)
+        INFO services.playlists.playlist_index_service  Playlist index synced
+            playlists=659 ... unresolved=12534
+
+    The preview read the contents of EVERY playlist to diff one at a time. On a
+    659-playlist library that is 659 serial ``getPlaylist`` calls; the two
+    timeouts it produced opened the client's host cooldown, and the cooldown then
+    failed the playlist index that was running beside it. The listing already
+    reports ``songCount``, so only the playlists actually being compared need
+    their contents read.
+    """
+
+    def test_only_the_compared_playlists_are_read(self) -> None:
+        src = inspect.getsource(svc._server_playlists)
+        assert "only" in inspect.signature(svc._server_playlists).parameters, (
+            "the read is unscoped, so a preview walks every playlist on the server"
+        )
+        assert "name not in only" in src, (
+            "the contents fetch must skip playlists that are not being compared"
+        )
+
+    def test_the_listing_supplies_the_size(self) -> None:
+        """``songCount`` answers existence/size without a getPlaylist call."""
+        src = inspect.getsource(svc._server_playlists)
+        assert "songCount" in src
+
+    def test_an_unreadable_playlist_is_not_reported_as_new_or_empty(self) -> None:
+        """THE INVARIANT. Unreadable is neither "missing" nor "empty"."""
+        src = inspect.getsource(svc.preview_genre_playlist_resync)
+        assert "server_counts" in src, (
+            "the preview cannot tell 'does not exist' from 'could not read', so "
+            "a timeout is predicted as a create or as all-gains"
+        )
+
+
 class TestTheJobIsVisible:
     def test_the_scan_type_is_in_the_progress_allow_list(self) -> None:
         from services.scanning.pipelines.progress_service import SCAN_TYPES
@@ -427,5 +469,6 @@ def builder_spy(monkeypatch):
                         lambda dry_run: {"ok": True, "changed": 0, "tracks": 2,
                                          "with_evidence": 2, "changed_tracks": []})
     monkeypatch.setattr(svc, "_server_playlists",
-                        lambda: {"Alternative Rock - Top Tracks": ["t1"]})
+                        lambda only=None: ({"Alternative Rock - Top Tracks": ["t1"]},
+                                           {"Alternative Rock - Top Tracks": 1}))
     return spy
