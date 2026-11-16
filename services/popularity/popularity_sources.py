@@ -553,6 +553,189 @@ def _position_title_corroborates(local_title: str, release_title: str) -> bool:
     return bool(titles_match_for_review(left, right))
 
 
+#: Minimum token-set similarity between the LOCAL title and the release title
+#: before the scan may rename the file on its own.
+#:
+#: This is the "similar, but not the same" band: the release has added or
+#: reworded something ("Members Only Suite: iii. Mike Bray (Don't Drink the
+#: Water)" beside "Mike Bray (Don't Drink The Water)"), yet the two still clearly
+#: name the same recording. Below this they are different songs and a rename must
+#: be a human decision.
+TITLE_RENAME_MIN_SIMILARITY = 0.60
+
+
+def _typography_key(value: Any) -> str:
+    """Fold typography only — keep every word.
+
+    Case, curly quotes/apostrophes, dashes and extra whitespace are all
+    variations of the SAME title, so they must not count as a difference. A
+    parenthetical, a version marker or any other WORD is preserved, because for
+    a rename those words are the evidence the two recordings differ.
+    """
+    text_value = str(value or "").strip()
+    if not text_value:
+        return ""
+    # Curly quotes -> straight, then drop the apostrophe entirely (``it's`` and
+    # ``its`` are the same title for structural purposes; the difference is
+    # typography, not wording).
+    for curly, plain in (
+        ("\u2019", "'"), ("\u2018", "'"),
+        ("\u201c", '"'), ("\u201d", '"'),
+        ("\u2013", "-"), ("\u2014", "-"), ("\u2212", "-"),
+    ):
+        text_value = text_value.replace(curly, plain)
+    text_value = text_value.replace("'", "")
+    text_value = re.sub(r"\s+", " ", text_value)
+    return text_value.casefold().strip()
+
+
+def _symmetric_title_ratio(left: str, right: str) -> float:
+    """Similarity on 0-1 where BOTH sides must agree, not just one.
+
+    Deliberately not the shared ``fuzzy_match_score``: that is
+    ``token_set_ratio``, which reports 1.0 when one string's tokens are a subset
+    of the other's — right for "does this search result match", wrong for "may I
+    rewrite this file's title".
+
+    ``token_sort_ratio`` is symmetric and length-sensitive: it sorts the words
+    (so word order does not matter) and compares the FULL sorted strings, so
+    "song" vs "a completely different song" scores ~0.4 rather than 1.0, while
+    "mike bray" vs "members only suite iii mike bray" still scores well above the
+    floor because most of the characters are shared in order.
+
+    Falls back to ``difflib`` when RapidFuzz is unavailable, matching the
+    behaviour of the other matchers in this codebase.
+    """
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    try:
+        from rapidfuzz import fuzz as _fuzz  # type: ignore[import-untyped]
+
+        return float(_fuzz.token_sort_ratio(left, right)) / 100.0
+    except Exception:
+        import difflib
+
+        left_words = " ".join(sorted(left.split()))
+        right_words = " ".join(sorted(right.split()))
+        return difflib.SequenceMatcher(None, left_words, right_words).ratio()
+
+
+def _title_rename_confidence(
+    local_title: str,
+    release_title: str,
+    *,
+    local_duration: Any = None,
+    release_length_ms: Any = None,
+    local_disc: Any = None,
+    local_position: Any = None,
+    release_disc: Any = None,
+    release_position: Any = None,
+    file_path: str = "",
+) -> dict[str, Any]:
+    """Should the scan rename this row to *release_title* on its own?
+
+    A rename is only safe when the row is ALREADY known to be the right
+    recording. The request set the bar as "similar track length, track number,
+    and the file name should have a similarity" — all three must hold, because
+    each covers a different way of being wrong:
+
+    * **position** (disc + track number) — a same-titled track in a different
+      slot is a different row of the release. Nothing else distinguishes two
+      identically named tracks on one album, so this is a hard gate.
+    * **length** — the strongest evidence that this is the same RECORDING
+      rather than a different version of the song. A medley movement and its
+      standalone edit can share a title and differ by a minute.
+    * **title similarity** — the name must already be recognisably the same.
+      This is what stops a rename standing in for a genuine mis-match: if the
+      two titles share nothing, the file probably holds a different track and
+      renaming it would MASK that.
+
+    ⚠️ LENGTH AND POSITION ARE GATED HERE, NOT SCORED. A partial match does not
+    "add up" to permission — a wrong length with a right position is exactly the
+    case (a live take filed under the studio track number) that must be left to
+    the user.
+
+    Returns ``{"ok": bool, "reason": str, "similarity": float,
+    "length_delta": float | None}`` so the caller can log WHY a rename was or was
+    not taken, and the review can show it.
+    """
+    local = str(local_title or "").strip()
+    release = str(release_title or "").strip()
+    if not local or not release:
+        return {"ok": False, "reason": "missing_title", "similarity": 0.0,
+                "length_delta": None}
+    if local.casefold() == release.casefold():
+        return {"ok": False, "reason": "identical", "similarity": 1.0,
+                "length_delta": None}
+
+    # ── Position ───────────────────────────────────────────────────────────
+    # Absent on either side means "no evidence", which is not proof of a
+    # mismatch — an untagged file still deserves the other two gates.
+    def _num(value: Any) -> int | None:
+        try:
+            number = int(str(value).split("/")[0].strip())
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    l_pos, r_pos = _num(local_position), _num(release_position)
+    l_disc, r_disc = _num(local_disc) or 1, _num(release_disc) or 1
+    if l_pos is not None and r_pos is not None and l_pos != r_pos:
+        return {"ok": False, "reason": "track_number_differs", "similarity": 0.0,
+                "length_delta": None}
+    if l_pos is not None and r_pos is not None and l_disc != r_disc:
+        return {"ok": False, "reason": "disc_differs", "similarity": 0.0,
+                "length_delta": None}
+
+    # ── Length ─────────────────────────────────────────────────────────────
+    length_delta: float | None = None
+    try:
+        local_seconds = float(local_duration) if local_duration is not None else None
+    except (TypeError, ValueError):
+        local_seconds = None
+    try:
+        release_seconds = (
+            float(release_length_ms) / 1000.0 if release_length_ms is not None else None
+        )
+    except (TypeError, ValueError):
+        release_seconds = None
+    if local_seconds and release_seconds:
+        from services.enrichment.musicbrainz_service import length_tolerance_seconds
+
+        length_delta = abs(local_seconds - release_seconds)
+        if length_delta > length_tolerance_seconds():
+            return {"ok": False, "reason": "length_differs",
+                    "similarity": 0.0, "length_delta": length_delta}
+
+    # ── Title similarity ───────────────────────────────────────────────────
+    # ⚠️ BOTH SHARED NORMALISERS ARE UNSUITABLE HERE, AND THAT IS THE POINT.
+    #
+    # ``normalize_title_for_lookup`` passes ``remove_brackets=True`` and deletes
+    # the parenthetical entirely: "Song (Bonus Track)" and "Song" both become
+    # "song". ``normalize_title_for_compare`` deletes PERFORMANCE markers too:
+    # "Intro (Live at Wembley)" becomes "intro".
+    #
+    # Both are right for asking "are these the same song?" — a live take and a
+    # studio take ARE the same song. They are exactly wrong for asking "may I
+    # rewrite this file's title?", because the deleted part is the evidence that
+    # the two are DIFFERENT RECORDINGS. A rename that erases "(Live at Wembley)"
+    # destroys information rather than correcting it.
+    #
+    # So only typography is folded here (case, curly quotes, dashes); every word
+    # is kept on both sides and the ratio must be symmetric.
+    left = _typography_key(local)
+    right = _typography_key(release)
+    similarity = _symmetric_title_ratio(left, right)
+    if similarity < TITLE_RENAME_MIN_SIMILARITY:
+        return {"ok": False, "reason": "title_too_dissimilar",
+                "similarity": similarity, "length_delta": length_delta}
+
+    return {"ok": True, "reason": "confident", "similarity": similarity,
+            "length_delta": length_delta}
+
+
 def resolve_performance_title(local_title: str, release_title: str | None) -> str:
     """The title every provider must be QUERIED with for this row.
 

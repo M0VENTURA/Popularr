@@ -1599,77 +1599,25 @@ def get_playlist_shuffle_config() -> dict[str, Any]:
     }
 
 
-#: A track carrying a metal genre is left out of these playlists by default.
-#: The crossover case is the reason: a band filed under both "alternative rock"
-#: and "alternative metal" (Tool, Deftones, Manson, Slipknot) would otherwise
-#: take over the rock playlist, which is meant for rock/indie/grunge acts.
-DEFAULT_METAL_EXCLUDED_FROM: tuple[str, ...] = ("alternative rock",)
-
-
-def get_genre_exclusion_config() -> dict[str, Any]:
-    """Genre-playlist exclusion rules. Config section: ``playlists.genre_exclusions``.
-
-    Two independent rules, both about a track's genre identity rather than its
-    popularity:
-
-    * ``own_tags_win`` — judge a track on ITS OWN genre tags whenever it has
-      any, and consult the album-level blend (``tracks.genres``) only for a
-      track that has none of its own. This exists because ``genres`` is NOT a
-      per-track value on an ordinary album: ``sync_album_file_tags`` writes one
-      blended list to every row, so a Linkin Park album gives "Iridescent" the
-      same ``genres`` string as its nu-metal tracks. Without this, any
-      fallback-inherited tag moves a track between playlists.
-    * ``metal_excluded_from`` — a track whose genre set is metal may not enter
-      these playlists. This is the "keep Alternative Rock to rock/indie/grunge"
-      rule; the metal crossover belongs in the metal playlists.
-    * ``use_family_tiebreak`` — HOW "is this track metal?" is decided. ``False``
-      keeps the original substring test ("metal" anywhere in a token); ``True``
-      asks the genre vocabulary for the track's deciding FAMILY, ranking the
-      tokens by specificity then order.
-
-      Why the family test is the better default: grunge and nu metal are both
-      "not metal" and "metal" respectively by the vocabulary's own hierarchy,
-      where the substring test only ever asked whether the letters m-e-t-a-l
-      appeared. The reported case is Audioslave being kept out of Alternative
-      Rock: its most specific own genre is ``grunge`` (family rock), while a
-      metal tag sits further down the list — the substring test cannot tell that
-      from Tool, whose most specific genre IS metal.
-
-      The substring test is retained as the fallback for a token the vocabulary
-      does not know, so a brand-new subgenre spelling is still caught.
-
-    Default Values:
-        - enabled: True
-        - own_tags_win: True
-        - metal_excluded_from: ["alternative rock"]
-        - use_family_tiebreak: True
-    """
-    cfg = get_config() or {}
-    p = cfg.get("playlists") or {}
-    if not isinstance(p, dict):
-        p = {}
-    block = p.get("genre_exclusions")
-    if not isinstance(block, dict):
-        block = {}
-
-    raw_genres = block.get("metal_excluded_from", DEFAULT_METAL_EXCLUDED_FROM)
-    if isinstance(raw_genres, str):
-        raw_genres = [g for g in re.split(r"[,;/\\|]+", raw_genres)]
-    if not isinstance(raw_genres, (list, tuple)):
-        raw_genres = list(DEFAULT_METAL_EXCLUDED_FROM)
-
-    genres: list[str] = []
-    for genre in raw_genres:
-        name = str(genre or "").strip().lower()
-        if name and name not in genres:
-            genres.append(name)
-
-    return {
-        "enabled": bool(block.get("enabled", True)),
-        "own_tags_win": bool(block.get("own_tags_win", True)),
-        "metal_excluded_from": genres,
-        "use_family_tiebreak": bool(block.get("use_family_tiebreak", True)),
-    }
+#: ⚠️ REMOVED: ``get_genre_exclusion_config`` and ``DEFAULT_METAL_EXCLUDED_FROM``.
+#:
+#: The "Genre Exclusions" settings (config section
+#: ``playlists.genre_exclusions``) were removed at the collection's request.
+#:
+#: They judged a track's "identity" from its SOURCE columns
+#: (``_track_own_genre_tokens``: ``lastfm_tags``, ``musicbrainz_genres``, …) and
+#: never from the cleaned ``genres`` value — the same stale-source defect that
+#: had already been fixed for POOLING. Once Final Genres were arbitrated per
+#: track (rock/metal mutually exclusive), that made the feature:
+#:
+#:   1. REDUNDANT — a track whose final genres say "Alternative Metal" cannot
+#:      pool into "Alternative Rock" anyway, so nothing was left to exclude; and
+#:   2. HARMFUL — a track correctly tagged "Alternative Rock" but carrying a
+#:      stale "Nu Metal" source tag was judged metal and removed from the rock
+#:      playlist.
+#:
+#: Playlists now pool purely from Final Genres. An existing
+#: ``playlists.genre_exclusions`` block in config.yaml is ignored.
 
 
 #: Main genres a fresh installs' per-genre Great Covers playlists cover.
@@ -1755,9 +1703,11 @@ def get_playlists_config() -> dict[str, Any]:
     "Christmas - Top Tracks" / "Christmas Pop - Top Tracks" playlists exist
     while ordinary genre, Essential and New Music playlists stay seasonal-free.
 
-    NOTE: ``playlists.genre_exclusions`` is read separately by
-    ``get_genre_exclusion_config`` — it is a nested block, so it is not part of
-    this flat mapping.
+    NOTE: ``playlists.genre_exclusions`` is no longer read. The Genre Exclusions
+    feature was removed — playlists pool purely from Final Genres, which are
+    arbitrated per track so a rock and a metal classification never co-exist.
+    An old config.yaml may still carry the block; it is ignored and dropped on
+    the next save.
     """
     cfg = get_config() or {}
     p = cfg.get("playlists") or {}
@@ -1779,9 +1729,12 @@ def get_playlists_config() -> dict[str, Any]:
     except (TypeError, ValueError):
         _mood_max_tracks = 150
     try:
-        _max_per_artist = int(p.get("genre_playlists_max_per_artist", 25))
+        # 4, matching ``finalise_stage._resolve_max_per_artist`` and the Config
+        # page. The collection's rule is a 3-or-4 track cap; 25 was so high it
+        # behaved like "no cap".
+        _max_per_artist = int(p.get("genre_playlists_max_per_artist", 4))
     except (TypeError, ValueError):
-        _max_per_artist = 25
+        _max_per_artist = 4
     return {
         "essential_playlists_enabled": bool(p.get("essential_playlists_enabled", True)),
         "essential_max_tracks": max(1, int(p.get("essential_max_tracks", 50) or 50)),
@@ -2197,10 +2150,15 @@ def get_genre_aggregation_config() -> dict[str, Any]:
 
 #: Rock genres kept beside Nu Metal under the metal-over-rock policy.
 #:
-#: Deliberately a SHORT list: Nu Metal is a metal/rock hybrid, so stripping its
-#: rock companion would delete the crossover the tag names. Extending this to
+#: Deliberately a SHORT list: Nu Metal is a metal/rock hybrid, so stripping the
+#: genuine companion would delete the crossover the tag names. Extending this to
 #: every rock genre would make the exception swallow the policy.
-_DEFAULT_NU_METAL_COMPANIONS: tuple[str, ...] = ("hard_rock", "alternative_rock")
+#:
+#: ⚠️ ``alternative_rock`` WAS REMOVED — "Nu Metal should be able to be aligned
+#: with Hard Rock, but not Alternative Rock". Nu Metal descends from Alternative
+#: Rock, so pairing them restated one identity at two specificities instead of
+#: naming the crossover.
+_DEFAULT_NU_METAL_COMPANIONS: tuple[str, ...] = ("hard_rock",)
 
 
 def get_genre_selection_config() -> dict[str, Any]:

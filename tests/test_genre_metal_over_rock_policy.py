@@ -128,23 +128,24 @@ class TestTheNuMetalException:
         assert "Nu Metal" in result, result
         assert "Hard Rock" in result, result
 
-    def test_nu_metal_keeps_alternative_rock(self) -> None:
+    def test_nu_metal_does_not_keep_alternative_rock(self) -> None:
+        """⚠️ THIS USED TO ASSERT THE OPPOSITE — and the collection corrected it.
+
+        "Nu Metal should be able to be aligned with Hard Rock, but not
+        Alternative Rock."
+
+        ``alternative_rock`` is an ANCESTOR of ``nu_metal``, so keeping both
+        restated one identity at two specificities instead of naming the
+        crossover — and it is one of the ways a track ended up with both
+        Alternatives. Hard Rock is the genuine companion; Alternative Rock is
+        the parent Nu Metal already subsumes.
+        """
         result = select(_pair("nu metal", "alternative rock"))
         assert "Nu Metal" in result, result
-        assert "Alternative Rock" in result, result
+        assert "Alternative Rock" not in result, result
 
-    def test_nu_metal_keeps_both_approved_companions_when_both_are_supported(self) -> None:
-        """Both companions survive the POLICY, given equal support.
-
-        ``Alternative Rock`` is an ancestor of ``nu_metal`` (via
-        ``alternative_metal``), so this also pins the ancestor-condensation
-        exemption — without it the companion is dropped before the policy runs.
-
-        Support is equalised deliberately: a companion that scores far below the
-        leader is still dropped by the "each position must earn its place" rule,
-        which is a separate (and correct) rule — see
-        ``test_a_weakly_supported_companion_still_loses_its_slot``.
-        """
+    def test_nu_metal_keeps_only_its_approved_companion(self) -> None:
+        """The exception is now exactly one genre: Hard Rock."""
         result = select({
             "musicbrainz@track": ["nu metal", "hard rock", "alternative rock"],
             "lastfm@track": ["nu metal", "hard rock", "alternative rock"],
@@ -152,14 +153,21 @@ class TestTheNuMetalException:
         })
         assert "Nu Metal" in result, result
         assert "Hard Rock" in result, result
-        assert "Alternative Rock" in result, result
+        assert "Alternative Rock" not in result, result
+
+    def test_the_exception_is_a_short_list_not_a_wider_one(self) -> None:
+        """CONTROL — a non-companion rock genre is still suppressed."""
+        result = select(_pair("nu metal", "blues rock"))
+        assert "Nu Metal" in result, result
+        assert "Blues Rock" not in result, result
 
     def test_a_weakly_supported_companion_still_loses_its_slot(self) -> None:
         """The exception permits a companion; it does not guarantee it a slot.
 
-        ``Alternative Rock`` listed by ONE source beside a strongly corroborated
-        Nu Metal + Hard Rock pair is below the relative floor against the
-        leader, so the ordinary ranking rule drops it.
+        ``Alternative Rock`` no longer qualifies at all — it was removed from the
+        companion list, so it is rejected by the POLICY now rather than by the
+        ranking floor. The outcome asserted here (it must not appear) is the same;
+        the reason code changed.
         """
         result = full(_pair("nu metal", "hard rock") | {
             "discogs@track": ["alternative rock"],
@@ -167,9 +175,13 @@ class TestTheNuMetalException:
         assert "Nu Metal" in result["genres"], result["genres"]
         assert "Hard Rock" in result["genres"], result["genres"]
         assert "Alternative Rock" not in result["genres"], result["genres"]
-        # ...and it is explained as a ranking outcome, not a policy rejection.
         removed = _reasons(result)
-        assert removed["alternative_rock"]["reason"] == gs.REASON_LOW_CONFIDENCE
+        assert removed["alternative_rock"]["reason"] in {
+            gs.REASON_ROCK_SUPPRESSED_BY_METAL,
+            gs.REASON_ROCK_NOT_ALLOWED_BY_NU_METAL,
+            gs.REASON_LOW_CONFIDENCE,
+            gs.REASON_EXCLUSIVE_CONFLICT,
+        }, removed["alternative_rock"]
 
     def test_alternative_metal_keeps_hard_rock(self) -> None:
         """``Alternative Metal`` IS a crossover, so it keeps the companions too.

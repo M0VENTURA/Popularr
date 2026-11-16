@@ -382,15 +382,8 @@
           return Number.isFinite(raw) ? Math.max(0, raw) : 25;
         })(),
         playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
-        genre_exclusions: {
-          enabled: getChecked('playlists_genre_exclusions_enabled', true),
-          own_tags_win: getChecked('playlists_genre_own_tags_win', true),
-          use_family_tiebreak: getChecked('playlists_genre_use_family_tiebreak', true),
-          metal_excluded_from: (getValue('playlists_genre_metal_excluded_from', 'alternative rock') || '')
-            .split(',')
-            .map((g) => g.trim().toLowerCase())
-            .filter((g) => g.length > 0),
-        },
+        // genre_exclusions was REMOVED — playlists pool purely from Final
+        // Genres now, which are already mutually exclusive per track.
         exclude_christmas_from_playlists: getChecked('playlists_exclude_christmas', true),
         christmas_playlist_marker: getValue('playlists_christmas_marker', 'christmas') || 'christmas',
         genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks'),

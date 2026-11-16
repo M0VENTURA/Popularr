@@ -372,9 +372,35 @@ def clear_track_cover_verdict(
     ``IS_COVER``/``ORIGINAL_COVER_ARTIST`` tags — otherwise a later Navidrome
     import reads the stale tag back and restores the flag.
 
+    ⚠️ IT MUST ALSO DROP "Cover" FROM THE GENRE COLUMNS.
+
+    Reported: "I had re-ran the cover detection and it had cleared it, but was
+    still building the playlist." The clear reset ``is_cover`` and the tags but
+    left "Cover" in ``musicbrainz_genres`` (and ``genres``), so the row kept
+    displaying a Cover genre and any later pass that reads the genre columns
+    could re-assert the verdict. ``cover_verdict_repair_service`` documents the
+    same contract for the destructive branch it repairs: a clear removes the
+    flag AND "Cover" from both columns.
+
     Returns ``None`` when the track does not exist.
     """
     from db.repositories.cover_detection_repository import COVER_SUFFIX_RE
+    from services.enrichment.genre_aggregation_service import _parse_genre_input
+
+    def _without_cover(value: Any) -> str:
+        """The genre list with the COVER marker removed, in stored form.
+
+        ⚠️ ONLY "Cover". ``is_track_affiliation_tag`` also matches Live /
+        Acoustic / Remaster / Instrumental, and clearing a cover verdict must
+        not silently strip a track's live or acoustic marker — those are
+        separate verdicts owned by their own detection passes.
+        """
+        kept = [
+            str(g).strip()
+            for g in (_parse_genre_input(value) or [])
+            if str(g).strip() and str(g).strip().casefold() != "cover"
+        ]
+        return ", ".join(kept)
 
     title = ""
     clean_title = ""
@@ -383,15 +409,16 @@ def clear_track_cover_verdict(
         with db_session() as session:
             row = session.execute(
                 text(
-                    "SELECT title, file_path FROM tracks "
-                    "WHERE CAST(id AS TEXT) = :id LIMIT 1"
+                    "SELECT title, file_path, genres, musicbrainz_genres "
+                    "FROM tracks WHERE CAST(id AS TEXT) = :id LIMIT 1"
                 ),
                 {"id": str(track_id)},
             ).fetchone()
             if not row:
                 return None
-            title = str(row._mapping.get("title") or "")
-            file_path = str(row._mapping.get("file_path") or "")
+            _mapping = row._mapping
+            title = str(_mapping.get("title") or "")
+            file_path = str(_mapping.get("file_path") or "")
             clean_title = COVER_SUFFIX_RE.sub("", title).strip() or title
             session.execute(
                 text(
@@ -400,13 +427,21 @@ def clear_track_cover_verdict(
                     "original_cover_artist = NULL, "
                     "is_cover_reason = :reason, "
                     "cover_manual_override = :lock, "
-                    "title = :title "
+                    "title = :title, "
+                    # Drop the stale marker from BOTH genre columns. Without
+                    # this the row still DISPLAYS a Cover genre after the verdict
+                    # was cleared — the reported "I cleared it but it was still
+                    # building the playlist".
+                    "genres = :genres, "
+                    "musicbrainz_genres = :mb_genres "
                     "WHERE CAST(id AS TEXT) = :id"
                 ),
                 {
                     "reason": "Manually cleared" + (" and locked" if lock else ""),
                     "lock": bool(lock),
                     "title": clean_title,
+                    "genres": _without_cover(_mapping.get("genres")),
+                    "mb_genres": _without_cover(_mapping.get("musicbrainz_genres")),
                     "id": str(track_id),
                 },
             )

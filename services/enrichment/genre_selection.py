@@ -174,7 +174,13 @@ class SelectionSettings:
     nu_metal_exception: bool = True
     #: Genres kept beside Nu Metal. Deliberately a short list: extending it to
     #: every rock genre would make the exception swallow the whole policy.
-    nu_metal_rock_companions: tuple[str, ...] = ("hard_rock", "alternative_rock")
+    #:
+    #: ⚠️ ``alternative_rock`` WAS REMOVED from this list. The collection's rule
+    #: is "Nu Metal should be able to be aligned with Hard Rock, but not
+    #: Alternative Rock" — Nu Metal descends from Alternative Rock, so pairing
+    #: them restated the same identity at two specificities rather than naming
+    #: the crossover. Hard Rock is the genuine companion.
+    nu_metal_rock_companions: tuple[str, ...] = ("hard_rock",)
     #: Drop a specificity-0 family root ("Metal", "Rock") when a more specific
     #: genre of the same family is also selected.
     remove_generic_parents: bool = True
@@ -603,6 +609,9 @@ REASON_FAMILY_OUTLIER = "INCOMPATIBLE_OUTLIER"
 REASON_REDUNDANT_GENERIC_PARENT = "REDUNDANT_GENERIC_PARENT"
 REASON_REDUNDANT_ANCESTOR = "REDUNDANT_ANCESTOR"
 REASON_ROCK_SUPPRESSED_BY_METAL = "ROCK_SUPPRESSED_BY_METAL"
+#: The mirror: rock carried more evidence, so the metal side is removed.
+#: Needed because the policy is MUTUAL — see ``apply_metal_over_rock_policy``.
+REASON_METAL_SUPPRESSED_BY_ROCK = "METAL_SUPPRESSED_BY_ROCK"
 REASON_ROCK_NOT_ALLOWED_BY_NU_METAL = "ROCK_NOT_ALLOWED_BY_NU_METAL_EXCEPTION"
 REASON_EXCLUSIVE_CONFLICT = "EXCLUSIVE_CONFLICT"
 REASON_MANUAL_OVERRIDE_LIMIT = "MANUAL_GENRE_KEPT"
@@ -619,6 +628,18 @@ NU_METAL_ID = "nu_metal"
 #: Rock genres that survive alongside Nu Metal. Kept short on purpose — see
 #: ``SelectionSettings.nu_metal_rock_companions``.
 DEFAULT_NU_METAL_COMPANIONS: tuple[str, ...] = ("hard_rock", "alternative_rock")
+
+#: Metal genres that are really metal/rock HYBRIDS. They never count as a
+#: "conflicting rock counterpart", because the crossover IS their identity:
+#:
+#: * Nu Metal — a metal/rock hybrid; stripping its rock side deletes the
+#:   crossover the tag exists to name.
+#: * Alternative Metal — descends from BOTH ``metal`` and ``alternative_rock``.
+#:
+#: Used by ``apply_metal_over_rock_policy``: when one of these is the ONLY metal
+#: genre present there is no rock/metal conflict to arbitrate, so neither side is
+#: removed.
+_CROSSOVER_METAL_IDS: frozenset[str] = frozenset({NU_METAL_ID, "alternative_metal"})
 
 
 def _removal(candidate: Candidate, reason: str, trigger: str = "") -> dict[str, Any]:
@@ -676,38 +697,119 @@ def apply_metal_over_rock_policy(
     if not metal or not rock:
         return candidates, []
 
-    # ⭐⭐ THE POLICY NEEDS SUPPORT TO ACT, AND THIS GUARD IS WHY.
+    # ⭐⭐ THE POLICY IS MUTUAL, BUT ARBITRATED PER PAIR — NOT ON FAMILY TOTALS.
     #
-    # "Metal outranks rock" was applied UNCONDITIONALLY the moment any metal
-    # genre survived. That is right for the cases it exists for — Gothic Rock
-    # beside Gothic Metal, Folk Rock beside Folk Metal — where the two describe
-    # the same sound at different specificity and the metal one is the answer.
+    # It used to be one-directional: metal present meant rock was deleted, with a
+    # guard that DECLINED when rock out-scored metal. Declining kept BOTH, which
+    # is the reported "894 collection rows ... containing both Alternative Rock
+    # and Alternative Metal in final genres".
     #
-    # It is wrong when the rock evidence is the STRONGER body of evidence and
-    # metal is a minority tag. Reported on a Chiodos track (post-hardcore/emo)
-    # whose final genres came out "Post-Hardcore, Alternative Metal, Heavy
-    # Metal": its family scores were rock 3.85, metal 2.40, punk 2.00, and every
-    # rock genre — Alternative Rock, Emo, Pop Rock — was deleted because two
-    # stray metal tags were present. The track keeps Post-Hardcore (punk, which
-    # the policy correctly leaves alone) but loses the very tags that describe
-    # it, and then lands on the Alternative Metal playlist.
+    # ⚠️ COMPARING FAMILY TOTALS IS THE WRONG SIGNAL. A rock FAMILY total sums
+    # every rock candidate, so it beats a single metal candidate almost always —
+    # not because the rock reading is better supported, but because the rock side
+    # has more siblings in the pool. Measured on an evidence-EQUAL pair
+    # (``gothic rock`` + ``gothic metal``, three identical sources each) the totals
+    # were rock 2.85 vs metal 2.02, purely because ``gothic rock`` happened to be
+    # listed first and kept its rank-decay advantage. A family-total rule would
+    # therefore have made rock win nearly every pair and delete the metal genre
+    # from exactly the cases this policy exists for.
     #
-    # Requiring the metal side to carry comparable weight keeps the intended
-    # outcome and makes a thin metal tag unable to dictate a track's identity —
-    # the same "one thin tag must not control the result" principle the outlier
-    # rejection already encodes.
-    _rock_score = sum(float(c.score or 0.0) for c in rock)
-    _metal_score = sum(float(c.score or 0.0) for c in metal)
-    if _rock_score > 0 and _metal_score < _rock_score * settings.metal_over_rock_min_ratio:
+    # So the question asked here is PER PAIR and about SUPPORT:
+    #   * a metal genre that a rock genre is an ANCESTOR of is the SAME SOUND at a
+    #     narrower specificity, so metal wins (Gothic Rock -> Gothic Metal);
+    #   * otherwise the two are RIVAL genres and the better-supported side wins.
+    # "Better supported" is the candidate's own score, not the family's.
+    _vocab_for_pairs = get_vocabulary()
+
+    def _qualifier(genre_id: str) -> str:
+        """The distinguishing words of a genre, without its family word.
+
+        ``gothic metal`` -> ``gothic``; ``alternative rock`` -> ``alternative``;
+        ``grunge`` -> ``grunge``.
+
+        ⚠️ THIS IS HOW "SAME SOUND" IS DECIDED, NOT ANCESTRY.
+        The vocabulary does not model the rock counterpart as a parent:
+        ``gothic_metal.parents`` is ``('heavy_metal',)`` and
+        ``gothic_rock.parents`` is ``('post_punk',)``, so
+        ``_is_ancestor('gothic_rock', 'gothic_metal')`` is False even though the
+        two describe one sound at two specificities. The shared QUALIFIER is the
+        evidence the data actually carries, and it separates the two groups
+        cleanly (measured over 14 pairs):
+            gothic/folk/progressive/stoner/industrial/symphonic/alternative
+                rock+metal  -> same qualifier
+            grunge vs alternative metal, math rock vs alternative metal,
+            post-grunge vs nu metal, hard rock vs thrash metal
+                            -> different qualifier
+        """
+        entry = _vocab_for_pairs.genres.get(genre_id)
+        if entry is None:
+            return genre_id
+        words = entry.display.casefold().replace("-", " ").split()
+        if len(words) > 1 and words[-1] in (FAMILY_METAL, FAMILY_ROCK):
+            words = words[:-1]
+        return " ".join(words)
+
+    def _pair_verdict(rock_candidate: Candidate, metal_candidate: Candidate) -> bool:
+        """True when METAL wins this pair."""
+        if _is_ancestor(rock_candidate.genre_id, metal_candidate.genre_id, _vocab_for_pairs):
+            # Same sound, narrower name. Metal is the answer by definition.
+            return True
+        _rq = _qualifier(rock_candidate.genre_id)
+        _mq = _qualifier(metal_candidate.genre_id)
+        if _rq and _rq == _mq:
+            # "Gothic Rock" beside "Gothic Metal": one sound, two specificities.
+            # Metal is the narrower name, so metal wins — no support contest.
+            return True
+        # Genuine rivals (grunge vs alternative metal, math rock vs alternative
+        # metal, hard rock vs heavy metal). Metal wins UNLESS it is clearly the
+        # weaker reading — the original ratio, applied per pair.
+        #
+        # ⚠️ THE RATIO IS PER PAIR, NOT ON FAMILY TOTALS. A rock FAMILY total sums
+        # every rock candidate, so it beats a single metal candidate almost
+        # always — not because the rock reading is better supported, but because
+        # the rock side has more siblings in the pool. Comparing the two
+        # candidates' own scores keeps the question honest.
+        _rock_support = float(rock_candidate.score or 0.0)
+        _metal_support = float(metal_candidate.score or 0.0)
+        if _rock_support <= 0:
+            return True
+        return _metal_support >= _rock_support * settings.metal_over_rock_min_ratio
+
+    blocked: set[str] = set()
+    _rock_wins_pairs = 0
+    for metal_candidate in metal:
+        if metal_candidate.manual:
+            continue
+        winners_for_metal = [
+            r for r in rock
+            if _pair_verdict(r, metal_candidate)
+        ]
+        if winners_for_metal:
+            continue
+        # Every rock counterpart beat this metal genre, so it is removed.
+        blocked.add(metal_candidate.genre_id)
+        _rock_wins_pairs += 1
+
+    if blocked:
         logger.debug(
-            "Genre metal-over-rock policy declined — the rock evidence is stronger",
-            rock_score=round(_rock_score, 3),
-            metal_score=round(_metal_score, 3),
-            required_ratio=settings.metal_over_rock_min_ratio,
-            metal=[c.display for c in metal],
-            rock=[c.display for c in rock],
+            "Genre rock-over-metal policy applied — unrelated rival genres, and "
+            "the rock side is better supported",
+            removed=[c.display for c in metal if c.genre_id in blocked],
         )
-        return candidates, []
+        removed_rock_wins: list[dict[str, Any]] = []
+        keep: list[Candidate] = []
+        _trigger = max(rock, key=lambda c: (c.confidence, c.score)).display
+        for candidate in candidates:
+            if candidate.genre_id in blocked:
+                removed_rock_wins.append(
+                    _removal(candidate, REASON_METAL_SUPPRESSED_BY_ROCK, _trigger)
+                )
+                continue
+            keep.append(candidate)
+        return keep, removed_rock_wins
+
+    metal_ids = {c.genre_id for c in metal}
+    non_nu_metal = [c for c in metal if c.genre_id != NU_METAL_ID]
 
     metal_ids = {c.genre_id for c in metal}
     non_nu_metal = [c for c in metal if c.genre_id != NU_METAL_ID]
@@ -726,10 +828,8 @@ def apply_metal_over_rock_policy(
     # ⚠️ BUT WIDENING IT TO ALL METAL WOULD BE A REGRESSION. ``Death Metal`` and
     # ``Thrash Metal`` must still suppress ``Alternative Rock``: that is the
     # policy working as intended, not a crossover. So the exemption is scoped to
-    # the metal genres that ARE hybrids — Nu Metal (metal/rock) and Alternative
-    # Metal (metal/alternative rock).
-    _CROSSOVER_METAL = frozenset({NU_METAL_ID, "alternative_metal"})
-    _metal_is_crossover = bool(metal_ids & _CROSSOVER_METAL)
+    # the metal genres that ARE hybrids — see ``_CROSSOVER_METAL_IDS``.
+    _metal_is_crossover = bool(metal_ids & _CROSSOVER_METAL_IDS)
 
     permitted = (
         frozenset(settings.nu_metal_rock_companions)
@@ -1010,9 +1110,7 @@ def remove_redundant_ancestors(
         _family_totals[key] = _family_totals.get(key, 0.0) + float(candidate.score or 0.0)
 
     for candidate in candidates:
-        if candidate.genre_id in _nu_metal_companions:
-            # Kept for the Nu Metal exception; the policy makes the final call.
-            continue
+        _is_nu_companion = candidate.genre_id in _nu_metal_companions
         for other in candidates:
             if other.genre_id == candidate.genre_id:
                 continue
@@ -1022,6 +1120,20 @@ def remove_redundant_ancestors(
             # these two genres specifically, so no general heuristic may skip
             # past them. The cross-family guard below is a heuristic; a
             # ``mutually_exclusive`` pair is a decision.
+            #
+            # ⭐ THE Nu METAL COMPANION EXEMPTION MUST NOT REACH THIS BRANCH.
+            #
+            # ``alternative_rock`` is an approved Nu Metal companion, and the
+            # exemption below exists so the metal-over-rock policy can still SEE
+            # it. But the exemption used to ``continue`` before this check ran,
+            # so a track carrying Nu Metal kept BOTH Alternative Rock and
+            # Alternative Metal — the reported 894 rows ("Deftones – Please
+            # Please Please Let Me Get What I Want: Alternative Rock; Nu Metal;
+            # Alternative Metal; Cover").
+            #
+            # Being an approved companion is permission to survive the METAL
+            # policy; it is not permission to contradict the exclusive pair.
+            # Those are different questions and only the first is exempt.
             if _pair_is_kept(
                 candidate.genre_id, other.genre_id, settings.mutually_exclusive
             ):
@@ -1034,6 +1146,10 @@ def remove_redundant_ancestors(
                     REASON_EXCLUSIVE_CONFLICT, other.display,
                 )
                 break
+            if _is_nu_companion:
+                # Kept for the Nu Metal exception; the policy makes the final
+                # call. Only the ANCESTOR rules below are waived.
+                continue
             if _pair_is_kept(candidate.genre_id, other.genre_id, settings.keep_together):
                 continue
             if _pair_is_kept(candidate.genre_id, other.genre_id, settings.conditional_keep):

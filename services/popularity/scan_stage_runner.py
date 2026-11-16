@@ -866,6 +866,29 @@ def _refresh_album_live_context(album, album_context, track_contexts, album_type
         )
 
 
+def _rename_title(*, track_id: str, old_title: str, new_title: str) -> None:
+    """Write a CONFIDENT MusicBrainz rename to the track row.
+
+    Deliberately narrow: only ``title``, only by id. The album stage owns
+    ``is_live`` / ``is_acoustic`` / ``musicbrainz_genres`` and clears them as
+    part of its own rename, so touching them here would fight it.
+
+    The file tag is NOT written here — the album's tag-sync pass runs later in
+    the same scan and picks the track up through ``tag_changed``, which is the
+    one place file writes are scoped and counted.
+    """
+    from db.engine import db_session
+    from sqlalchemy import text
+
+    if not track_id or not new_title or new_title == old_title:
+        return
+    with db_session() as session:
+        session.execute(
+            text("UPDATE tracks SET title = :title WHERE CAST(id AS TEXT) = :id"),
+            {"title": new_title, "id": track_id},
+        )
+
+
 def _collapse_album_mb_batch(mb_batch: dict[str, dict[str, Any]], track_contexts: list[dict[str, Any]], current_album: str) -> None:
     folder_counts: dict[str, int] = {}
     for _tc in track_contexts or []:
@@ -4356,12 +4379,85 @@ def run_scan(
                                     _row.get("track_number"),
                                 ))
                                 _release_title = str((_entry or {}).get("title") or "").strip()
-                                if (
+                                if not (
                                     _release_title
                                     and _release_title.casefold() != _local_title.casefold()
                                 ):
-                                    _has_title_gap = True
-                                    break
+                                    continue
+
+                                # ⭐ A CONFIDENT RENAME IS APPLIED, NOT OFFERED.
+                                #
+                                # Reported: "the final genres don't match up" was
+                                # one symptom of the same habit — the scan knew
+                                # the right answer and still asked. A rename is
+                                # safe only when the row is ALREADY proved to be
+                                # this recording: same disc + track number, same
+                                # length within tolerance, and a title similar
+                                # enough to be the same song. Anything weaker
+                                # stays a review item; renaming a mis-matched file
+                                # would MASK that it is the wrong file.
+                                try:
+                                    from services.popularity.popularity_sources import (
+                                        _title_rename_confidence,
+                                    )
+
+                                    _verdict = _title_rename_confidence(
+                                        _local_title,
+                                        _release_title,
+                                        local_duration=_row.get("duration"),
+                                        release_length_ms=(_entry or {}).get("length_ms"),
+                                        local_disc=_row.get("disc_number"),
+                                        local_position=_row.get("track_number"),
+                                        release_disc=(_entry or {}).get("disc"),
+                                        release_position=(_entry or {}).get("position"),
+                                        file_path=str(_row.get("file_path") or ""),
+                                    )
+                                except Exception as _verdict_exc:
+                                    logger.debug(
+                                        "Title-rename confidence check failed",
+                                        artist=artist, album=album,
+                                        error=str(_verdict_exc),
+                                    )
+                                    _verdict = {"ok": False, "reason": "error"}
+
+                                if _verdict.get("ok"):
+                                    try:
+                                        _rename_title(
+                                            track_id=str(_row.get("id") or ""),
+                                            old_title=_local_title,
+                                            new_title=_release_title,
+                                        )
+                                        logger.debug(
+                                            "[METADATA_REVIEW] confident rename applied",
+                                            artist=artist, album=album,
+                                            track_id=_row.get("id"),
+                                            old=_local_title, new=_release_title,
+                                            similarity=round(
+                                                float(_verdict.get("similarity") or 0), 3
+                                            ),
+                                            length_delta=_verdict.get("length_delta"),
+                                        )
+                                        # The row now matches the release, so it is
+                                        # not a gap: nothing to offer for it.
+                                        _row["title"] = _release_title
+                                        continue
+                                    except Exception as _rename_exc:
+                                        logger.warning(
+                                            "Confident rename failed — offering it instead",
+                                            artist=artist, album=album,
+                                            track_id=_row.get("id"),
+                                            error=str(_rename_exc),
+                                        )
+
+                                logger.debug(
+                                    "[METADATA_REVIEW] rename left for review",
+                                    artist=artist, album=album,
+                                    track_id=_row.get("id"),
+                                    old=_local_title, new=_release_title,
+                                    reason=_verdict.get("reason"),
+                                )
+                                _has_title_gap = True
+                                break
 
                         if _release_mbid and (_recommend_only or _has_title_gap):
                             from services.metadata.metadata_proposal_service import (

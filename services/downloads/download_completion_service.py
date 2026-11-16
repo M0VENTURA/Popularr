@@ -1256,6 +1256,67 @@ def _resolve_album_level_metadata(item: dict[str, Any]) -> dict[str, Any]:
     release_mbid = str(
         item.get("release_mbid") or item.get("release_id") or ""
     ).strip()
+
+    # ⭐⭐ THE ALBUM'S OWN RELEASE WINS OVER THE ONE THE TRACK WAS QUEUED FROM.
+    #
+    # Reported: "when I select to download missing tracks, they import as a
+    # different album on navidrome rather than matching the album that it was
+    # selected to download from".
+    #
+    # Navidrome groups an album by album NAME + album artist + the MusicBrainz
+    # RELEASE id in the file's tags. A queued missing track carries the release
+    # id of the release the MISSING LIST was computed against, which is not
+    # always the release the album's existing tracks store — a same-named
+    # edition (different country, disc count or barcode) resolves to a different
+    # MBID. Writing that id onto the new file gives Navidrome two albums with the
+    # same name, which is exactly the reported symptom.
+    #
+    # The sibling rows of THIS album are authoritative: they are what Navidrome
+    # already groups together, so the new file must adopt their release id
+    # instead of introducing a second one. Only when the album has no existing
+    # rows (a brand-new album) does the queued release id stand.
+    _album_release_mbid = ""
+    try:
+        with db_session() as session:
+            _row = session.execute(
+                text(
+                    """
+                    SELECT musicbrainz_album_mbid
+                    FROM tracks
+                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                      AND LOWER(COALESCE(album, '')) = LOWER(:album)
+                      AND musicbrainz_album_mbid IS NOT NULL
+                      AND TRIM(musicbrainz_album_mbid) <> ''
+                      AND COALESCE(file_path, '') NOT LIKE '__queued_for_download__%%'
+                    ORDER BY id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "artist": item.get("album_artist") or item.get("artist"),
+                    "album": item.get("album"),
+                },
+            ).fetchone()
+        if _row and str(_row[0] or "").strip():
+            _album_release_mbid = str(_row[0]).strip()
+    except Exception as exc:
+        logger.debug(
+            "Could not read the album's own release id — using the queued one",
+            album=item.get("album"), error=str(exc),
+        )
+
+    if _album_release_mbid and _album_release_mbid != release_mbid:
+        logger.info(
+            "Missing-track import adopted the album's own release id",
+            album=item.get("album"),
+            queued_release=release_mbid or None,
+            album_release=_album_release_mbid,
+            reason="a different release id on one track splits the album in Navidrome",
+        )
+        release_mbid = _album_release_mbid
+        # Persist it so a later pass (and the diagnostics) see the same answer.
+        item["release_mbid"] = _album_release_mbid
+
     missing = [c for c in _ALBUM_LEVEL_COLUMNS if not resolved.get(c)]
     if release_mbid and missing:
         try:

@@ -405,8 +405,14 @@ class TestThePerArtistCap:
         )
         assert len(ordered) == 6
 
-    def test_the_config_default_is_twenty_five(self):
-        assert fs._resolve_max_per_artist({}) == 25
+    def test_the_config_default_is_four(self):
+        """The collection's rule is a 3-or-4 track cap per artist.
+
+        ⚠️ THIS USED TO ASSERT 25. At 25 the cap was indistinguishable from
+        "no cap" on a normal library — the reported "the artist limit is not 3
+        or 4 ... consistent with a five-track limit per exact artist credit".
+        """
+        assert fs._resolve_max_per_artist({}) == 4
 
     @pytest.mark.parametrize("value", ["0", 0, -5, "-1"])
     def test_config_zero_disables_the_cap(self, value):
@@ -415,7 +421,29 @@ class TestThePerArtistCap:
     def test_a_broken_config_value_falls_back_to_the_default(self):
         assert fs._resolve_max_per_artist(
             {"genre_playlists_max_per_artist": "banana"}
-        ) == 25
+        ) == 4
+
+    def test_a_guest_credit_shares_the_artists_allowance(self):
+        """``X feat. Y`` is X plus a guest, not a second artist.
+
+        THE REPORT: a playlist set to "maximum 4 per normalized primary artist"
+        carried 10 Linkin Park tracks spread across credits.
+        """
+        rows = [track("Own", "Linkin Park", stored=90, lf=9000)]
+        rows += [
+            track(f"Guest{i}", "Linkin Park feat. Someone", stored=80 - i, lf=8000 - i)
+            for i in range(8)
+        ]
+        ordered = fs._ordered_playlist_rows(
+            rows, order_mode="final_score", max_per_artist=4
+        )
+        assert len(ordered) == 4, [r["title"] for r in ordered]
+
+    def test_a_genuine_duo_keeps_its_own_allowance(self):
+        """CONTROL — "Simon & Garfunkel" is two artists, not "Simon"."""
+        assert fs._normalise_artist_key("Simon") != fs._normalise_artist_key(
+            "Simon & Garfunkel"
+        )
 
     def test_artists_are_matched_case_insensitively(self):
         """Otherwise 'AC/DC' and 'Ac/Dc' would each get their own allowance."""

@@ -261,8 +261,10 @@ class Vocabulary:
         could not classify. Callers need BOTH: the family answers the question
         for everything recognised, and ``unknown`` is the only part still
         eligible for a fallback test. Handing the whole set to a fallback after a
-        considered non-metal answer is what re-introduced the bug this method
-        exists to fix — see ``_track_is_metal_by_identity``.
+        considered non-metal answer re-introduces the bug this method exists to
+        fix. (The former caller, ``_track_is_metal_by_identity``, was removed with
+        the Genre Exclusions feature; ``deciding_family`` remains the shared
+        "which family does this set belong to" authority.)
 
         ⭐ The rule is the requested one: *"use the third or fourth genre as a tie
         breaker — grunge is usually more aligned to rock than alt metal, where nu

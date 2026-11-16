@@ -116,12 +116,10 @@ from helpers.config_helpers import get_standout_config
 from helpers.logging_config import log_unified, log_scan_detail
 from helpers.normalization_service import normalize_unicode_punctuation
 from services.catalog.album_classification_service import (
-    METAL_GENRE_FAMILY,
     is_christmas_genre as is_christmas_genre_token,
     is_christmas_track,
     is_instrumental_track_title,
     is_live_or_alternate_track_title,
-    is_metal_genre,
     iter_genre_tokens,
     normalize_primary_release_type,
 )
@@ -2517,12 +2515,24 @@ def _weekly_shuffle(
 
 
 def _resolve_max_per_artist(cfg: dict[str, Any]) -> int | None:
-    """Per-artist track cap for a generated playlist."""
-    raw = cfg.get("genre_playlists_max_per_artist", 25)
+    """Per-artist track cap for a generated playlist.
+
+    ⚠️ THE SHIPPED DEFAULT IS 4, NOT 25.
+
+    The collection's rule is "select five-star songs first, enforcing the chosen
+    cap of 3 or 4". 25 was shipped as the default, which is high enough to be
+    indistinguishable from "no cap" on a normal library — the reported "the
+    artist limit is not 3 or 4 ... All three look consistent with a five-track
+    limit per exact artist credit".
+
+    ``0`` still means unlimited, and an explicit config value always wins, so an
+    existing install that deliberately raised it keeps its setting.
+    """
+    raw = cfg.get("genre_playlists_max_per_artist", 4)
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        return 25
+        return 4
     return None if value <= 0 else value
 
 
@@ -2618,8 +2628,24 @@ def _normalise_essential_title(title: str) -> str:
 
 
 def _normalise_artist_key(artist: Any) -> str:
-    """Key used to decide whether two rows share a credited ARTIST."""
-    return normalize_unicode_punctuation(str(artist or "")).strip().casefold()
+    """Key used to decide whether two rows share a credited ARTIST.
+
+    ⚠️ A GUEST CREDIT MUST NOT BUY A SECOND ALLOWANCE.
+
+    The key used to be the whole credit, so "Linkin Park" and "Linkin Park
+    feat. Jay-Z" hashed to different keys and EACH got the full per-artist cap —
+    the reported 10-track Linkin Park leak in a playlist that had been set to
+    "maximum 4 per normalized primary artist".
+
+    ``strip_guest_credit`` removes ONLY a trailing feat./ft./featuring, which is
+    the one form that names the same act plus a guest. It deliberately leaves
+    "&"/"and" alone: "Simon & Garfunkel" is genuinely two artists, and collapsing
+    it onto "Simon" would let one half of a duo consume the other's allowance.
+    """
+    from helpers.normalization_service import strip_guest_credit
+
+    credit = strip_guest_credit(str(artist or ""))
+    return normalize_unicode_punctuation(credit).strip().casefold()
 
 
 def _group_duplicate_tracks(
@@ -4734,56 +4760,6 @@ def _resolve_playlist_genres(
     return [], False
 
 
-def _full_genre_tokens(row: dict[str, Any]) -> list[str]:
-    """Every genre token available for this track: its own plus the blend."""
-    tokens = _track_own_genre_tokens(row)
-    tokens.extend(iter_genre_tokens(row.get("genres")))
-    seen: set[str] = set()
-    out: list[str] = []
-    for token in tokens:
-        if token not in seen:
-            seen.add(token)
-            out.append(token)
-    return out
-
-
-def _track_is_metal_by_identity(
-    tokens: list[str],
-    *,
-    use_family_tiebreak: bool,
-) -> bool:
-    """Is this track's genre identity METAL?"""
-    if not tokens:
-        return False
-
-    if use_family_tiebreak:
-        try:
-            from services.enrichment.genre_vocabulary import get_vocabulary
-
-            family, unknown = get_vocabulary().deciding_family(tokens)
-            if family == METAL_GENRE_FAMILY:
-                return True
-            if family:
-                return bool(unknown) and is_metal_genre(unknown)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Genre family tie-break unavailable", error=str(exc))
-
-    return is_metal_genre(tokens)
-
-
-def _playlist_identity_tokens(
-    row: dict[str, Any],
-    *,
-    own_tags_win: bool,
-) -> list[str]:
-    """The genre tokens that decide which playlists a track may enter."""
-    if own_tags_win:
-        own = _track_own_genre_tokens(row)
-        if own:
-            return own
-    return _full_genre_tokens(row)
-
-
 def _genre_playlist_track_genres(
     row: dict[str, Any],
     *,
@@ -5411,26 +5387,27 @@ def _create_genre_top_track_playlists(
             if re.sub(r"[^\w\s-]", "", str(genre).lower()).strip() in norm_only_genres
         ]
 
-    try:
-        from helpers.config_helpers import get_genre_exclusion_config
-        _excl = get_genre_exclusion_config()
-    except Exception as exc:
-        logger.debug("Genre exclusion config read failed", error=str(exc))
-        _excl = {
-            "enabled": True,
-            "own_tags_win": True,
-            "metal_excluded_from": ["alternative rock"],
-        }
-
-    _excl_enabled = bool(_excl.get("enabled", True))
-    _own_tags_win = bool(_excl.get("own_tags_win", True))
-    _use_family_tiebreak = bool(_excl.get("use_family_tiebreak", True))
-    _metal_excluded_from = {
-        re.sub(r"[^\w\s-]", "", str(g).strip().lower()).strip()
-        for g in (_excl.get("metal_excluded_from") or [])
-    }
-    _metal_excluded_from.discard("")
-    _excluded_counts: dict[str, int] = defaultdict(int)
+    # ⭐ GENRE EXCLUSIONS WERE REMOVED HERE — the Final Genres now do the job.
+    #
+    # The old block kept a "crossover" artist out of a playlist that was not its
+    # genre ("Keep Metal Out Of These Playlists", default ``alternative rock``).
+    # It judged the track by its SOURCE columns (``_track_own_genre_tokens``),
+    # never by the cleaned ``genres`` value — the same stale-source defect that
+    # was already fixed for POOLING but not for this.
+    #
+    # Two consequences made it actively wrong once Final Genres were arbitrated
+    # per track:
+    #
+    # 1. REDUNDANT. ``playlist_pool_genres`` only yields the track's FINAL
+    #    genres, and those are now mutually exclusive — a track whose final
+    #    genres say "Alternative Metal" never pools into "Alternative Rock", so
+    #    there is nothing left to exclude.
+    # 2. HARMFUL. A track whose final genres are "Alternative Rock" but whose
+    #    stale ``musicbrainz_genres`` still said "Nu Metal" was judged METAL and
+    #    removed from the rock playlist — the correct tag losing to a stale one.
+    #
+    # The collection's decision: remove the feature rather than re-point it,
+    # because with clean genres it has no work left to do.
 
     pools: dict[str, list[dict[str, Any]]] = defaultdict(list)
     genre_freq: dict[str, int] = defaultdict(int)
@@ -5438,11 +5415,6 @@ def _create_genre_top_track_playlists(
 
     for row in rows:
         track_genres = _track_genres(row)
-
-        _identity = _playlist_identity_tokens(row, own_tags_win=_own_tags_win)
-        _track_is_metal = _excl_enabled and _track_is_metal_by_identity(
-            _identity, use_family_tiebreak=_use_family_tiebreak
-        )
 
         is_christmas = is_christmas_track(
             title=str(row.get("title") or ""),
@@ -5474,10 +5446,6 @@ def _create_genre_top_track_playlists(
                 target_norm_key = norm_key
                 target_display = genre
 
-            if _track_is_metal and norm_key in _metal_excluded_from:
-                _excluded_counts[norm_key] += 1
-                continue
-
             pools[target_norm_key].append({
                 "id": str(row.get("id") or ""),
                 "title": str(row.get("title") or "Unknown"),
@@ -5506,21 +5474,6 @@ def _create_genre_top_track_playlists(
             -item["stars"],
             -float(item.get("final_score") or item.get("score") or 0),
             item["title"].casefold(),
-        )
-
-    if _excluded_counts:
-        _parts = ", ".join(
-            f"{genre}: {count}" for genre, count in sorted(_excluded_counts.items())
-        )
-        total_excluded = sum(_excluded_counts.values())
-        log_unified(
-            f"[FINALISE_STAGE] Genre exclusion — {total_excluded} metal track(s) "
-            f"kept out of {len(_excluded_counts)} playlist(s): {_parts}"
-        )
-        logger.info(
-            "Genre playlists excluded metal tracks",
-            per_genre=dict(_excluded_counts),
-            total=total_excluded,
         )
 
     written = 0

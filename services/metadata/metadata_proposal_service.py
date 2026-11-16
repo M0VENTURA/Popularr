@@ -541,7 +541,26 @@ def _track_proposals(
     # "Disc #: 1 → empty" pending recommendation on every scan, and the whole
     # library shows "needs review". The scan applies the clear through the
     # import payload instead (see payload_builder).
-    single_disc = include_disc_clear and _disc_count(metadata) == 1
+    # ⚠️ THE `include_disc_clear` FLAG MUST NOT FLIP THE PROPOSAL.
+    #
+    # ``single_disc`` used to be ``include_disc_clear AND _disc_count == 1``, so
+    # turning the flag OFF (what the scan does) did not merely suppress the
+    # clear — it fell through to the raw MusicBrainz value. On a one-disc
+    # release that value is 1, so the SCAN path proposed
+    #
+    #     Disc #: empty -> 1        (reported, on every track of the album)
+    #
+    # while the IMPORT path (payload_builder) CLEARS disc_number when
+    # disctotal == 1. Save wrote 1, the import cleared it, and the next scan
+    # proposed it again — an endless "still needs saving" loop.
+    #
+    # The two questions are separate:
+    #   * is this a one-disc release?  -> decided by MusicBrainz alone.
+    #   * may we OFFER the "clear" edit? -> the caller's choice.
+    # A one-disc release never has a meaningful disc position either way, so the
+    # proposed value is "" in both cases; only whether it is OFFERED differs.
+    is_single_disc_release = _disc_count(metadata) == 1
+    single_disc = include_disc_clear and is_single_disc_release
 
     enrichment: dict[str, dict[str, Any]] = {}
     for mb_track in metadata.get("tracks") or []:
@@ -685,8 +704,11 @@ def _track_proposals(
         proposed_map: dict[str, str] = {
             "title": _as_text(entry.get("mb_title")),
             "track_number": _as_text(entry.get("mb_track_number")),
+            # A one-disc release has no meaningful position REGARDLESS of the
+            # flag: proposing "1" here is what made the scan re-offer
+            # "Disc #: empty -> 1" forever, and the import path clears it.
             "disc_number": (
-                "" if single_disc else _as_text(entry.get("mb_disc_number"))
+                "" if is_single_disc_release else _as_text(entry.get("mb_disc_number"))
             ),
             "mbid": rec_mbid,
             "writer": _genres_text(mb_track.get("writer")),

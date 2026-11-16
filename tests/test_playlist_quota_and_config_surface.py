@@ -238,9 +238,7 @@ class TestEveryPlaylistSettingIsOnTheConfigPage:
         emitted = set(re.findall(r"^\s*([a-z0-9_]+):", source, re.M))
 
         keys = set(get_playlists_config())
-        # ``genre_exclusions`` is a nested block collected separately below its
-        # own header, so it is not emitted as a flat key.
-        keys.discard("genre_exclusions")
+        # (``genre_exclusions`` was removed with the Genre Exclusions feature.)
         missing = sorted(k for k in keys if k not in emitted)
         assert not missing, (
             f"{tree} config.js does not emit {missing}; save_config replaces the whole "

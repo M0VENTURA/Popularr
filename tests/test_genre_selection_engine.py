@@ -1081,7 +1081,7 @@ class TestConfig:
         assert cfg["metal_suppresses_rock"] is True
         assert cfg["nu_metal_exception"] is True
         assert cfg["remove_generic_parents"] is True
-        assert cfg["nu_metal_rock_companions"] == ["hard_rock", "alternative_rock"]
+        assert cfg["nu_metal_rock_companions"] == ["hard_rock"]
 
     def test_the_engine_defaults_lead_with_musicbrainz(self) -> None:
         assert gs.DEFAULT_SOURCE_WEIGHTS["musicbrainz"] == 1.00

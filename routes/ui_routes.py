@@ -4411,10 +4411,11 @@ def _sanitize_config_sections(config: dict) -> dict:
         "popularity": ("weights",),
         "genres": ("weights", "synonyms"),
         "metadata_update": ("update_on_files", "album_mbid_guard"),
-        # ``playlists.genre_exclusions`` holds two booleans AND a list, so it
-        # must be kept as a dict — without this entry the Config page save
-        # coerced it to ``{}`` and the rules silently stopped applying.
-        "playlists": ("genre_exclusions",),
+        # ``playlists.genre_exclusions`` was REMOVED (playlists pool purely from
+        # Final Genres now), so it no longer needs a nested-block entry. An old
+        # config.yaml may still carry the key; ``get_playlists_config`` simply
+        # never reads it, and it is dropped on the next save because the page no
+        # longer emits it.
         # Same shape, same trap: a nested block absent from this map is coerced
         # to ``{}`` on save, so the safe-shutdown settings would appear to save
         # and then read back as defaults.

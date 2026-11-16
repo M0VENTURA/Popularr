@@ -407,15 +407,8 @@ function buildConfigObject() {
       weekly_shuffle_genre_top_tracks: getChecked('playlists_shuffle_genre', true),
       weekly_shuffle_new_music: getChecked('playlists_shuffle_new_music', true),
       weekly_shuffle_essential: getChecked('playlists_shuffle_essential', false),
-      genre_exclusions: {
-        enabled: getChecked('playlists_genre_exclusions_enabled', true),
-        own_tags_win: getChecked('playlists_genre_own_tags_win', true),
-        use_family_tiebreak: getChecked('playlists_genre_use_family_tiebreak', true),
-        metal_excluded_from: (getValue('playlists_genre_metal_excluded_from', 'alternative rock') || '')
-          .split(',')
-          .map((g) => g.trim().toLowerCase())
-          .filter((g) => g.length > 0),
-      },
+      // genre_exclusions was REMOVED — playlists pool purely from Final
+      // Genres now, which are already mutually exclusive per track.
       exclude_christmas_from_playlists: getChecked('playlists_exclude_christmas', true),
       christmas_playlist_marker: getValue('playlists_christmas_marker', 'christmas') || 'christmas',
       genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks'),
