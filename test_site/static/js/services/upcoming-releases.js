@@ -321,10 +321,22 @@
 
     if (release.in_queue) {
       actions.push('<span class="badge bg-info text-dark align-middle">In Queue</span>');
-    } else if (released) {
+    } else {
+      // ⚠️ A RELEASE DATE IS NOT A PRE-CONDITION FOR QUEUEING.
+      //
+      // This used to be ``else if (released)``, so an upcoming album had NO
+      // Queue button at all until its release date passed — reported as "it
+      // also doesn't allow to queue the album if it's not released yet".
+      //
+      // A future release that is MATCHED on MusicBrainz has a full tracklist, so
+      // its individual tracks can be queued now: they will simply sit in the
+      // queue until they can be found. The row already explains that in its
+      // tooltip, and the server decides what is actually obtainable.
       actions.push(
         `<button type="button" class="btn btn-sm btn-success ur-queue-btn" ` +
-        `data-release-index="${index}" title="Queue download (release is out)">` +
+        `data-release-index="${index}" title="${released
+          ? 'Queue download (release is out)'
+          : 'Queue download (searches now for early tracks, falls back to release date if not found)'}">` +
         '<i class="bi bi-download"></i> Queue</button>'
       );
     }

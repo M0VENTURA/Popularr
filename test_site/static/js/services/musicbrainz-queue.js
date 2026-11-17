@@ -77,7 +77,21 @@
 (function (global) {
   'use strict';
 
-  const SEARCH_ENDPOINT = '/api/upcoming-releases/search-musicbrainz';
+  // ⚠️ THE ROW'S SEARCH BUTTON MUST USE THE SAME SEARCH AS THE UNIVERSAL ONE.
+  //
+  // It used the upcoming-releases release-GROUP search endpoint, which is a bare
+  // release-GROUP query: it returns raw MusicBrainz release-group rows, with no
+  // concrete release, no tracklist and no local-library awareness. The universal
+  // search at the top of the page uses ``/api/musicbrainz/search``, which returns
+  // the NORMALISED ``{releases: [...]}`` payload with ``artist``, ``title``,
+  // ``track_count``, concrete releases and tracklists — which is what this
+  // renderer actually reads.
+  //
+  // That mismatch is the reported "the search button next to each release also
+  // doesn't search the same way as the universal search at the top of the page,
+  // so the results don't show the same way from musicbrainz to add to the
+  // queue".
+  const SEARCH_ENDPOINT = '/api/musicbrainz/search';
   const DISCOGS_ENDPOINT = '/api/upcoming-releases/search-discogs';
   const QUEUE_BATCH_ENDPOINT = '/api/queue/add-batch';
   const MODAL_ID = 'musicBrainzModal';
@@ -212,10 +226,22 @@
     resultsEl.innerHTML = '';
 
     try {
-      const data = await global.api.postJson(SEARCH_ENDPOINT, { artist, album });
-      const mbResults = Array.isArray(data.results) ? data.results : [];
+      // The universal endpoint takes artist/album/track and returns
+      // ``{releases: [...]}``. ``with_tracklists`` asks it to attach each
+      // concrete release's tracklist, which this modal needs to offer per-track
+      // selection and "Download All Tracks".
+      const data = await global.api.postJson(SEARCH_ENDPOINT, {
+        artist,
+        album,
+        with_releases: true,
+        with_tracklists: true,
+      });
+      const mbResults = Array.isArray(data.releases) ? data.releases : [];
 
-      if (data.success && mbResults.length >= 3) {
+      // ⚠️ Do not gate on ``data.success``. The universal endpoint reports
+      // success only on some paths, and an EMPTY-but-valid result is a real
+      // answer — the Discogs fallback below is what handles "nothing found".
+      if (mbResults.length >= 3) {
         setStatus('');
         render(mbResults);
         return;

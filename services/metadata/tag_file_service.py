@@ -303,12 +303,19 @@ def _existing_non_empty_fields(file_path: str, tags: Dict[str, Any]) -> set[str]
                 if desc and normalise_tag_name(desc) in txxx_names:
                     present.add(field)
 
-        elif suffix == ".flac":
-            audio = FLAC(file_path)
+        elif suffix in (".flac", ".ogg", ".opus"):
+            # FLAC and Ogg share the Vorbis comment structure, so one lookup
+            # serves both. Without the Ogg arm, ``fill_missing_only`` treated
+            # every Ogg field as missing and overwrote what was already there.
+            audio = FLAC(file_path) if suffix == ".flac" else _open_ogg(file_path)
+            if audio is None:
+                return present
             vtags = audio.tags
             for field in fields:
                 if field == "cover_art_data":
-                    if any(getattr(p, "type", None) == 3 for p in audio.pictures):
+                    if suffix == ".flac" and any(
+                        getattr(p, "type", None) == 3 for p in audio.pictures
+                    ):
                         present.add(field)
                     continue
                 if vtags is None:
@@ -410,7 +417,13 @@ def _write_tags_to_file_impl(
     # MP4/M4A carries the same metadata in atoms rather than ID3 frames or
     # Vorbis comments; without this branch every m4a write logged "Unsupported
     # file format" and did nothing.
-    if suffix not in (".mp3", ".flac", ".m4a", ".mp4"):
+    #
+    # ⚠️ OGG BELONGS IN THIS LIST. ``get_supported_audio_formats`` counts
+    # ``.ogg`` as a supported library format, so Ogg tracks are scanned, stored
+    # and genre-pooled exactly like FLAC — but the writer refused them, so a
+    # genre resync reported "changed" in the database while every Ogg file kept
+    # its old tags and logged "Unsupported file format: .ogg".
+    if suffix not in (".mp3", ".flac", ".m4a", ".mp4", ".ogg", ".opus"):
         logger.warning("Unsupported file format: %s", suffix)
         return False
 
@@ -456,6 +469,8 @@ def _write_tags_atomic(file_path: str, tags: Dict[str, Any]) -> bool:
             ok = write_mp4_tags(tmp_path, tags)
         elif suffix == ".flac":
             ok = write_flac_tags(tmp_path, tags)
+        elif suffix in (".ogg", ".opus"):
+            ok = write_ogg_tags(tmp_path, tags)
         else:
             logger.error("Unsupported file format: %s", suffix)
             return False
@@ -849,6 +864,95 @@ def write_flac_tags(file_path: str, tags: Dict[str, Any]) -> bool:
     except Exception as exc:
         logger.error("Failed to write FLAC tags: %s", exc, exc_info=True)
         return False
+
+
+def _open_ogg(file_path: str) -> Any:
+    """Open an Ogg file, trying Vorbis first and Opus second.
+
+    An ``.ogg`` extension does not determine the codec: Ogg containers hold
+    Vorbis, Opus, FLAC or Speex. Only the first two carry Vorbis comments, and
+    mutagen's readers each reject the other's stream, so the class has to be
+    discovered by trying. Returns None when neither reader accepts the file.
+    """
+    if not MUTAGEN_AVAILABLE:
+        return None
+    try:
+        from mutagen.oggvorbis import OggVorbis
+
+        return OggVorbis(file_path)
+    except Exception:
+        pass
+    try:
+        from mutagen.oggopus import OggOpus
+
+        return OggOpus(file_path)
+    except Exception:
+        return None
+
+
+def write_ogg_tags(file_path: str, tags: Dict[str, Any]) -> bool:
+    """Write Vorbis comments to an Ogg Vorbis / Ogg Opus file.
+
+    Ogg carries the SAME Vorbis comment structure as FLAC — ``GENRE``,
+    ``TRACKNUMBER``, ``DATE``, ``MUSICBRAINZ_*`` — so the field mapping and the
+    multi-value handling are shared rather than reimplemented.
+
+    Cover art is skipped deliberately: Ogg embeds it as a
+    ``METADATA_BLOCK_PICTURE`` comment holding the base64 of a FLAC picture
+    block, and writing that half-right would corrupt art that is already there.
+    The genre resync only sends ``genres``, so nothing it needs is lost.
+    """
+    if not MUTAGEN_AVAILABLE:
+        logger.error("Mutagen not available for Ogg writing")
+        return False
+
+    audio = _open_ogg(file_path)
+    if audio is None:
+        logger.error("Failed to open Ogg file %s", file_path)
+        return False
+
+    try:
+        if audio.tags is None:
+            audio.add_tags()
+
+        _heal_duplicate_album_artist_tags(audio)
+
+        for field, value in tags.items():
+            if field in _NON_TAG_KEYS or field == "cover_art_data":
+                continue
+
+            _canonical = canonical_tag_name(field)
+            if _canonical:
+                field = clear_vorbis_variants(audio, _canonical)
+            else:
+                field = _VORBIS_FIELD_MAP.get(field, field)
+
+            if value is None or str(value).strip() == "":
+                try:
+                    if field in audio:
+                        del audio[field]
+                except Exception:
+                    pass
+                continue
+
+            if field.lower() == "genre":
+                genres = _split_genres(value)
+                if genres:
+                    audio[field] = genres
+                elif field in audio:
+                    del audio[field]
+            elif isinstance(value, (list, tuple, set)):
+                audio[field] = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                audio[field] = [str(value)]
+
+        audio.save()
+        return True
+
+    except Exception as exc:
+        logger.error("Failed to write Ogg tags to %s: %s", file_path, exc, exc_info=True)
+        return False
+
 
 # =============================================================================
 # PUBLIC WRAPPERS

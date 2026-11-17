@@ -13,7 +13,7 @@ It is the genre twin of ``services.popularity.star_resync_service``:
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 import structlog
 from sqlalchemy import text
@@ -205,11 +205,16 @@ def _push_to_files(
     *,
     write_file_tags: bool,
     sync_navidrome: bool,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Write the new genres onto the audio files, then nudge Navidrome.
 
     Returns ``{"files_written", "files_failed", "navidrome"}`` so the caller can
     report what actually reached the library rather than only what the DB says.
+
+    ``on_progress`` is called with ``(files_done, files_total)`` every 100 files.
+    This loop is the slow half of an apply — one read-modify-write per changed
+    track — so it is the half that most needs a moving progress bar.
     """
     out: dict[str, Any] = {"files_written": 0, "files_failed": 0, "navidrome": None}
 
@@ -222,7 +227,16 @@ def _push_to_files(
         except Exception as exc:
             logger.warning("Genre resync: tag writer unavailable", error=str(exc))
         else:
-            for row in changed_rows:
+            total = len(changed_rows)
+            for index, row in enumerate(changed_rows, start=1):
+                if on_progress is not None and index % 100 == 0:
+                    try:
+                        on_progress(index, total)
+                    except Exception as exc:
+                        logger.debug(
+                            "Genre resync write progress callback failed",
+                            error=str(exc),
+                        )
                 track_id = str(row.get("track_id") or "")
                 if not track_id:
                     continue
@@ -279,6 +293,7 @@ def resync_genres(
     dry_run: bool = False,
     write_file_tags: bool | None = None,
     sync_navidrome: bool | None = None,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Recompute final genres for stored tracks from their stored evidence.
 
@@ -291,6 +306,11 @@ def resync_genres(
             this the column changed but Navidrome kept showing the old genres,
             because Navidrome reads the FILES.
         sync_navidrome: Override the configured rescan request.
+        on_progress: Called with ``(done, total, files_written)`` as the work
+            advances. The full-library pass is the longest step of a genre
+            apply — aggregation over ~70k tracks, then a tag write per changed
+            file — and without this the apply's progress bar sat at its opening
+            2% for the entire job.
 
     Returns:
         ``{"ok", "dry_run", "tracks", "with_evidence", "changed",
@@ -318,7 +338,22 @@ def resync_genres(
     changed_rows: list[dict[str, Any]] = []
     with_evidence = 0
 
-    for row in rows:
+    total_rows = len(rows)
+
+    def _report(done: int, files_written: int = 0) -> None:
+        """Publish progress. Never fatal — a callback must not abort the job."""
+        if on_progress is None:
+            return
+        try:
+            on_progress(done, total_rows, files_written)
+        except Exception as exc:
+            logger.debug("Genre resync progress callback failed", error=str(exc))
+
+    for index, row in enumerate(rows, start=1):
+        # Report every 500 tracks: one frame per track would be 70k writes to
+        # the progress file for no visible benefit.
+        if index % 500 == 0:
+            _report(index)
         source_map = _source_map(row)
         if not source_map:
             continue
@@ -367,6 +402,11 @@ def resync_genres(
             changed_rows,
             write_file_tags=bool(write_file_tags),
             sync_navidrome=bool(sync_navidrome),
+            on_progress=(
+                lambda done, total: _report(
+                    total_rows, files_written=done
+                )
+            ) if on_progress else None,
         )
 
     elapsed = round(time.monotonic() - started, 2)

@@ -196,9 +196,9 @@ class TestTheBuilderCanPlan:
 class TestApplyOrdering:
     def test_genres_are_written_before_playlists_are_rebuilt(self) -> None:
         src = inspect.getsource(svc.apply_genre_playlist_resync)
-        assert src.index("_genre_changes(dry_run=False)") < src.index(
-            "_create_genre_top_track_playlists("
-        ), (
+        genre_at = src.index("_genre_changes(dry_run=False")
+        rebuild_at = src.index("_create_genre_top_track_playlists(")
+        assert genre_at < rebuild_at, (
             "the playlists were rebuilt before the new genres were written, so "
             "the OLD membership would be pushed back"
         )
@@ -225,7 +225,9 @@ class TestApplyOrdering:
         """A failed job must not lock the feature out until a restart."""
         monkeypatch.setattr(
             svc, "_genre_changes",
-            lambda dry_run: (_ for _ in ()).throw(RuntimeError("boom")),
+            lambda dry_run, on_progress=None: (_ for _ in ()).throw(
+                RuntimeError("boom")
+            ),
         )
         result = svc.apply_genre_playlist_resync()
         assert result.get("ok") is False
@@ -239,7 +241,7 @@ class TestApplyOrdering:
             svc, "_write_progress", lambda **kw: frames.append(kw)
         )
         monkeypatch.setattr(svc, "_genre_changes",
-                            lambda dry_run: {"ok": True, "changed": 2})
+                            lambda dry_run, on_progress=None: {"ok": True, "changed": 2})
         monkeypatch.setattr(
             svc, "_create_genre_top_track_playlists",
             lambda **kw: 3, raising=False,

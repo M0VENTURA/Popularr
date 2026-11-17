@@ -196,7 +196,7 @@ def _release_apply() -> None:
 # Step 1: the genre comparison
 # ---------------------------------------------------------------------------
 
-def _genre_changes(dry_run: bool):
+def _genre_changes(dry_run: bool, on_progress=None):
     """Genre changes from stored evidence. Thin wrapper over the resync service.
 
     Delegated rather than reimplemented: "what should this track's genres be"
@@ -204,7 +204,10 @@ def _genre_changes(dry_run: bool):
     """
     from services.enrichment.genre_resync_service import resync_genres
 
-    return resync_genres(dry_run=dry_run)
+    kwargs = {"dry_run": dry_run}
+    if on_progress is not None:
+        kwargs["on_progress"] = on_progress
+    return resync_genres(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -620,14 +623,55 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
         )
 
         # ── Phase 1: compute + write the genres ────────────────────────────
-        genre_result = _genre_changes(dry_run=False)
+        #
+        # ⚠️ THIS PHASE USED TO PUBLISH NOTHING UNTIL IT WAS OVER.
+        #
+        # The bar opened at 2% and the next frame was 50% — written only after
+        # the whole-library aggregation AND every per-file tag write had
+        # finished. On a 70k-track library that is the longest stretch of the
+        # job, so the UI sat at "2%" for minutes and looked hung.
+        #
+        # The callback splits the phase honestly: aggregation is the first half
+        # of the band, the file writes the second.
+        def _genre_progress(done: int, total: int, files_written: int) -> None:
+            try:
+                if files_written:
+                    # File-writing sub-phase: the tail of this band.
+                    frac = (files_written / total) if total else 0.0
+                    _write_progress(
+                        running=True, percent=25.0 + 25.0 * min(1.0, frac),
+                        phase=PHASE_APPLY,
+                        processed=files_written, total=total,
+                        detail=f"Writing genre tags to files ({files_written}/{total})…",
+                        status="running",
+                    )
+                else:
+                    # Aggregation sub-phase: the first half.
+                    frac = (done / total) if total else 0.0
+                    _write_progress(
+                        running=True, percent=2.0 + 23.0 * min(1.0, frac),
+                        phase=PHASE_APPLY,
+                        processed=done, total=total,
+                        detail=f"Recomputing genres ({done}/{total} tracks)…",
+                        status="running",
+                    )
+            except Exception as exc:  # progress must never abort the job
+                logger.debug(
+                    "Genre/playlist resync progress frame failed", error=str(exc)
+                )
+
+        genre_result = _genre_changes(dry_run=False, on_progress=_genre_progress)
         if not genre_result.get("ok", True):
             raise RuntimeError(genre_result.get("error") or "genre step failed")
         changed = int(genre_result.get("changed") or 0)
         _write_progress(
             running=True, percent=50.0, phase=PHASE_APPLY,
             processed=changed, total=changed,
-            detail=f"{changed} track genre set(s) updated", status="running",
+            detail=(
+                f"{changed} track genre set(s) updated"
+                f" · {int(genre_result.get('files_written') or 0)} file(s) written"
+            ),
+            status="running",
         )
 
         # ── Phase 2: rebuild the playlists ────────────────────────────────

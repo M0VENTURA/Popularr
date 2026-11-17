@@ -635,10 +635,51 @@ async def api_queue_upcoming() -> Any:
         year = int(rel_date[:4]) if len(rel_date) >= 4 and rel_date[:4].isdigit() else None
         release_mbid = (release.get("release_group_mbid") or "").strip() or None
 
+        # ⚠️ THE STORED ID IS A RELEASE-GROUP ID, NOT A RELEASE ID.
+        #
+        # ``upcoming_releases.release_group_mbid`` is filled from the MusicBrainz
+        # release-GROUP search, which is what discovery returns. But
+        # ``start_release_download`` fetches a concrete RELEASE
+        # (``get_release``), so a group id only works once something has resolved
+        # it to a release. For a MATCHED upcoming album that resolution is worth
+        # attempting here, because the group usually has at least one concrete
+        # release (often with a partial or full tracklist) even before the public
+        # date.
+        #
+        # Without this, an unreleased album fell straight through to the
+        # single-item fallback below — reported as "it doesn't queue each of the
+        # songs into the download queue under the album, it adds the album as a
+        # single item".
+        concrete_release_id = None
+        if release_mbid:
+            try:
+                from services.enrichment.musicbrainz_service import (
+                    resolve_release_id as _resolve_release_id,
+                )
+
+                _resolved = str(_resolve_release_id(release_mbid) or "").strip()
+                if _resolved and _resolved != release_mbid:
+                    concrete_release_id = _resolved
+                    logger.debug(
+                        "Upcoming release group resolved to a concrete release",
+                        release_id=release_id,
+                        release_group_mbid=release_mbid,
+                        concrete_release_id=concrete_release_id,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Could not resolve the release group to a concrete release",
+                    release_id=release_id, release_group_mbid=release_mbid,
+                    error=str(exc),
+                )
+
         if release_mbid:
             try:
                 result = start_release_download(
-                    release_mbid,
+                    # Prefer the concrete release when one was resolved: the
+                    # group id alone yields no tracklist, which is what made a
+                    # per-track queue impossible for an upcoming album.
+                    concrete_release_id or release_mbid,
                     album,
                     artist,
                     method="slskd",
@@ -690,6 +731,7 @@ async def api_queue_upcoming() -> Any:
                         
                     return jsonify({
                         "success": True,
+                        "queue_shape": "tracks",
                         "total_tracks": queued_tracks,
                         "queued_tracks": queued_tracks,
                         "artist": artist,
@@ -707,6 +749,11 @@ async def api_queue_upcoming() -> Any:
                     release_id=release_id, album=album, error=str(exc),
                 )
 
+        # ── LAST RESORT: one album-typed row ───────────────────────────────
+        # Reached only when the release could not be resolved to a concrete
+        # tracklist. A single album row is still useful as a fallback, but it is
+        # NOT a per-track queue, so the response says which shape was used and
+        # why — otherwise the two outcomes are indistinguishable to the caller.
         queued = insert_queue_item(
             artist=artist,
             title=album,
@@ -716,6 +763,14 @@ async def api_queue_upcoming() -> Any:
             year=year,
             release_mbid=release_mbid,
             import_type="album",
+        )
+        logger.info(
+            "Upcoming release queued as a SINGLE album item — no tracklist was "
+            "resolvable",
+            release_id=release_id,
+            album=album,
+            release_group_mbid=release_mbid,
+            concrete_release_id=concrete_release_id,
         )
 
         with db_session() as session:
@@ -735,6 +790,14 @@ async def api_queue_upcoming() -> Any:
             "queue_id": queued.get("id"),
             "artist": artist,
             "album": album,
+            # ``album`` = ONE row covering the whole release (no tracklist was
+            # available). ``tracks`` = one row per track. A caller can tell them
+            # apart and say so, instead of implying a per-track queue.
+            "queue_shape": "album",
+            "message": (
+                "Queued as a single album item — MusicBrainz had no resolvable "
+                "tracklist for this release yet."
+            ),
         })
     except Exception as exc:
         logger.error("Failed to queue upcoming release", release_id=release_id, error=str(exc), exc_info=True)

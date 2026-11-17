@@ -228,10 +228,25 @@ async function loadMatchedTracklist(detailsEl) {
 function bindMatchedTracklistToggles(listEl) {
   listEl.querySelectorAll('details.matched-tracklist').forEach((detailsEl) => {
     detailsEl.addEventListener('toggle', () => {
+      // Remember the choice so a poll-driven re-render can restore it.
+      const releaseId = detailsEl.getAttribute('data-release-id') || '';
+      if (releaseId) {
+        if (detailsEl.open) window.__openMatchedTracklists.add(releaseId);
+        else window.__openMatchedTracklists.delete(releaseId);
+      }
       if (detailsEl.open) loadMatchedTracklist(detailsEl);
     });
   });
 }
+
+/**
+ * Release ids whose matched tracklist the user has opened.
+ *
+ * The panel is refreshed on a timer and every refresh replaces
+ * `list.innerHTML`, so expansion has to be remembered by RELEASE id — DOM
+ * nodes do not survive the re-render.
+ */
+window.__openMatchedTracklists = window.__openMatchedTracklists || new Set();
 
 async function renderUnmatchedFolders(options) {
   const section = document.getElementById('unmatchedFoldersSection');
@@ -239,6 +254,22 @@ async function renderUnmatchedFolders(options) {
   const badge = document.getElementById('unmatchedFoldersBadge');
   if (!section || !list) return;
 
+  // One refresh in flight at a time. The folder listing walks the downloads
+  // directory and reads every audio file's tags, so an overlapping request is
+  // both wasteful and able to repaint a stale list out of order. A POLL stands
+  // down; an ACTION (confirm / delete / prune) waits its turn, because dropping
+  // it would leave the panel showing a folder the user just deleted.
+  if (window.__unmatchedInFlight) {
+    if (!(options && (options.force || options.forceRender))) return;
+    if (window.__unmatchedPending) await window.__unmatchedPending.catch(() => {});
+    if (window.__unmatchedInFlight) return;
+  }
+
+  // Set BEFORE the body starts: it runs synchronously up to its first await,
+  // and its own finally clears this flag.
+  window.__unmatchedInFlight = true;
+
+  const run = (async () => {
   try {
     const data = await fetchJsonOrThrow('/api/downloads/unmatched-folders');
     const folders = data.folders || [];
@@ -246,6 +277,8 @@ async function renderUnmatchedFolders(options) {
     if (folders.length === 0) {
       section.style.display = 'none';
       list.innerHTML = '';
+      window.__emptyUnmatchedFolders = [];
+      window.__openMatchedTracklists.clear();
       if (badge) badge.textContent = '0 items';
       return;
     }
@@ -298,9 +331,43 @@ async function renderUnmatchedFolders(options) {
     list.innerHTML = html;
     bindMatchedTracklistToggles(list);
     attachUnmatchedFolderActions(list);
+    restoreOpenMatchedTracklists(list);
   } catch (error) {
     console.error('Error loading unmatched folders:', error);
+  } finally {
+    window.__unmatchedInFlight = false;
+    window.__unmatchedPending = null;
   }
+  })();
+
+  window.__unmatchedPending = run;
+  return run;
+}
+
+/**
+ * Re-open tracklists that were open before the last re-render.
+ *
+ * The panel is now refreshed on a timer, and every refresh replaces
+ * `list.innerHTML` — which would slam shut a tracklist somebody was reading.
+ * Expansion is remembered by RELEASE id because the DOM nodes do not survive
+ * the re-render.
+ */
+function restoreOpenMatchedTracklists(listEl) {
+  if (!listEl || !window.__openMatchedTracklists.size) return;
+
+  const seen = new Set();
+  listEl.querySelectorAll('details.matched-tracklist').forEach((detailsEl) => {
+    const releaseId = detailsEl.getAttribute('data-release-id') || '';
+    if (!releaseId) return;
+    seen.add(releaseId);
+    if (!window.__openMatchedTracklists.has(releaseId) || detailsEl.open) return;
+    detailsEl.open = true;
+    loadMatchedTracklist(detailsEl);
+  });
+
+  Array.from(window.__openMatchedTracklists).forEach((releaseId) => {
+    if (!seen.has(releaseId)) window.__openMatchedTracklists.delete(releaseId);
+  });
 }
 
 async function deleteAllEmptyFolders(btn) {
@@ -477,6 +544,23 @@ document.addEventListener('DOMContentLoaded', function() {
   if (typeof window.renderUnmatchedFolders === 'function') {
     window.renderUnmatchedFolders();
   }
+
+  // ⚠️ THE PANEL USED TO BE RENDERED EXACTLY ONCE, HERE.
+  //
+  // Nothing refreshed it afterwards — downloads.js's queue poll re-renders the
+  // QUEUE only — so a folder whose files finished arriving a few seconds after
+  // page load never appeared, and a panel that came up empty stayed hidden
+  // until a manual reload. That is the reported "the discovered files section
+  // isn't always active to select".
+  if (document.getElementById('unmatchedFoldersSection')) {
+    window.__unmatchedPoller = setInterval(function () {
+      if (document.hidden) return;
+      if (typeof window.renderUnmatchedFolders === 'function') {
+        window.renderUnmatchedFolders();
+      }
+    }, 30000);
+  }
+
   if (document.getElementById('upcomingReleasesMonitor')) {
     refreshUpcomingReleasesMonitor();
   }

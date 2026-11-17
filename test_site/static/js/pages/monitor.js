@@ -47,6 +47,16 @@
 
   const CSV_BATCH_SIZE = 10;
 
+  /**
+   * How often the Matched & Unmatched Folders section re-reads its folder list.
+   *
+   * The endpoint walks the downloads directory and reads tags out of every
+   * audio file, so this is deliberately slower than the 10s queue poll beside
+   * it. A download finishing is visible within half a minute, without paying
+   * for a full directory-and-tags scan every ten seconds.
+   */
+  const UNMATCHED_REFRESH_MS = 30000;
+
   function esc(value) {
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
   }
@@ -198,6 +208,39 @@
 
   /** Empty folders from the last render, for the "Prune All" action. */
   let emptyFolders = [];
+
+  /**
+   * Poller for the Matched & Unmatched Folders section.
+   *
+   * ⚠️ THIS SECTION USED TO BE RENDERED EXACTLY ONCE, AT DOMContentLoaded.
+   *
+   * Nothing refreshed it afterwards. `download-queue.js` runs a 10s
+   * queue poller on this page, but that poller only re-renders the QUEUE
+   * lists — it never touched `#unmatchedFoldersList`. The only other
+   * triggers were the section's own buttons.
+   *
+   * So the section went stale the moment the page finished loading, and the
+   * reported symptom follows: the newly-discovered files "aren't always
+   * active to select". A download finishing a few seconds after load, or a
+   * scan run from another tab, left the panel showing the folder list as it
+   * was at load time — or absent entirely, because the hide-when-empty branch
+   * had already run and nothing ever re-evaluated it.
+   *
+   * The refresh is interval-based rather than pushed: only the folder DELETE
+   * and CONFIRM actions emit a signal here, while files arriving from the
+   * download processor do not announce themselves to this page.
+   */
+  let unmatchedPoller = null;
+
+  /**
+   * One refresh in flight at a time.
+   *
+   * The folder listing walks the downloads directory and reads tags out of
+   * every audio file to derive artist/album, so a tick is NOT free — and
+   * neither the confirm/delete handlers nor the poller may overlap it.
+   */
+  let unmatchedInFlight = false;
+  let unmatchedPending = null;
 
   // ── Folder rows ────────────────────────────────────────────────────────
   //
@@ -368,6 +411,12 @@
   function bindMatchedTracklistToggles(listEl) {
     listEl.querySelectorAll('details.matched-tracklist').forEach((detailsEl) => {
       detailsEl.addEventListener('toggle', () => {
+        // Remember the choice so a poll-driven re-render can restore it.
+        const releaseId = detailsEl.getAttribute('data-release-id') || '';
+        if (releaseId) {
+          if (detailsEl.open) openTracklists.add(releaseId);
+          else openTracklists.delete(releaseId);
+        }
         if (detailsEl.open) loadMatchedTracklist(detailsEl);
       });
     });
@@ -455,56 +504,114 @@
     });
   }
 
-  async function renderUnmatchedFolders() {
+  /**
+   * Release ids whose tracklist `<details>` the user has opened.
+   *
+   * A periodic refresh replaces `list.innerHTML`, which would slam shut a
+   * tracklist somebody was reading — the same class of bug as a poller
+   * collapsing an expanded queue row. Expansion is therefore remembered by
+   * RELEASE id (not by DOM node, which does not survive the re-render) and
+   * re-applied afterwards.
+   */
+  const openTracklists = new Set();
+
+  async function renderUnmatchedFolders(options) {
     const section = document.getElementById('unmatchedFoldersSection');
     const list = document.getElementById('unmatchedFoldersList');
     const badge = document.getElementById('unmatchedFoldersBadge');
     if (!section || !list) return;
 
-    try {
-      const data = await global.api.getJson('/api/downloads/unmatched-folders');
-      const folders = data.folders || [];
-
-      if (!folders.length) {
-        section.style.display = 'none';
-        list.innerHTML = '';
-        emptyFolders = [];
-        if (badge) badge.textContent = '0 items';
-        return;
-      }
-
-      section.style.display = 'block';
-      if (badge) badge.textContent = `${folders.length} item(s)`;
-
-      emptyFolders = folders.filter((f) => f.status !== 'matched' && !(f.audio_count > 0));
-      const withContent = folders.filter((f) => f.status === 'matched' || (f.audio_count || 0) > 0);
-
-      let html = '';
-      if (withContent.length) {
-        html += '<div class="list-group list-group-flush">'
-          + withContent.map(buildFolderRow).join('')
-          + '</div>';
-      }
-      if (emptyFolders.length) {
-        html += `
-          <div class="list-group list-group-flush">
-            <div class="list-group-item d-flex justify-content-between align-items-center">
-              <span class="text-muted">
-                <i class="bi bi-folder-x me-1"></i> Empty Folders (${emptyFolders.length})
-              </span>
-              <button class="btn btn-sm btn-outline-danger py-0" id="pruneEmptyFoldersBtn">
-                <i class="bi bi-trash3"></i> Prune All
-              </button>
-            </div>
-          </div>`;
-      }
-
-      list.innerHTML = html;
-      attachFolderActions(list);
-      bindMatchedTracklistToggles(list);
-    } catch (error) {
-      console.error('Error loading unmatched folders:', error);
+    // The poller fires while a confirm/delete handler may already be
+    // refreshing. A POLL tick stands down when one is in flight — overlapping
+    // requests can land out of order and repaint a stale list. An ACTION
+    // (confirm, delete, prune) must never be dropped, so it waits for the
+    // in-flight render and then runs: skipping it would leave the panel
+    // showing a folder the user just deleted.
+    if (unmatchedInFlight) {
+      if (!(options && options.force)) return;
+      if (unmatchedPending) await unmatchedPending.catch(() => {});
+      if (unmatchedInFlight) return;
     }
+
+    unmatchedInFlight = true;
+    unmatchedPending = (async () => {
+      try {
+        const data = await global.api.getJson('/api/downloads/unmatched-folders');
+        const folders = data.folders || [];
+
+        if (!folders.length) {
+          section.style.display = 'none';
+          list.innerHTML = '';
+          emptyFolders = [];
+          openTracklists.clear();
+          if (badge) badge.textContent = '0 items';
+          return;
+        }
+
+        section.style.display = 'block';
+        if (badge) badge.textContent = `${folders.length} item(s)`;
+
+        emptyFolders = folders.filter((f) => f.status !== 'matched' && !(f.audio_count > 0));
+        const withContent = folders.filter((f) => f.status === 'matched' || (f.audio_count || 0) > 0);
+
+        let html = '';
+        if (withContent.length) {
+          html += '<div class="list-group list-group-flush">'
+            + withContent.map(buildFolderRow).join('')
+            + '</div>';
+        }
+        if (emptyFolders.length) {
+          html += `
+            <div class="list-group list-group-flush">
+              <div class="list-group-item d-flex justify-content-between align-items-center">
+                <span class="text-muted">
+                  <i class="bi bi-folder-x me-1"></i> Empty Folders (${emptyFolders.length})
+                </span>
+                <button class="btn btn-sm btn-outline-danger py-0" id="pruneEmptyFoldersBtn">
+                  <i class="bi bi-trash3"></i> Prune All
+                </button>
+              </div>
+            </div>`;
+        }
+
+        list.innerHTML = html;
+        attachFolderActions(list);
+        bindMatchedTracklistToggles(list);
+        restoreOpenTracklists(list);
+      } catch (error) {
+        console.error('Error loading unmatched folders:', error);
+      } finally {
+        unmatchedInFlight = false;
+        unmatchedPending = null;
+      }
+    })();
+
+    return unmatchedPending;
+  }
+
+  /** Re-open the tracklists that were open before the last re-render. */
+  function restoreOpenTracklists(listEl) {
+    if (!listEl || !openTracklists.size) return;
+
+    // Prune ids that no longer exist, so repeated polls cannot grow the set
+    // without bound as folders come and go.
+    const seen = new Set();
+
+    listEl.querySelectorAll('details.matched-tracklist').forEach((detailsEl) => {
+      const releaseId = detailsEl.getAttribute('data-release-id') || '';
+      if (!releaseId) return;
+      seen.add(releaseId);
+
+      // ``buildFolderRow`` renders `open` when the tracklist is already
+      // cached, so this only has to act on the ones it left closed.
+      if (!openTracklists.has(releaseId) || detailsEl.open) return;
+      detailsEl.open = true;
+      loadMatchedTracklist(detailsEl);
+    });
+
+    Array.from(openTracklists).forEach((releaseId) => {
+      if (!seen.has(releaseId)) openTracklists.delete(releaseId);
+    });
   }
 
   async function deleteFolder(path) {
@@ -547,7 +654,7 @@
       } else {
         global.toast.success(`Deleted ${folders.length} empty folder(s)`);
       }
-      await renderUnmatchedFolders();
+      await renderUnmatchedFolders({ force: true });
     });
   }
 
@@ -575,7 +682,7 @@
               folder_path: btn.dataset.path,
               release_mbid: btn.dataset.mbid,
             });
-            await renderUnmatchedFolders();
+            await renderUnmatchedFolders({ force: true });
             if (typeof global.loadQueueStatus === 'function') global.loadQueueStatus();
           } catch (error) {
             global.toast.error(error.message);
@@ -597,7 +704,7 @@
           return global.buttonState.withBusy(btn, '', async () => {
             try {
               await deleteFolder(btn.dataset.path);
-              await renderUnmatchedFolders();
+              await renderUnmatchedFolders({ force: true });
             } catch (error) {
               global.toast.error(error.message);
             }
@@ -644,7 +751,7 @@
           folder_path: target,
           mb_id: selected.id,
         });
-        await renderUnmatchedFolders();
+        await renderUnmatchedFolders({ force: true });
         // The point of a manual match is seeing WHAT it matched: open the
         // new association's tracklist straight away rather than leaving the
         // row saying only "Matched".
@@ -663,7 +770,7 @@
       try {
         await global.api.postJson('/api/downloads/discover', {});
         if (typeof global.loadQueueStatus === 'function') await global.loadQueueStatus();
-        await renderUnmatchedFolders();
+        await renderUnmatchedFolders({ force: true });
       } catch (error) {
         global.toast.error(error.message);
       }
@@ -676,7 +783,7 @@
       try {
         await global.api.postJson('/api/downloads/process-albums', {});
         if (typeof global.loadQueueStatus === 'function') await global.loadQueueStatus();
-        await renderUnmatchedFolders();
+        await renderUnmatchedFolders({ force: true });
       } catch (error) {
         global.toast.error(error.message);
       }
@@ -822,7 +929,23 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     bindActions();
+
+    // Render once for a fast first paint, then keep it current.
+    //
+    // The one-shot render left the panel frozen at load time: files finishing
+    // their download, or a scan started from elsewhere, never appeared. The
+    // managed poller pauses in a background tab, never overlaps a request, and
+    // stops on teardown — the section is now as live as the queue beside it.
     renderUnmatchedFolders();
+
+    if (document.getElementById('unmatchedFoldersSection')) {
+      unmatchedPoller = global.poller.create({
+        interval: UNMATCHED_REFRESH_MS,
+        onTick: renderUnmatchedFolders,
+      });
+      unmatchedPoller.start();
+    }
+
     if (document.getElementById('upcomingReleasesMonitor')) {
       refreshUpcomingReleases();
     }
