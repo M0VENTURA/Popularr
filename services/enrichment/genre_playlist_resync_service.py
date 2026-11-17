@@ -694,6 +694,44 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
 
         written = _create_genre_top_track_playlists(cleanup_orphans=True)
 
+        # ⭐ THE CURATED PLAYLISTS ARE GENRE-DERIVED TOO.
+        #
+        # "Metal - Great Covers" decides its membership with
+        # ``classify_main_genre`` over each track's FINAL genres, so a library-
+        # wide genre rewrite makes it stale in exactly the same way as the genre
+        # top-tracks lists — yet only the top-tracks lists were rebuilt.
+        #
+        # That is the reported "the Metal Covers playlist has not changed: the
+        # new covers export has exactly the same 150 file paths, in the same
+        # order". The entries whose final genre is only "Cover" stayed because
+        # nothing ever asked the covers builder to re-evaluate them.
+        #
+        # The covers family pools library-wide, so it is reconciled as a whole
+        # rather than per genre — the same reasoning as the top-tracks rebuild.
+        covers_written = 0
+        try:
+            from services.popularity.stages.finalise_stage import (
+                _create_covers_playlist,
+            )
+            from helpers.config_helpers import get_config
+
+            _pl_cfg = (get_config() or {}).get("playlists") or {}
+            if bool(_pl_cfg.get("covers_playlist_enabled", False)):
+                _write_progress(
+                    running=True, percent=75.0, phase=PHASE_PLAYLISTS,
+                    detail="Rebuilding covers playlists…", status="running",
+                )
+                if _create_covers_playlist(_pl_cfg):
+                    covers_written = 1
+        except Exception as exc:
+            # A covers failure must not fail the genre job — the genres are
+            # already written and the top-tracks playlists already synced.
+            logger.warning(
+                "Genre/playlist resync: covers rebuild failed", error=str(exc)
+            )
+
+        written = int(written or 0) + covers_written
+
         elapsed = round(time.monotonic() - started, 2)
         result = {
             "genres_changed": changed,

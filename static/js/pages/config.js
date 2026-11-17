@@ -377,9 +377,11 @@
         genre_playlist_ai_cover_regenerate: getChecked('playlists_genre_ai_cover_regenerate', false),
         genre_playlist_ai_cover_prompt: getValue('playlists_genre_ai_cover_prompt', ''),
         playlist_order_mode: getValue('playlists_order_mode', 'final_score') || 'final_score',
+        // Fallback is 4, matching the template and the Python resolver — not
+        // 25, which a save would then persist as the effective cap.
         genre_playlists_max_per_artist: (() => {
-          const raw = parseInt(getValue('playlists_max_per_artist', '25'), 10);
-          return Number.isFinite(raw) ? Math.max(0, raw) : 25;
+          const raw = parseInt(getValue('playlists_max_per_artist', '4'), 10);
+          return Number.isFinite(raw) ? Math.max(0, raw) : 4;
         })(),
         playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
         // genre_exclusions was REMOVED — playlists pool purely from Final

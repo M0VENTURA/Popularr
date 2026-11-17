@@ -994,11 +994,18 @@
       genre_playlist_ai_cover_regenerate: getChecked('playlists_genre_ai_cover_regenerate', false),
       genre_playlist_ai_cover_prompt: getValue('playlists_genre_ai_cover_prompt', ''),
       playlist_order_mode: getValue('playlists_order_mode', 'final_score') || 'final_score',
-      // ⚠️ Math.max(0, raw), NOT `|| 25`: 0 means "no per-artist cap", so a
+      // ⚠️ Math.max(0, raw), NOT `|| 4`: 0 means "no per-artist cap", so a
       // `|| default` guard would make that impossible to express.
+      //
+      // ⚠️ THE FALLBACK IS 4, NOT 25. It read '25' while the template, the
+      // Python resolver and the help text all said 4. A config that predates
+      // the key therefore loaded as 25 in this page and — on any save — wrote
+      // 25 BACK, which is the reported "the artist cap still looks like five
+      // rather than three or four": the effective cap was whatever a stale
+      // value happened to be, not the documented default.
       genre_playlists_max_per_artist: (() => {
-        const raw = parseInt(getValue('playlists_max_per_artist', '25'), 10);
-        return Number.isFinite(raw) ? Math.max(0, raw) : 25;
+        const raw = parseInt(getValue('playlists_max_per_artist', '4'), 10);
+        return Number.isFinite(raw) ? Math.max(0, raw) : 4;
       })(),
       playlist_interleave_artists: getChecked('playlists_interleave_artists', true),
       // Reorders a finished playlist once per ISO week. Applied AFTER the cap,

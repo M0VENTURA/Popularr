@@ -149,18 +149,23 @@ class TestTheTrackPoolsByItsFinalGenres:
         genres, _owned = fs()._resolve_playlist_genres(track, max_genres=3)
         assert genres == ["Punk Rock"]
 
-    def test_a_track_with_no_final_genres_falls_back_to_its_own_sources(self) -> None:
-        """Never silently drop a track that simply has not been aggregated yet.
+    def test_a_track_with_no_final_genres_pools_nowhere(self) -> None:
+        """A track whose Final Genres are empty belongs in NO genre playlist.
 
-        ⚠️ The source columns are normalised to lower case by
-        ``iter_genre_tokens``, so the fallback returns the provider's spelling
-        as stored. Only the ANSWER matters here, not its casing — the final
-        ``genres`` path preserves the display casing.
+        ⚠️ THIS USED TO FALL BACK TO THE SOURCE COLUMNS, and that fallback was
+        the reported leak: a track whose Final Genres are only "Cover" has an
+        empty MUSICAL pool, so the fallback resurrected whatever the provider
+        last said and put it back in a playlist its metadata no longer claimed.
+
+        The provider columns are still there (they are the evidence the selector
+        reads), but they are not a substitute for a computed result. A track
+        that has not been aggregated yet simply is not in any genre playlist
+        until it has.
         """
         track = row(genres="", musicbrainz_genres="Punk Rock")
         genres, owned = fs()._resolve_playlist_genres(track, max_genres=3)
-        assert owned is True
-        assert [g.casefold() for g in genres] == ["punk rock"]
+        assert genres == []
+        assert owned is False
 
     def test_a_track_with_nothing_at_all_pools_nowhere(self) -> None:
         genres, owned = fs()._resolve_playlist_genres(row(genres=""), max_genres=3)

@@ -3421,6 +3421,17 @@ def process_track(
                 ("navidrome_genres", "navidrome@track"),
                 ("audiodb_genres", "audiodb@track"),
                 ("wikidata_genres", "wikidata@track"),
+                # ⭐ LOCAL AUDIO ANALYSIS.
+                #
+                # ``essentia_genres`` was already stored and already used by the
+                # genre RESYNC and by VA/album aggregation, but this per-track
+                # path — which is where most final genres are computed — ignored
+                # it. The two paths therefore disagreed about the same track.
+                #
+                # It carries a deliberately low weight (0.45), so it cannot
+                # outvote a provider; it corroborates, and it supplies a genre
+                # when nothing else did (see ``essentia_fallback``).
+                ("essentia_genres", "essentia@track"),
             ]:
                 raw = effective_track.get(key) or track.get(key)
                 if raw:

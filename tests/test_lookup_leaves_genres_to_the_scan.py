@@ -155,7 +155,6 @@ class TestTheStripStaysInTheSavePath:
             ("services/metadata/album_service.py", "apply_genres_to_album"),
             ("services/metadata/album_service.py", "bulk_tag_tracks"),
             ("services/metadata/album_tag_sync_service.py", "sync_album_file_tags("),
-            ("services/scanning/pipelines/essentia_scanner.py", "update_file_tags(file_path"),
         ],
     )
     def test_the_documented_writers_still_exist(self, rel: str, marker: str):
@@ -163,3 +162,18 @@ class TestTheStripStaysInTheSavePath:
         changelog's map is stale."""
         source = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert marker in source, f"{rel}: expected `{marker}`"
+
+    def test_the_essentia_scanner_is_no_longer_a_genre_writer(self):
+        """It was, and that made it a second writer of ``tracks.genres``.
+
+        Essentia is EVIDENCE: it fills ``essentia_genres`` (and the audio
+        features / moods) and the selector turns that into the Final Genres.
+        Writing the verdict from the analysis scan bypassed every rule in
+        the selector — metal-over-rock arbitration and redundancy cleanup
+        included — and, because it also rewrote the file's genre frame, it
+        won even after a later genre resync.
+        """
+        source = (
+            REPO_ROOT / "services/scanning/pipelines/essentia_scanner.py"
+        ).read_text(encoding="utf-8")
+        assert "update_file_tags(file_path" not in source

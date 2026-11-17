@@ -40,10 +40,7 @@ import structlog
 
 from db.utils import get_db_connection_raw, is_transient_pg_startup_error
 from helpers.logging_config import log_unified
-from services.metadata.tag_file_service import (
-    sync_track_tags_to_file,
-    update_file_tags,
-)
+from services.metadata.tag_file_service import sync_track_tags_to_file
 
 logger = structlog.get_logger(__name__)
 
@@ -210,44 +207,62 @@ def _read_essentia_mood_from_file(file_path: str) -> str | None:
     ext = os.path.splitext(file_path)[1].lower()
     mood: str | None = None
 
+    def _joined(raw: Any) -> str | None:
+        """Every mood value, joined — not just the first.
+
+        Essentia's ``--mood-threshold`` emits one tag PER mood above the
+        threshold, and mutagen hands back a LIST. Taking ``raw[0]`` silently
+        discarded all but one, so a track tagged "Aggressive; Energetic;
+        Dark" was stored as "Aggressive" and the rest were unrecoverable
+        without re-analysing the whole file.
+        """
+        if not raw:
+            return None
+        if isinstance(raw, str):
+            values = [raw]
+        else:
+            values = [str(v) for v in raw]
+        cleaned = [v.strip() for v in values if v and str(v).strip()]
+        return "; ".join(cleaned) if cleaned else None
+
     try:
         if ext == ".flac":
             audio = FLAC(file_path)
-            raw = audio.get("MOOD") or audio.get("mood")
-            mood = raw[0] if raw else None
+            mood = _joined(audio.get("MOOD") or audio.get("mood"))
         elif ext == ".mp3":
             audio = ID3(file_path)
             for tag in audio.getall("COMM"):
                 if getattr(tag, "desc", "") == "Essentia Mood":
-                    texts = getattr(tag, "text", [])
-                    if texts:
-                        mood = str(texts[0])
+                    # ``text`` is the full list; the old code took ``texts[0]``.
+                    mood = _joined(getattr(tag, "text", []))
                     break
         elif ext in (".ogg", ".oga"):
             audio = OggVorbis(file_path)
-            raw = audio.get("MOOD") or audio.get("mood")
-            mood = raw[0] if raw else None
+            mood = _joined(audio.get("MOOD") or audio.get("mood"))
         elif ext == ".opus":
             audio = OggOpus(file_path)
-            raw = audio.get("MOOD") or audio.get("mood")
-            mood = raw[0] if raw else None
+            mood = _joined(audio.get("MOOD") or audio.get("mood"))
         elif ext in (".m4a", ".m4b", ".mp4", ".aac"):
             audio = MP4(file_path)
             raw = audio.get("----:com.apple.iTunes:MOOD")
             if raw:
-                first = raw[0]
-                mood = first.decode("utf-8") if hasattr(first, "decode") else str(first)
+                # MP4 freeform values arrive as BYTES; decode each one before
+                # joining, or the list would render as ``b'Aggressive'``.
+                decoded = [
+                    v.decode("utf-8", "replace") if hasattr(v, "decode") else str(v)
+                    for v in raw
+                ]
+                mood = _joined(decoded)
         elif ext == ".wma":
             audio = ASF(file_path)
-            raw = audio.get("WM/Mood")
-            mood = str(raw[0]) if raw else None
+            mood = _joined(audio.get("WM/Mood"))
         else:
             audio = mutagen.File(file_path)
             if audio and audio.tags:
                 for key in ("Mood", "MOOD", "mood"):
                     val = audio.tags.get(key)
                     if val:
-                        mood = str(val[0]) if isinstance(val, list) else str(val)
+                        mood = _joined(val)
                         break
     except Exception as exc:
         logger.debug(
@@ -349,67 +364,6 @@ def _extract_child_genres(genre_str: str) -> list[str]:
             seen_lower.add(child.lower())
             child_genres.append(child)
     return child_genres
-
-
-def _read_existing_tcon_genres(file_path: str) -> list[str]:
-    try:
-        import mutagen
-        from mutagen.id3 import ID3
-        from mutagen.flac import FLAC
-        from mutagen.mp4 import MP4
-        from mutagen.oggvorbis import OggVorbis
-        from mutagen.oggopus import OggOpus
-        from mutagen.asf import ASF
-    except ImportError:
-        return []
-
-    ext = os.path.splitext(file_path)[1].lower()
-    raw_genres: list[str] = []
-
-    try:
-        if ext == ".mp3":
-            audio = ID3(file_path)
-            tcon = audio.get("TCON")
-            if tcon:
-                raw_genres = [str(t).strip() for t in getattr(tcon, "text", []) if str(t).strip()]
-        elif ext == ".flac":
-            audio = FLAC(file_path)
-            raw = audio.get("GENRE") or audio.get("genre") or []
-            raw_genres = [str(v).strip() for v in raw if str(v).strip()]
-        elif ext in (".ogg", ".oga"):
-            audio = OggVorbis(file_path)
-            raw = audio.get("GENRE") or audio.get("genre") or []
-            raw_genres = [str(v).strip() for v in raw if str(v).strip()]
-        elif ext == ".opus":
-            audio = OggOpus(file_path)
-            raw = audio.get("GENRE") or audio.get("genre") or []
-            raw_genres = [str(v).strip() for v in raw if str(v).strip()]
-        elif ext in (".m4a", ".m4b", ".mp4", ".aac"):
-            audio = MP4(file_path)
-            raw = audio.get("\xa9gen") or []
-            raw_genres = [str(v).strip() for v in raw if str(v).strip()]
-        elif ext == ".wma":
-            audio = ASF(file_path)
-            raw = audio.get("WM/Genre") or []
-            raw_genres = [str(v).strip() for v in raw if str(v).strip()]
-    except Exception as exc:
-        logger.debug(
-            "Failed to read existing genres from file",
-            file=file_path,
-            error=str(exc),
-        )
-
-    return [g for g in raw_genres if _ESSENTIA_GENRE_SEPARATOR not in g]
-
-
-def _merge_genres(existing: list[str], new_genres: list[str]) -> list[str]:
-    seen_lower = {g.lower() for g in existing}
-    result = list(existing)
-    for g in new_genres:
-        if g.lower() not in seen_lower:
-            seen_lower.add(g.lower())
-            result.append(g)
-    return result
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -934,6 +888,35 @@ def run_essentia_mood_scan(
             continue
 
         # ------------------------------------------------------------------
+        # Snapshot the file's genre tag BEFORE Essentia touches it.
+        #
+        # ``GENRE`` is a SHARED channel: the Essentia script writes its
+        # "Parent---Child" findings there, and this app writes the Final Genres
+        # there too. Reading the tag after the run therefore cannot tell who
+        # wrote what, and treating all of it as Essentia's output would feed our
+        # own conclusions back in as independent acoustic evidence on the next
+        # pass — a feedback loop that would keep confirming whatever the selector
+        # last decided.
+        #
+        # The difference between BEFORE and AFTER is the only honest answer, and
+        # it works for every ``genre_format`` (``raw`` and ``child_only`` carry
+        # no separator to key off).
+        _pre_essentia_children: set[str] = set()
+        if tag_genres:
+            try:
+                _pre_essentia_children = {
+                    g.lower() for g in _extract_child_genres(
+                        _read_essentia_genre_from_file(file_path) or ""
+                    )
+                }
+            except Exception as _snap_exc:
+                logger.debug(
+                    "Essentia scan: could not snapshot existing genres",
+                    file=file_path,
+                    error=str(_snap_exc),
+                )
+
+        # ------------------------------------------------------------------
         # Run Essentia subprocess on this file
         # ------------------------------------------------------------------
         cmd = base_cmd + [file_path]
@@ -1006,35 +989,62 @@ def run_essentia_mood_scan(
                 updates["mood"] = mood_str
                 updates["mood_source"] = "essentia"
                 updates["mood_confidence"] = 0.5
+                # ⭐ The column exists on ``tracks`` and was NEVER written, so
+                # nothing could tell when a mood was last computed — a rescan
+                # could not distinguish a fresh verdict from a years-old one.
+                updates["mood_last_updated"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%S", time.gmtime()
+                )
 
             if genre_str and tag_genres:
                 child_genres = _extract_child_genres(genre_str)
-                existing_genres = _read_existing_tcon_genres(file_path)
-                merged_genres = _merge_genres(existing_genres, child_genres)
 
-                if merged_genres:
+                # Only what Essentia ADDED. Anything already in the tag before
+                # the run is the library's own genre text (this app writes the
+                # Final Genres to the same GENRE tag), so counting it as acoustic
+                # evidence would launder our own output back into the vote.
+                child_genres = [
+                    g for g in child_genres if g.lower() not in _pre_essentia_children
+                ]
+
+                if child_genres:
+                    # ⚠️ ``essentia_genres`` HOLDS ONLY ESSENTIA'S OWN VERDICT.
+                    #
+                    # This used to merge the file's existing GENRE tag into the
+                    # column. That was harmless while the column was write-only,
+                    # but it becomes a FEEDBACK LOOP now that the selector reads
+                    # ``essentia_genres`` as evidence: the file's GENRE tag IS
+                    # the Final Genres this app writes back, so the column would
+                    # re-import our own output as if it were independent acoustic
+                    # analysis, and the next pass would score it again.
+                    #
+                    # Each scan therefore APPENDS what Essentia found for this
+                    # track; it never absorbs tag text from the file.
                     existing_raw = _row_get(row, "essentia_genres", 7, "")
                     try:
                         existing_list = json.loads(existing_raw) if existing_raw else []
                     except (json.JSONDecodeError, TypeError):
                         existing_list = []
-                    all_genres = list(dict.fromkeys(existing_list + child_genres))
+                    all_genres = list(dict.fromkeys(
+                        [str(g) for g in existing_list if str(g).strip()] + child_genres
+                    ))
                     updates["essentia_genres"] = json.dumps(all_genres)
-                    # NOTE: the consensus-owned ``genres`` column is NOT
-                    # written here — Essentia is a MOOD/AUDIO provider, and
-                    # genre assignment flows through the consensus aggregator
-                    # (track_stage) so Essentia's text tags can never dictate
-                    # a track's official genres (the "Korn / Nu Metal under
-                    # Essentia Moods" contamination).
-                    updates["genres"] = "; ".join(merged_genres[:3])
 
-                    # Sync merged genres to file tags
-                    write_ok = update_file_tags(file_path, {"genre": "; ".join(merged_genres)})
-                    if not write_ok:
-                        logger.debug(
-                            "Failed to write genre tags to file",
-                            file=file_path,
-                        )
+                    # ⚠️ ``tracks.genres`` AND THE FILE TAGS ARE NOT WRITTEN HERE.
+                    #
+                    # The comment used to say exactly that and then assign
+                    # ``updates["genres"]`` and call ``update_file_tags`` on the
+                    # next two lines. That made Essentia a second writer of the
+                    # consensus column, so a scan could overwrite the Final
+                    # Genres that the aggregator had just cleaned up — and because
+                    # it also rewrote the FILE, it won even after a later resync,
+                    # since Navidrome reads the files.
+                    #
+                    # Essentia is EVIDENCE. ``essentia_genres`` is its column; the
+                    # selector turns evidence into ``genres`` (see the genre
+                    # resync / popularity scan). Writing the verdict from here
+                    # bypassed every rule in that selector, including the
+                    # metal-over-rock arbitration and the redundancy cleanup.
 
             if parse_json_features:
                 features = _read_essentia_features_from_json(file_path, json_output_dir=json_output_dir)

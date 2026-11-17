@@ -120,7 +120,6 @@ from services.catalog.album_classification_service import (
     is_christmas_track,
     is_instrumental_track_title,
     is_live_or_alternate_track_title,
-    iter_genre_tokens,
     normalize_primary_release_type,
 )
 from services.popularity.popularity_math import (
@@ -138,10 +137,7 @@ from services.popularity.popularity_math import (
     star_then_popularity_order_key,
 )
 from services.popularity.popularity_zscore import composite_listener_z
-from services.enrichment.genre_aggregation_service import (
-    is_playlist_pool_genre,
-    playlist_pool_genres,
-)
+from services.enrichment.genre_aggregation_service import playlist_pool_genres
 from services.playlists.playlist_taxonomy import GENRE as GENRE_PLAYLIST_TYPE
 
 logger = structlog.get_logger(__name__)
@@ -4678,40 +4674,6 @@ def _sync_playlist_to_navidrome(
     return synced
 
 
-#: The per-source genre columns a track OWNS (written for that track by the
-#: track stage), as opposed to ``tracks.genres``, which on an ordinary album is
-#: a single blended list fanned out to every row.
-_TRACK_OWN_GENRE_COLUMNS: tuple[str, ...] = (
-    "lastfm_tags",
-    "musicbrainz_genres",
-    "discogs_genres",
-    "listenbrainz_genres",
-    "spotify_genres",
-    "essentia_genres",
-    "manual_genres",
-    "navidrome_genres",
-    "audiodb_genres",
-    "wikidata_genres",
-)
-
-
-def _track_own_genre_tokens(row: dict[str, Any]) -> list[str]:
-    """Every genre token the TRACK itself carries, from its per-source columns."""
-    tokens: list[str] = []
-    for column in _TRACK_OWN_GENRE_COLUMNS:
-        raw = row.get(column)
-        if not raw:
-            continue
-        tokens.extend(iter_genre_tokens(raw))
-    seen: set[str] = set()
-    out: list[str] = []
-    for token in tokens:
-        if token not in seen:
-            seen.add(token)
-            out.append(token)
-    return out
-
-
 def _resolve_playlist_genres(
     row: dict[str, Any],
     *,
@@ -4742,21 +4704,31 @@ def _resolve_playlist_genres(
 
     ``owned=True`` means the track supplied its own genre evidence;
     ``owned=False`` means the album-level blend had to stand in.
+
+    ⚠️ THERE IS NO SOURCE-TAG FALLBACK ANY MORE.
+
+    It used to fall back to ``_track_own_genre_tokens`` (lastfm_tags,
+    musicbrainz_genres, discogs_genres, …) whenever the final value was empty,
+    so a track pooled by genres its Final Genres never named. That is exactly
+    the reported leak:
+
+        Placebo – Bigmouth Strikes Again   Final Genres: "Cover"
+        → musicbrainz_genres still said "Alternative Rock"
+        → pooled into Alternative Rock
+
+    Every example in that report — the four Cover/Remix tracks in Alternative
+    Rock, the twelve metal-less entries in Metal Covers — is a track whose final
+    genres are ONLY a performance marker. ``playlist_pool_genres`` correctly
+    drops "Cover", leaving nothing, and the fallback then resurrected the
+    provider's stale genre.
+
+    A track with no musical Final Genre belongs in NO genre playlist. That is
+    the honest reading of "the playlist must agree with what Navidrome shows",
+    and it is what the eligibility rule has been asking for.
     """
     final = playlist_pool_genres(row.get("genres"), limit=max_genres)
     if final:
         return final, True
-
-    # No final value yet (never aggregated, or genuinely empty). Fall back to
-    # the track's own source tags so a track is not silently dropped from every
-    # playlist, then to the album blend.
-    own = [
-        g
-        for g in _track_own_genre_tokens(row)
-        if is_playlist_pool_genre(g)
-    ]
-    if own:
-        return own[:max_genres], True
     return [], False
 
 

@@ -229,6 +229,25 @@ class SelectionSettings:
     #: this fraction of the ancestor's score. A weaker ``synthpop`` must not
     #: delete the better-supported ``pop`` tag.
     ancestor_replace_min_ratio: float = 0.80
+    #: When NOTHING else produced a genre, accept the best local audio-derived
+    #: candidate (Essentia) even though its weight cannot clear the first-slot
+    #: floor on its own.
+    #:
+    #: 0.45 (Essentia's weight) can never reach 0.60, so as pure corroboration it
+    #: only ever reinforces or fills later slots — correct when provider evidence
+    #: exists, useless when it does not. A track whose ONLY evidence is acoustic
+    #: analysis would get no genres at all, which is what "stored, scanned and
+    #: pooled but never used" looked like on the library.
+    #:
+    #: ⭐ THIS IS A FALLBACK, NOT A PROMOTION. It fires exclusively when the
+    #: provider pool produced nothing, so it cannot displace or outrank a
+    #: MusicBrainz/Last.fm/Discogs result.
+    essentia_fallback: bool = True
+    #: Source key the fallback may rescue from. Only LOCAL audio analysis is
+    #: eligible: a provider is never "nothing else exists" in the same sense,
+    #: because a lone provider tag is exactly the weak evidence the floors exist
+    #: to reject.
+    fallback_source: str = "essentia"
 
 
 #: The report's "recommended starting values" for provider trust. Deliberately
@@ -452,6 +471,8 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         # overrule a stronger rock body of evidence.
         metal_over_rock_min_ratio=_num("metal_over_rock_min_ratio", 0.80),
         ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
+        essentia_fallback=_bool("essentia_fallback", True),
+        fallback_source=str(raw.get("fallback_source") or "essentia").strip(),
         keep_together=_pairs("keep_together", DEFAULT_KEEP_TOGETHER),
         conditional_keep=_pairs("conditional_keep", DEFAULT_CONDITIONAL_KEEP),
         mutually_exclusive=_pairs(
@@ -1428,6 +1449,77 @@ def select_genres(
     return selected
 
 
+def _apply_local_fallback(
+    pool: list[Candidate],
+    *,
+    settings: SelectionSettings,
+    reasons: list[dict[str, Any]] | None = None,
+) -> tuple[list[Candidate], list[dict[str, Any]]]:
+    """Rescue the best local-audio genre when no provider produced one.
+
+    ⭐ WHY THIS EXISTS SEPARATELY FROM THE FLOORS.
+
+    The confidence floors exist to stop weak evidence taking a slot, and a
+    low-weight local source should never outvote MusicBrainz. But "weak relative
+    to MusicBrainz" is not the same as "worthless": on a track nobody has tagged,
+    acoustic analysis is the ONLY evidence there is, and applying the floor left
+    it with no genres at all despite the file having been analysed and its result
+    stored.
+
+    So this runs only when the normal selection came back EMPTY. It cannot
+    displace a provider genre, because there is nothing to displace — that is the
+    whole guarantee, and the reason this is not just a lower floor.
+
+    Signals carrying is restricted to ``settings.fallback_source``: a lone
+    provider tag is exactly the weak evidence the floors are for, and rescuing it
+    would quietly disable them for every under-tagged track in the library.
+    """
+    if not pool:
+        return [], (reasons or [])
+
+    fallback_source = (settings.fallback_source or "essentia").strip().lower()
+
+    eligible = [
+        candidate
+        for candidate in pool
+        if any(
+            contribution.source == fallback_source
+            for contribution in candidate.contributions
+        )
+    ]
+    if not eligible:
+        return [], (reasons or [])
+
+    # Only bands that RESTATE another slot are dropped; the point is to keep the
+    # rescue narrow, not to re-run the whole policy stack on one source.
+    eligible = [
+        candidate
+        for candidate in eligible
+        if candidate.specificity > 0 or len(eligible) == 1
+    ] or eligible
+
+    ranked = sorted(
+        eligible,
+        key=lambda c: (c.confidence, c.score, c.specificity),
+        reverse=True,
+    )
+    kept = ranked[: max(1, settings.max_genres)]
+
+    # The normal trim already recorded these as "below the floor" / "outside the
+    # limit". Say the real reason instead, so an explanation does not read like a
+    # failure for a track that was in fact rescued.
+    kept_ids = {c.genre_id for c in kept}
+    if reasons is not None:
+        reasons[:] = [r for r in reasons if r.get("id") not in kept_ids]
+
+    logger.debug(
+        "Genre from local-audio fallback — no provider evidence",
+        source=fallback_source,
+        genres=[c.display for c in kept],
+    )
+    return kept, (reasons or [])
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1516,6 +1608,23 @@ def select_album_or_track_genres(
 
     # ── 5. Final cardinality ─────────────────────────────────────────────
     selected, trim_removed = trim_to_final(pool, settings=settings)
+
+    # ── 5b. Local-audio fallback ─────────────────────────────────────────
+    # ⭐ ONLY WHEN NOTHING ELSE PRODUCED A GENRE.
+    #
+    # A local analysis source (Essentia) carries a deliberately low weight, so
+    # its confidence cannot clear the first-slot floor. That is right while
+    # provider evidence exists — it keeps acoustic guesses from outvoting
+    # MusicBrainz — but it means a track with ONLY that evidence ended up with
+    # no genres at all, having been scanned and stored.
+    #
+    # This runs AFTER the trim, so it can never displace a provider-derived
+    # genre: if the trim selected anything, the fallback does not act.
+    if not selected and settings.essentia_fallback:
+        selected, trim_removed = _apply_local_fallback(
+            pool, settings=settings, reasons=trim_removed
+        )
+
     removed.extend(trim_removed)
 
     winners = {c.genre_id for c in selected}
