@@ -909,6 +909,122 @@ def bulk_delete_tracks(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     }, 200 if deleted_count else 500
 
 
+def apply_album_wide_ids(
+    *,
+    artist: str,
+    album: str,
+    album_mbid: str | None = None,
+    release_group_mbid: str | None = None,
+    clear_album_mbid: bool = False,
+) -> dict[str, Any]:
+    """Write the album's RELEASE identity to EVERY row of that album.
+
+    ⭐ WHY THIS IS SEPARATE FROM THE PAGE SAVE.
+
+    ``album_detail`` scopes its track list to ONE release group, so a folder
+    whose files disagree about their release group renders the majority's rows
+    and silently omits the others. The page save therefore only corrected the
+    rows it displayed, and a file carrying a stale id kept it — then the next
+    Navidrome import read that stale id back off the file and re-imported the
+    album under the wrong release (the reported "I save the metadata and it
+    still keeps importing as SKZ2020").
+
+    A release id describes the ALBUM, so it belongs on every row of that album
+    whether or not the page had room to show it. Delegates to
+    :func:`update_album_ids`, which already performs the DB + file fan-out, so
+    there is one implementation of "apply an id to an album".
+
+    Args:
+        album_mbid: the new release id. ``None`` means "not part of this save".
+        release_group_mbid: the new release-group id. ``None`` = leave alone.
+        clear_album_mbid: explicitly CLEAR the release id. This is the only way
+            to remove one, and it is distinct from ``album_mbid=None``.
+
+    Returns:
+        ``{"rows_updated": int, "files_updated": int}``.
+    """
+    if not artist or not album:
+        return {"rows_updated": 0, "files_updated": 0}
+
+    payload: dict[str, Any] = {"artist": artist, "album": album}
+
+    if clear_album_mbid:
+        # ``update_album_ids`` writes only non-empty values, and an explicit
+        # clear must not simply be skipped — push the clear directly.
+        try:
+            with db_session() as session:
+                result = session.execute(
+                    text(
+                        "UPDATE tracks SET musicbrainz_album_mbid = '', "
+                        "musicbrainz_albumid = '' "
+                        "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) "
+                        "= LOWER(:artist) AND LOWER(album) = LOWER(:album)"
+                    ),
+                    {"artist": artist, "album": album},
+                )
+                rows_updated = result.rowcount or 0
+        except Exception as exc:
+            logger.warning(
+                "Album-wide release id clear failed",
+                artist=artist, album=album, error=str(exc),
+            )
+            return {"rows_updated": 0, "files_updated": 0}
+
+        files_updated = _clear_album_id_file_tags(artist, album)
+        return {"rows_updated": rows_updated, "files_updated": files_updated}
+
+    if album_mbid:
+        payload["musicbrainz_release_id"] = album_mbid
+    if release_group_mbid:
+        payload["musicbrainz_release_group_id"] = release_group_mbid
+    if len(payload) == 2:
+        return {"rows_updated": 0, "files_updated": 0}
+
+    result, _status = update_album_ids(payload)
+    return {
+        "rows_updated": int(result.get("rows_updated") or 0),
+        "files_updated": int(result.get("files_updated") or 0),
+    }
+
+
+def _clear_album_id_file_tags(artist: str, album: str) -> int:
+    """Delete the album-id frame from every file of *artist*/*album*."""
+    cleared = 0
+    try:
+        from services.metadata.tag_file_service import (
+            resolve_music_file_path,
+            update_file_tags,
+        )
+
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT file_path FROM tracks "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "AND LOWER(album) = LOWER(:album)"
+                ),
+                {"artist": artist, "album": album},
+            ).fetchall() or []
+
+        for row in rows:
+            resolved = resolve_music_file_path(str(row[0] or "") if row[0] else None)
+            if not resolved:
+                continue
+            try:
+                # "" is the writers' explicit delete-this-frame signal.
+                if update_file_tags(
+                    resolved, {"musicbrainz_albumid": ""}, force=True
+                ):
+                    cleared += 1
+            except Exception as exc:
+                logger.debug(
+                    "Album id clear failed on file", file=resolved, error=str(exc)
+                )
+    except Exception as exc:
+        logger.debug("Album id clear fan-out failed", error=str(exc))
+    return cleared
+
+
 def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """Update release IDs for an album's tracks."""
     artist = str(payload.get("artist") or "").strip()

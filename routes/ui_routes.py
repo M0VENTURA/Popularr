@@ -2400,9 +2400,24 @@ async def album_detail(album_path: str) -> Any:
     )
     release_groups = sorted({_release_group_of(t) for t in tracks} - {""})
 
+    # ⚠️ ROWS THIS PAGE CANNOT SHOW ARE STILL IN THE ALBUM.
+    #
+    # The scoping below deliberately puts ONE release on a page. The cost is
+    # that a folder holding files from two releases renders as if the odd ones
+    # do not exist: the album looks complete, its tracklist is short, and the
+    # only clue is a release id that disagrees with the album name. That
+    # silence is what made a stale SKZ2020 id look like "the fields aren't
+    # saving" — the file was never on the page that was edited.
+    #
+    # So the rows left out are COUNTED and reported. They are not shown in the
+    # tracklist (they belong to another release), but the user can see that the
+    # folder is not uniform, which is the fact that resolves the confusion.
+    _unscoped_tracks: list[dict[str, Any]] = []
+
     if album_rg_filter:
         scoped = [t for t in tracks if _release_group_of(t) == album_rg_filter]
         if scoped:
+            _unscoped_tracks = [t for t in tracks if t not in scoped]
             tracks = scoped
     elif len(release_groups) == 1:
         # ONE release group → ONE page, even when the URL carries a year.
@@ -2434,6 +2449,7 @@ async def album_detail(album_path: str) -> Any:
             if not _release_group_of(t) or _release_group_of(t) == _primary
         ]
         if scoped:
+            _unscoped_tracks = [t for t in tracks if t not in scoped]
             tracks = scoped
             if _primary:
                 album_rg_filter = _primary
@@ -2470,6 +2486,38 @@ async def album_detail(album_path: str) -> Any:
             return redirect(f"{_canonical}?{_qs}" if _qs else _canonical)
 
     tracks = [_coerce_track_numerics(t) for t in tracks]
+
+    # The rows this page had to leave out, grouped by the release they belong
+    # to, so the banner can say WHICH other release they are from. Empty when
+    # the folder is uniform — the overwhelmingly common case.
+    _other_releases: list[dict[str, Any]] = []
+    if _unscoped_tracks:
+        _by_group: dict[str, list[dict[str, Any]]] = {}
+        for _t in _unscoped_tracks:
+            _by_group.setdefault(_release_group_of(_t) or "", []).append(_t)
+        for _group, _rows in sorted(
+            _by_group.items(), key=lambda kv: (-len(kv[1]), kv[0])
+        ):
+            _release_id = ""
+            for _row in _rows:
+                _release_id = str(
+                    _row.get("musicbrainz_album_mbid")
+                    or _row.get("musicbrainz_albumid")
+                    or ""
+                ).strip()
+                if _release_id:
+                    break
+            _other_releases.append(
+                {
+                    "release_group_mbid": _group,
+                    "release_mbid": _release_id,
+                    "count": len(_rows),
+                    "titles": [
+                        str(_row.get("title") or "").strip()
+                        for _row in _rows[:10]
+                    ],
+                }
+            )
 
     if request.method == "POST":
         form = await request.form
@@ -3107,6 +3155,59 @@ async def album_detail(album_path: str) -> Any:
             _updated, _failed = _persist_album_track_payloads(_db_payloads)
             updated_count += _updated
             db_failures += _failed
+
+            # ── Phase 2c: the RELEASE IDENTITY is album-wide, not per page ───
+            #
+            # ⚠️ THE LOOP ABOVE ONLY SEES THE ROWS ON THIS PAGE.
+            #
+            # ``album_detail`` scopes its row list to ONE release group (the one
+            # holding the most tracks), so a folder whose files disagree about
+            # their release group renders as an album with the majority's rows
+            # and the odd file is simply absent. Saving then wrote the corrected
+            # ``musicbrainz_albumid`` to those rows only: the odd file kept the
+            # OLD id, the next Navidrome import read it back off the file, and
+            # the album re-imported under the wrong release — the reported
+            # "I save the metadata and it still keeps importing as SKZ2020".
+            #
+            # A release id describes the ALBUM, so it must land on every row of
+            # that album, on and off the page. This is the same fan-out the
+            # album-page button and ``/api/album/update-ids`` already perform;
+            # it is repeated here because the page save is how the user actually
+            # edits the field.
+            if _album_mbid_field or _album_rg_field:
+                try:
+                    from services.metadata.album_service import (
+                        apply_album_wide_ids,
+                    )
+
+                    _album_wide = apply_album_wide_ids(
+                        artist=(new_artist or artist_name),
+                        album=(new_title or album_name),
+                        album_mbid=album_mbid if _album_mbid_field else None,
+                        release_group_mbid=(
+                            album_rg_mbid if _album_rg_field else None
+                        ),
+                        clear_album_mbid=(
+                            _album_mbid_field is not None and not album_mbid
+                        ),
+                    )
+                    if _album_wide.get("rows_updated", 0) > updated_count:
+                        # Rows outside this page's scope were corrected too; count
+                        # them so the save does not report a partial edit.
+                        updated_count = int(_album_wide.get("rows_updated") or 0)
+                    logger.info(
+                        "Album save: release identity fanned out album-wide",
+                        artist=artist_name, album=album_name,
+                        rows_updated=_album_wide.get("rows_updated"),
+                        files_updated=_album_wide.get("files_updated"),
+                    )
+                except Exception as _wide_err:
+                    # Never fatal — the page's own rows are already saved.
+                    logger.warning(
+                        "Album save: album-wide release id fan-out failed",
+                        artist=artist_name, album=album_name,
+                        error=str(_wide_err),
+                    )
 
             # ── Do-not-search-album-release flag ─────────────────────────────
             # A custom album (not on MusicBrainz/Discogs) can be marked so the
@@ -3776,6 +3877,10 @@ async def album_detail(album_path: str) -> Any:
         slskd_config=cfg.get("slskd", {}),
         all_album_years=all_album_years,
         active_album_year=album_year_filter,
+        # Rows in this album that belong to a DIFFERENT release, so the page can
+        # say so instead of silently omitting them.
+        other_releases=_other_releases,
+        unscoped_track_count=len(_unscoped_tracks),
     )
 
 

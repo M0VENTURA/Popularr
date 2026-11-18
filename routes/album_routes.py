@@ -571,18 +571,73 @@ def api_album_duration_checks() -> Any:
     return jsonify(result), 200
 
 
-@album_bp.route("/musicbrainz", methods=["POST"])
+@album_bp.route("/musicbrainz", methods=["POST", "GET"])
 async def api_album_musicbrainz_lookup() -> Any:
-    """Lookup album on MusicBrainz."""
+    """Lookup album on MusicBrainz.
+
+    ⚠️ GET IS ACCEPTED, AND NOT AS A COURTESY.
+
+    The Corrections page's "Find MBID" button called this endpoint with
+    ``api.getJson('/api/album/musicbrainz?artist=…&album=…')`` while the route
+    was POST-only and read a JSON body. The request never reached this handler:
+    Quart answered ``405 Method Not Allowed`` with its own HTML error page, and
+    the page reported
+
+        "Server-side search failed: Server returned HTML instead of JSON
+         (HTTP 405). This usually means an auth/session redirect…"
+
+    which reads like an authentication problem and is not one. Query-string
+    parameters are accepted so the GET form works as well as the POST one;
+    the body is still preferred because that is what the album page sends.
+    """
     data = (await request.get_json(force=True, silent=True)) or {}
-    album = data.get("album", "")
-    artist = data.get("artist", "")
-    existing_mbid = (data.get("existing_mbid") or "").strip()
-    
+    album = (data.get("album") or request.args.get("album") or "").strip()
+    artist = (data.get("artist") or request.args.get("artist") or "").strip()
+    existing_mbid = (
+        data.get("existing_mbid") or request.args.get("existing_mbid") or ""
+    ).strip()
+
     if not album or not artist:
         return jsonify({"error": "Missing album or artist"}), 400
-        
+
     result, status_code = _pop_status(lookup_musicbrainz_album(artist, album, existing_mbid))
+
+    # ⭐ RESOLVE EACH RELEASE-GROUP TO A CONCRETE RELEASE.
+    #
+    # ``lookup_musicbrainz_album`` searches release GROUPS — that is the right
+    # unit to match an album NAME against, but the "Apply MBID" action writes
+    # the id it is given into ``musicbrainz_album_mbid`` and the
+    # ``musicbrainz_albumid`` FILE TAG, which must be a RELEASE id.
+    #
+    # Without this the Corrections page offered group ids and applying one
+    # reproduced the split the page exists to repair (a group id is not a
+    # release, so Navidrome files those tracks under a release that does not
+    # exist). Resolving here means the caller always gets something it may
+    # safely write, and ``release_mbid`` is offered alongside for callers that
+    # want the distinction explicitly.
+    if isinstance(result, dict) and result.get("results"):
+        try:
+            from services.enrichment.musicbrainz_service import resolve_release_id
+
+            for entry in result["results"]:
+                group_id = str(entry.get("mbid") or "").strip()
+                if not group_id or entry.get("mbid_type") != "release-group":
+                    continue
+                resolved = str(resolve_release_id(group_id) or "").strip()
+                # ``resolve_release_id`` returns its input when it cannot find a
+                # concrete release, so a differing value is the only proof.
+                if resolved and resolved != group_id:
+                    entry["release_group_mbid"] = group_id
+                    entry["mbid"] = resolved
+                    entry["mbid_type"] = "release"
+        except Exception as exc:
+            # Never fatal: the caller still gets the group list, and the page
+            # shows the ids it can. A resolution outage must not 500 the search.
+            logger.warning(
+                "MusicBrainz lookup: could not resolve release groups",
+                artist=artist, album=album, error=str(exc),
+            )
+
     return jsonify(result), status_code
 
 

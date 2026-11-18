@@ -773,20 +773,39 @@
   async function searchAndApplyAlbumMbid(album, rowIndex, button) {
     return global.buttonState.withBusy(button, '', async () => {
       try {
-        const data = await global.api.getJson(
-          `/api/album/musicbrainz?artist=${encodeURIComponent(artistName)}` +
-          `&album=${encodeURIComponent(album)}`
-        );
-        const results = Array.isArray(data.releases) ? data.releases : [];
+        // ⚠️ POST, not GET, and ``results``, not ``releases``.
+        //
+        // This called ``global.api.getJson('/api/album/musicbrainz?…')`` while
+        // the route is declared ``methods=["POST"]`` and reads its arguments
+        // from the JSON body. A GET therefore never reached the handler: Quart
+        // answered 405 with its own HTML error page, and the toast reported
+        //     "MusicBrainz search failed: Server returned HTML instead of JSON
+        //      (HTTP 405). This usually means an auth/session redirect…"
+        // which reads like an auth problem and is not one.
+        //
+        // The payload key was wrong too — ``lookup_musicbrainz_album`` returns
+        // ``{"results": [...]}``, so even a successful call would have looked
+        // empty.
+        const data = await global.api.postJson('/api/album/musicbrainz', {
+          artist: artistName,
+          album,
+        });
+        const results = Array.isArray(data.results) ? data.results : [];
         if (!results.length) {
           global.toast.info(`No MusicBrainz releases found for ${artistName} — ${album}`);
           return;
         }
 
         const shown = results.slice(0, 8);
+        // ⚠️ The search result names its fields ``mbid`` / ``first_release_date``,
+        // NOT ``id`` / ``date``. Reading the wrong names would have listed eight
+        // candidates with a blank id and then refused every one of them with
+        // "The selected release has no MBID."
         const options = shown.map((release, idx) => {
-          const date = release.date ? ` (${release.date})` : '';
-          return `${idx + 1}. ${release.title || album}${date}\n   ${release.id || ''}`;
+          const date = release.first_release_date
+            ? ` (${release.first_release_date})`
+            : '';
+          return `${idx + 1}. ${release.title || album}${date}\n   ${release.mbid || ''}`;
         }).join('\n\n');
 
         const choice = global.prompt(`Select the release number to apply:\n\n${options}\n\nEnter number:`);
@@ -799,14 +818,14 @@
         }
 
         const selected = shown[selectedIdx];
-        if (!selected || !selected.id) {
+        if (!selected || !selected.mbid) {
           global.toast.warning('The selected release has no MBID.');
           return;
         }
 
         // withBusy already owns the button, so call the core apply directly
         // rather than nesting another withBusy inside it.
-        await applyAlbumMbidNow(album, selected.id);
+        await applyAlbumMbidNow(album, selected.mbid);
       } catch (error) {
         global.toast.error('MusicBrainz search failed: ' + error.message);
       }

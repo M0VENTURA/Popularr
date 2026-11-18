@@ -259,6 +259,51 @@
             <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2" onclick="alignTracklist()"><i class="bi bi-list-check"></i> Align</button>
           </div>
         </div>
+        {# ── THIS FOLDER HOLDS MORE THAN ONE RELEASE ────────────────────────
+           This page shows ONE release, so rows belonging to a DIFFERENT release
+           are not in the tracklist below. Silently omitting them made the album
+           look complete while a file kept a stale release id, which read as
+           "the metadata isn't saving" — the file was never on the page.
+
+           The rows are deliberately NOT listed as tracks of this release (they
+           are a different release's), but their existence is stated, and each
+           other release is addressable so its own rows can be edited. #}
+        {% if other_releases %}
+        <div class="alert alert-warning d-flex flex-column gap-2 mb-0 rounded-0 border-0" id="albumMixedReleasesNotice">
+          <div class="d-flex align-items-start gap-2">
+            <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+            <div>
+              <strong>{{ unscoped_track_count }} track{{ '' if unscoped_track_count == 1 else 's' }} in this album belong to a different release</strong>
+              <div class="small mt-1">
+                They are not shown above because this page is scoped to one
+                release. Editing a release id here does not re-tag them, and the
+                next Navidrome scan will re-import them under their own release.
+              </div>
+            </div>
+          </div>
+          <ul class="mb-0 ps-3 small">
+            {% for other in other_releases %}
+            <li class="mb-1">
+              <span class="badge bg-secondary">{{ other.count }} track{{ '' if other.count == 1 else 's' }}</span>
+              {% if other.release_group_mbid %}
+              <a class="link-info ms-1"
+                 href="/album/{{ artist_name|path_segment }}/{{ album_name|path_segment }}/{{ other.release_group_mbid }}">
+                Open that release
+              </a>
+              {% endif %}
+              {% if other.release_mbid %}
+              <code class="ms-1 text-muted" style="font-size:0.7rem;">{{ other.release_mbid }}</code>
+              {% endif %}
+              {% if other.titles %}
+              <span class="text-muted d-block" style="font-size:0.75rem;">
+                {% for title in other.titles %}{{ title }}{% if not loop.last %} · {% endif %}{% endfor %}
+              </span>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
         {# Bulk-selection toolbar — hidden until updateBulkActionsUI() sees a
            checked .track-checkbox; renders above the table because it is not
            a table row. Checkbox lives INSIDE the existing first cell so the
