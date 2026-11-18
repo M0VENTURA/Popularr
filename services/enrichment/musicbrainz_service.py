@@ -534,6 +534,54 @@ def _edition_title_matches(release_title: str, album_name: str) -> bool:
         return False
     return _similarity(release_title, album_name) >= 0.9
 
+def _release_disc_count(release: Any) -> int:
+    """How many media this release has, or 0 when MusicBrainz did not say.
+
+    ``0`` means UNKNOWN, not "zero discs" — a caller must not treat it as a
+    one-disc release. Three spellings are accepted because the information
+    arrives differently depending on the endpoint that fetched the release.
+    """
+    if not isinstance(release, dict):
+        return 0
+    media = release.get("media")
+    if isinstance(media, list) and media:
+        return len(media)
+    for key in ("medium-count", "medium_count", "disc_count", "disc-count"):
+        value = _as_int(release.get(key), 0)
+        if value > 0:
+            return value
+    return 0
+
+
+def _disc_preference(release: Any) -> tuple[int, int]:
+    """Sort key preferring a SINGLE-disc release over a multi-disc one.
+
+    ``(0, n)`` single disc · ``(1, 0)`` unknown · ``(2, n)`` multi-disc
+
+    ⚠️ WHY THIS EXISTS. ``_select_primary_release`` had NO disc awareness at
+    all: among releases that matched the album, it took the EARLIEST date. A
+    2-disc reissue therefore beat a 1-disc digital edition of the same album
+    with the same tracklist whenever the reissue was dated earlier — the
+    reported "a multi-disk album is still being selected over a digital
+    release with the same number of tracks but only single disk".
+
+    The scan wants the single-disc edition: the multi-disc one usually splits
+    one album across media, and its disc numbers mean nothing for a single
+    folder. ``get_musicbrainz_best_release`` already scores this way (+100 for
+    one disc), so the two paths disagreed about identical data.
+
+    Unknown sorts BETWEEN the two rather than above either: a missing disc
+    count is not evidence for a preference, so it must not silently outrank a
+    known single-disc edition.
+    """
+    count = _release_disc_count(release)
+    if count == 1:
+        return (0, count)
+    if count > 1:
+        return (2, count)
+    return (1, 0)
+
+
 def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, Any]:
     candidates = [r for r in (releases or []) if isinstance(r, dict)]
     if not candidates:
@@ -545,7 +593,17 @@ def _select_primary_release(releases: Any, album_name: str | None) -> dict[str, 
         return candidates[0]
 
     def _sort_key(release: dict[str, Any]) -> tuple[Any, ...]:
-        return (str(release.get("date") or "9999"), str(release.get("id") or ""))
+        # ⚠️ DISC PREFERENCE COMES FIRST, THEN THE DATE.
+        #
+        # Ties on the album identity are exactly where the editions differ, and
+        # "earliest date" is what picked the 2-disc reissue. When the disc count
+        # is unknown both sides share (1, 0), so the date ordering below is
+        # unchanged — this can only separate releases that actually differ.
+        return (
+            *_disc_preference(release),
+            str(release.get("date") or "9999"),
+            str(release.get("id") or ""),
+        )
 
     if anchor:
         edition_matches = [
