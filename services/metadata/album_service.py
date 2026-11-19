@@ -1042,6 +1042,38 @@ def _clear_album_id_file_tags(artist: str, album: str) -> int:
     return cleared
 
 
+def _row_already_has_ids(
+    stored_album_mbid: Any,
+    stored_release_group_mbid: Any,
+    want_album_mbid: str,
+    want_release_group_mbid: str,
+) -> bool:
+    """Would writing this payload change nothing on the FILE?
+
+    Used to skip a needless whole-file rewrite. ``force=True`` makes the writer
+    skip its usual "is the frame already populated?" check, so without this the
+    album save rewrites every file even when the ids already match.
+
+    ⚠️ STRICT ON PURPOSE. It returns True only when EVERY id in the payload
+    already matches what the row stores. One differing value means the file
+    must be written, because a partial match is exactly the half-corrected
+    state that made the album split in Navidrome in the first place.
+
+    An EMPTY ``want`` means "not part of this payload", not "clear it" — the
+    clear path never reaches here (it has its own writer).
+    """
+    def _norm(value: Any) -> str:
+        return str(value or "").strip().casefold()
+
+    if want_album_mbid and _norm(stored_album_mbid) != _norm(want_album_mbid):
+        return False
+    if want_release_group_mbid and _norm(
+        stored_release_group_mbid
+    ) != _norm(want_release_group_mbid):
+        return False
+    return True
+
+
 def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """Update release IDs for an album's tracks."""
     artist = str(payload.get("artist") or "").strip()
@@ -1081,7 +1113,35 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
     file_updated = 0
     stamped_ids: list[str] = []
+    _file_targets: list[tuple[Any, str]] = []
     with db_session() as session:
+        # ⭐ READ THE PRIOR IDS BEFORE THE UPDATE, not after.
+        #
+        # The file-write phase below skips a row whose stored ids already match
+        # the payload (``force=True`` would otherwise rewrite every file on every
+        # save). This SELECT must therefore run FIRST: after the UPDATE every row
+        # reads back the NEW value, so the comparison would always say "already
+        # correct" and no file would ever be written — silently reintroducing
+        # the split-album bug the fan-out exists to fix.
+        _prior_ids: dict[str, tuple[Any, Any]] = {}
+        _prior_paths: dict[str, Any] = {}
+        if file_tag_updates:
+            try:
+                for _r in session.execute(
+                    text(
+                        "SELECT id, file_path, musicbrainz_album_mbid, "
+                        "musicbrainz_releasegroupid FROM tracks "
+                        "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                        "AND LOWER(album) = LOWER(:album)"
+                    ),
+                    {"artist": artist, "album": album},
+                ).fetchall() or []:
+                    _tid = str(_r[0] or "")
+                    _prior_ids[_tid] = (_r[2], _r[3])
+                    _prior_paths[_tid] = _r[1]
+            except Exception as exc:
+                logger.debug("Album id prior-value read failed", error=str(exc))
+
         # Case-insensitive scoping: the caller's artist/album name and the
         # stored value may differ only in casing ("Afi" vs "AFI"), and the
         # exact match returned rows_updated=0 — the IDs were accepted and
@@ -1117,31 +1177,63 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 logger.debug("Album id stamp id load failed", error=str(exc))
 
         if file_tag_updates:
-            from services.metadata.tag_file_service import (
-                resolve_music_file_path,
-                update_file_tags,
-            )
-            for r in session.execute(
-                text(
-                    "SELECT id, file_path FROM tracks "
-                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                    "AND LOWER(album) = LOWER(:album)"
-                ),
-                {"artist": artist, "album": album},
-            ).fetchall() or []:
-                _path = resolve_music_file_path(str(r[1] or "") if r[1] else None)
-                if _path:
-                    try:
-                        # ``force=True``: an explicit album-id correction is
-                        # AUTHORITATIVE for the field it submits. Without it a
-                        # populated MUSICBRAINZ_ALBUMID frame is left alone
-                        # whenever ``tagging.fill_missing_only`` is on, so the
-                        # FILE kept the old id and Navidrome re-split the album
-                        # even though the database was correct.
-                        if update_file_tags(_path, file_tag_updates, force=True):
-                            file_updated += 1
-                    except Exception as exc:
-                        logger.debug("File tag write failed", track_id=r[0], error=str(exc))
+            from services.metadata.tag_file_service import resolve_music_file_path
+
+            # ⛔⛔ THE FILE WRITES HAPPEN AFTER THIS SESSION COMMITS.
+            #
+            # They used to run HERE, inside the still-open write transaction
+            # that had just locked every row of the album. Each write calls
+            # ``mark_local_tags_written_for_path``, which opens its OWN session
+            # to UPDATE those same rows — and those rows are locked by THIS
+            # transaction, which cannot commit until the writes return.
+            #
+            # On PostgreSQL that is a self-deadlock (the inner statement waits
+            # forever on locks the outer transaction holds). On SQLite it is a
+            # 5-second busy-timeout PER FILE: a 14-track album spent ~70 s in
+            # the save and the request timed out. Collecting the paths here and
+            # writing them afterwards costs one list and removes the deadlock
+            # entirely.
+            #
+            # ⭐ ONLY ROWS THAT ACTUALLY CHANGED ARE REWRITTEN.
+            #
+            # ``force=True`` means the writer no longer compares anything — it
+            # copies and rewrites the whole file even when the id it is asked to
+            # write is already there. The album page posts its release-id field
+            # on EVERY save, so an unrelated edit (a track title, a genre) used
+            # to rewrite every file of the album for nothing: an album of 100 MB
+            # FLACs became gigabytes of disk churn per save.
+            #
+            # The old value was captured BEFORE the UPDATE (see ``_prior_ids``),
+            # and a row whose stored ids already match the payload is skipped. A
+            # genuinely changed id still writes, so the correction still lands.
+            for _tid, _raw_path in _prior_paths.items():
+                _path = resolve_music_file_path(
+                    str(_raw_path or "") if _raw_path else None
+                )
+                if not _path:
+                    continue
+                _old_album, _old_rg = _prior_ids.get(_tid, (None, None))
+                if _row_already_has_ids(
+                    _old_album, _old_rg, musicbrainz_id, release_group_id
+                ):
+                    continue
+                _file_targets.append((_tid, _path))
+
+    if file_tag_updates:
+        from services.metadata.tag_file_service import update_file_tags
+
+        for _track_id, _path in _file_targets:
+            try:
+                # ``force=True``: an explicit album-id correction is
+                # AUTHORITATIVE for the field it submits. Without it a
+                # populated MUSICBRAINZ_ALBUMID frame is left alone
+                # whenever ``tagging.fill_missing_only`` is on, so the
+                # FILE kept the old id and Navidrome re-split the album
+                # even though the database was correct.
+                if update_file_tags(_path, file_tag_updates, force=True):
+                    file_updated += 1
+            except Exception as exc:
+                logger.debug("File tag write failed", track_id=_track_id, error=str(exc))
 
     _mark_local_correction(stamped_ids)
 

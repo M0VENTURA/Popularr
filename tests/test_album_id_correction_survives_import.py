@@ -73,8 +73,13 @@ class TestTheCorrectionIsStampedAsLocalAuthority:
     def test_it_stamps_every_row_the_update_touched(self) -> None:
         """Not merely the rows whose file path happens to resolve."""
         src = _src(album_service.update_album_ids)
-        start = src.index("stamped_ids")
-        block = src[start:start + 1200]
+        # Anchor on the ASSIGNMENT that fills the list, not the bare
+        # declaration: ``stamped_ids`` is declared near the top of the function
+        # and the code that populates it sits further down. A fixed-size window
+        # from the declaration broke as soon as anything was added above it.
+        start = src.index("if rows:")
+        end = src.index("_mark_local_correction(stamped_ids)", start)
+        block = src[start:end]
         assert "SELECT id FROM tracks" in block, (
             "ids must come from the same predicate as the UPDATE, not from the "
             "file loop, which skips unresolvable paths"
