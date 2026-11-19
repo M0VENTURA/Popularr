@@ -96,6 +96,7 @@ from helpers.normalization_service import (
     safe_int,
     safe_str,
     is_track_artist_placeholder,
+    titles_match_for_review,
 )
 
 # Re-fetch threshold provider
@@ -1581,12 +1582,30 @@ def _resolve_track_mb_metadata(
                 _title_match_confirmed = bool(
                     (mb_data or {}).get("_title_match_confirmed")
                 )
+                # ⭐ TYPOGRAPHY IS NOT A TITLE CHANGE.
+                #
+                # These three gates compared with bare ``casefold()``, which
+                # folds CASE ONLY. MusicBrainz almost always writes U+2019 where
+                # a file carries U+0027, so:
+                #
+                #     Through a Child's Eyes  →  Through a Child’s Eyes
+                #
+                # read as a different title and was deferred to the "metadata
+                # requiring approval" panel on EVERY scan (and, when the match
+                # was confirmed, auto-applied as a file rename). ``titles_match_
+                # for_review`` folds case, curly quotes, dashes and whitespace
+                # while KEEPING performance and cover markers — the same rule the
+                # Compare button and the proposal builder already use, so all
+                # three surfaces now agree.
+                _title_differs = not titles_match_for_review(
+                    _local_title, _release_title
+                )
                 if (
                     _from_batch
                     and not frozen_track
                     and _release_title
                     and _local_title
-                    and _release_title.casefold() != _local_title.casefold()
+                    and _title_differs
                     and not _field_ignored_for_track(track, "title")
                     and _metadata_update_allowed()
                     and _title_match_confirmed
@@ -1603,7 +1622,7 @@ def _resolve_track_mb_metadata(
                     and not frozen_track
                     and _release_title
                     and _local_title
-                    and _release_title.casefold() != _local_title.casefold()
+                    and _title_differs
                     and not _field_ignored_for_track(track, "title")
                     and _metadata_update_allowed()
                     and not _title_match_confirmed
@@ -1646,7 +1665,7 @@ def _resolve_track_mb_metadata(
                 and not _title_match_confirmed
                 and bool(_release_title)
                 and bool(_local_title)
-                and _release_title.casefold() != _local_title.casefold()
+                and _title_differs
             )
 
             _artist_mbid = mb_data.get("artist_mbid")

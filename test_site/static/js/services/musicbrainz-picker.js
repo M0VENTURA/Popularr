@@ -77,6 +77,28 @@
       || 'Unknown Artist';
   }
 
+  /**
+   * Report an outcome to the user, falling back through the toast layers.
+   *
+   * This module ships with pages that differ in what they load (the upcoming
+   * page has no download-queue.js), so it cannot assume a page-local notify
+   * helper exists. A queue action that reports NOTHING is indistinguishable
+   * from a broken button, which is the defect this is here to avoid.
+   */
+  function toastError(message) {
+    if (global.toast && typeof global.toast.error === 'function') {
+      return global.toast.error(message);
+    }
+    console.error('[musicbrainz]', message);
+  }
+
+  function toastSuccess(message) {
+    if (global.toast && typeof global.toast.success === 'function') {
+      return global.toast.success(message);
+    }
+    console.info('[musicbrainz]', message);
+  }
+
   // ── Pending selection ───────────────────────────────────────────────────
   //
   // `handleGlobalMbSelect` stages a pick and reveals the confirmation panel;
@@ -364,12 +386,27 @@
       // "Lookup MBID" button, whose whole purpose is matching. The action is
       // now driven by `matchIntent`, which only changes when the modal is
       // opened with a different intent (see openGlobalMbSearch).
+      //
+      // ⭐ "QUEUE", NOT "SOULSEEK", AND THE SAME CALL THE UNIFIED SEARCH MAKES.
+      //
+      // Reported from the upcoming-releases page: pressing this button "doesn't
+      // look like anything is happening". It called ``global.downloadMbRelease``
+      // — a function defined ONLY in ``pages/download-queue.js``, which that
+      // page does not load — so the click hit the feature-detect guard below
+      // and returned without a word. A button that silently does nothing is
+      // worse than no button.
+      //
+      // It now routes through ``queueRelease`` (see the click handler), the
+      // helper this file already uses for its own queueing, which posts the
+      // same ``/api/musicbrainz/download`` the unified search's Queue button
+      // does. The label says "Add to queue" because that is what happens: the
+      // release is QUEUED, and Soulseek is only how the queue later fetches it.
       const action = matchIntent
         ? `<button class="btn btn-sm btn-success mb-select-match" data-index="${index}">
              <i class="bi bi-check-circle"></i> Match Release</button>`
-        : `<button class="btn btn-sm btn-success mb-download-release" data-index="${index}"
-                   title="Download via Soulseek">
-             <i class="bi bi-music-note-list"></i> Soulseek</button>`;
+        : `<button class="btn btn-sm btn-outline-primary mb-download-release" data-index="${index}"
+                   title="Add this release to the download queue">
+             <i class="bi bi-download"></i> Add to queue</button>`;
 
       return `
         <div class="list-group-item bg-dark-subtle border-secondary mb-2 rounded">
@@ -401,11 +438,89 @@
       btn.addEventListener('click', function () {
         const release = resultCache[parseInt(this.dataset.index, 10)];
         if (!release) return;
-        if (typeof global.downloadMbRelease === 'function') {
-          global.downloadMbRelease(release.id, release.title, releaseArtist(release), 'slskd');
-        }
+        queueReleaseForDownload(this, release);
       });
     });
+  }
+
+  /**
+   * Add one MusicBrainz release to the download queue.
+   *
+   * ⭐ THE SAME ENDPOINT THE UNIFIED SEARCH'S QUEUE BUTTON USES.
+   *
+   * This used to call ``global.downloadMbRelease``, which only exists on pages
+   * that load ``pages/download-queue.js``. On the upcoming-releases page — where
+   * this modal is the ONLY download surface — that function is undefined, so the
+   * click did nothing at all and said nothing.
+   *
+   * ``/api/musicbrainz/download`` takes a release id, resolves the tracklist
+   * server-side and creates the queue rows, so it needs no page-local helper.
+   * ``queue_items_only`` keeps it a pure queue add: no search is started here,
+   * which is what "Add to queue" promises.
+   *
+   * Every outcome is REPORTED. A silent no-op is what made the old button look
+   * broken, so even the "nothing to queue" answer from the API is surfaced.
+   */
+  async function queueReleaseForDownload(btn, release) {
+    const releaseId = release && release.id ? String(release.id) : '';
+    if (!releaseId) {
+      toastError('This result has no MusicBrainz release id.');
+      return;
+    }
+
+    const artist = releaseArtist(release);
+    const title = release.title || '';
+
+    // ⚠️ ``buttonState.withBusy(btn, label, fn)`` RUNS the work itself and
+    // restores the button in a ``finally``; it is not a "set busy" call. The
+    // first draft of this used its return value as a restore function, which
+    // would have queued nothing at all.
+    const run = async () => {
+      try {
+        const data = await global.api.postJson('/api/musicbrainz/download', {
+          release_id: releaseId,
+          release_title: title,
+          artist: artist,
+          method: 'slskd',
+          persistent_search: false,
+          queue_items_only: true,
+        });
+
+        const queuedCount = Number(data && data.queued_tracks);
+        const explicitZero =
+          data && data.queued_tracks !== undefined && queuedCount === 0;
+        if (
+          (data && (explicitZero || data.queued === false || data.success === false))
+          && !(queuedCount > 0)
+        ) {
+          toastError(
+            (data && (data.message || data.error)) || 'Nothing to queue for this release.'
+          );
+          return;
+        }
+
+        toastSuccess(
+          queuedCount > 0
+            ? `Added to queue: ${title} (${queuedCount} track${queuedCount === 1 ? '' : 's'})`
+            : `Added to queue: ${title}`
+        );
+        // Same idea as the unified search's queue hook: let a page refresh
+        // whatever queue view it owns instead of showing a stale list.
+        document.dispatchEvent(new CustomEvent('mbDownloadQueued', {
+          detail: { releaseId, title, artist, queued: queuedCount || null },
+        }));
+      } catch (error) {
+        toastError(
+          'Could not queue this release: '
+          + (error && error.message ? error.message : error)
+        );
+      }
+    };
+
+    if (global.buttonState && typeof global.buttonState.withBusy === 'function') {
+      return global.buttonState.withBusy(btn, 'Queuing…', run);
+    }
+    return run();
   }
 
   /** Stage a chosen release and reveal the confirmation panel. */

@@ -490,11 +490,34 @@
   // ── Actions ─────────────────────────────────────────────────────────────
 
   function search(artist, album) {
+    // ⭐ THE SHARED MODAL FIRST, AND IT IS PRE-FILLED.
+    //
+    // ``searchMusicBrainzRelease`` opens the LEGACY results modal, whose artist
+    // and album boxes are only filled from the FILTER inputs — so the release
+    // the user clicked was not carried into the search, and the artist/album had
+    // to be typed in again by hand. That is the reported "it pops up with a
+    // search, but doesn't automatically populate the artist name and album name".
+    //
+    // ``openGlobalMbSearch(artist, album)`` sets BOTH fields from its arguments
+    // and searches immediately once the modal is shown.
+    //
+    // ⚠️ NO CALLBACK IS PASSED, DELIBERATELY. ``matchIntent`` is
+    // ``selectionCallback !== null``, so supplying one turns the modal into a
+    // MATCH flow and renders "Match Release" on every result. From the upcoming
+    // page the user wants the release ADDED TO THE QUEUE, so the modal must stay
+    // a download browser — which is what makes its per-result button read
+    // "Add to queue".
+    if (typeof global.openGlobalMbSearch === 'function') {
+      global.openGlobalMbSearch(artist || '', album || '');
+      return;
+    }
+    // Older trees only. Kept as a fallback rather than a hard failure so a
+    // partially built page still opens SOMETHING.
     if (typeof global.searchMusicBrainzRelease === 'function') {
       global.searchMusicBrainzRelease(null, artist, album);
       return;
     }
-    console.warn('[upcoming] searchMusicBrainzRelease is unavailable on this page');
+    console.warn('[upcoming] no MusicBrainz search is available on this page');
     notifyError('MusicBrainz search is unavailable on this page.');
   }
 

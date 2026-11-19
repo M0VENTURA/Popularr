@@ -666,7 +666,23 @@ def _title_rename_confidence(
     if not local or not release:
         return {"ok": False, "reason": "missing_title", "similarity": 0.0,
                 "length_delta": None}
-    if local.casefold() == release.casefold():
+
+    # ⭐ "IDENTICAL" IS DECIDED ON THE SAME KEY THE SIMILARITY USES.
+    #
+    # This compared ``casefold()`` — case only — while the similarity below is
+    # computed on ``_typography_key`` (case, curly quotes, dashes, whitespace).
+    # So a title differing ONLY by typography was not "identical" here, went on
+    # to score similarity 1.0, and was returned as ``reason="confident"`` — an
+    # automatic file rename that rewrote a straight apostrophe into a curly one:
+    #
+    #     Through a Child's Eyes  ->  Through a Child’s Eyes
+    #
+    # That is not a correction, it is churn: the two names are the same title in
+    # two typographic styles, and every scan re-applies it (and rewrites the
+    # file tag) with no change in meaning. Comparing on the SAME fold makes the
+    # early exit agree with the metric, so a pure typography difference is
+    # reported as ``identical`` and nothing is written.
+    if _typography_key(local) == _typography_key(release):
         return {"ok": False, "reason": "identical", "similarity": 1.0,
                 "length_delta": None}
 

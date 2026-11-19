@@ -74,9 +74,41 @@ class TestTheReportedRenameIsApplied:
         assert verdict["ok"] is True, verdict
         assert verdict["reason"] == "confident"
 
-    def test_a_typography_only_difference_is_renamed(self) -> None:
+    def test_a_typography_only_difference_is_NOT_renamed(self) -> None:
+        """CHANGED BEHAVIOUR — this asserted the opposite, and was wrong.
+
+        REPORT: "I'm sometimes getting track rename recommendations like the
+        following. MusicBrainz: Title: Through a Child's Eyes → Through a
+        Child's Eyes" — a straight apostrophe (U+0027) versus a curly one
+        (U+2019).
+
+        The scan compared the two with ``casefold()``, which folds CASE ONLY, so
+        this pair read as a different title. It was then either deferred to the
+        approval panel on every scan or — once position and length confirmed the
+        recording — auto-applied as a FILE RENAME, rewriting the tag to swap one
+        apostrophe for another and re-triggering the same proposal next time.
+
+        ``_typography_key`` already folded this, which is why the similarity was
+        exactly 1.0 while the verdict said "confident". The early exit now uses
+        the same key, so a pure typography difference is ``identical``. A real
+        correction ("Childs Eye" → "Child's Eyes") still returns "confident".
+        """
         verdict = _conf("Baby, It's Cold Outside", "Baby, It\u2019s Cold Outside")
+        assert verdict["ok"] is False, (
+            "a typography-only difference must not rewrite the file"
+        )
+        assert verdict["reason"] == "identical"
+        assert verdict["similarity"] == 1.0
+
+    def test_the_same_pair_with_a_real_word_change_still_renames(self) -> None:
+        """CONTROL — the typography fold must not swallow a genuine fix."""
+        # A genuine wording difference, holding the curly apostrophe so the
+        # case is not "folded away" by accident.
+        verdict = _conf(
+            "Baby, It Is Cold Outside", "Baby, It\u2019s Cold Outside"
+        )
         assert verdict["ok"] is True, verdict
+        assert verdict["reason"] == "confident"
 
     def test_case_only_difference_is_identical(self) -> None:
         """CONTROL — a case-only difference is not a rename at all.
