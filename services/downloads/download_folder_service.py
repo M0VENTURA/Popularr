@@ -24,6 +24,7 @@ import structlog
 from sqlalchemy import text
 
 from db.engine import db_session
+from helpers.config_helpers import get_supported_audio_formats
 from services.infrastructure.filesystem_service import (
     _get_files_in_folder,
     get_folder_group_details,
@@ -37,9 +38,13 @@ logger = structlog.get_logger(__name__)
 _MB_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 _MUSIC_ROOT = os.environ.get("MUSIC_ROOT", "/music")
 
-SUPPORTED_AUDIO_FORMATS = {
-    ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".wma",
-}
+# ⚠️ NOT A LOCAL LIST. This used to be its own hardcoded set
+# ``{.mp3, .flac, .m4a, .ogg, .wav, .aac, .wma}`` which drifted from the
+# canonical ``config_helpers.get_supported_audio_formats()`` — and because this
+# is what decides whether a downloads folder CONTAINS AUDIO at all, a folder
+# holding only Opus or APE files was reported as an empty folder, or omitted
+# entirely. One source of truth, imported.
+SUPPORTED_AUDIO_FORMATS = get_supported_audio_formats()
 
 
 # =============================================================================
@@ -382,7 +387,43 @@ def _iter_matched_folder_candidates(downloads_dir: str, archive_dir: str, max_de
             continue
         candidates.extend(_collect_album_folders(full, max_depth=max_depth))
 
+    # ⭐ THE DOWNLOADS ROOT IS ITSELF A CANDIDATE.
+    #
+    # ``_collect_album_folders`` is only called on the SUBDIRECTORIES, so audio
+    # sitting directly in the downloads root matched nothing: an album dropped
+    # as loose files, or a completed single-folder download extracted flat, was
+    # invisible while the same files one directory deeper showed up. Checked
+    # LAST so nested albums keep their natural order, and it only contributes
+    # when the root itself holds audio.
+    if _folder_holds_audio(downloads_dir):
+        root_key = os.path.normpath(downloads_dir)
+        if all(os.path.normpath(c[0]) != root_key for c in candidates):
+            candidates.append((downloads_dir, os.path.basename(root_norm)))
+
     return candidates
+
+
+def _folder_holds_audio(folder_abs: str) -> bool:
+    """True when *folder_abs* directly contains a supported audio file.
+
+    Deliberately SHALLOW: a category folder holding only album subfolders is
+    not an album, and ``_collect_album_folders`` already handles those.
+    """
+    try:
+        for name in os.listdir(folder_abs):
+            if name.startswith(".") or name.startswith("__"):
+                continue
+            path = os.path.join(folder_abs, name)
+            try:
+                if os.path.isfile(path) and (
+                    os.path.splitext(name)[1].lower() in SUPPORTED_AUDIO_FORMATS
+                ):
+                    return True
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.debug("root audio probe failed", path=folder_abs, error=str(exc))
+    return False
 
 
 def _iter_torrent_album_candidates(downloads_dir: str, archive_dir: str, max_depth: int = 3) -> list[tuple[str, str]]:

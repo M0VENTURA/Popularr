@@ -2542,12 +2542,29 @@ def get_supported_audio_formats() -> set[str]:
         Set of lowercase file extensions (e.g., {'.mp3', '.flac'}).
 
     Default Formats:
-        .mp3, .flac, .m4a, .ogg, .wav, .aac, .wma
+        .mp3, .flac, .m4a, .mp4, .ogg, .opus, .wav, .aac, .wma, .aiff, .aif,
+        .ape, .wv, .dsf, .dff
+
+    ⚠️ THIS LIST MUST COVER EVERY FORMAT THE REST OF THE APP CAN HANDLE.
+
+    It was ``{.mp3, .flac, .m4a, .ogg, .wav, .aac, .wma}``, which omitted
+    ``.opus`` and ``.mp4`` even though ``services/metadata/tag_file_service``
+    writes tags to both. The scans use this set to decide what counts as audio,
+    so an Opus album was not "unsupported" — it was INVISIBLE: the downloads
+    monitor reported no folders for a directory full of playable files, and the
+    library scanner skipped them entirely.
+
+    The lossless/DSD extensions are included for the same reason: a library
+    holding them sees those albums as empty folders today.
     """
     cfg = get_config()
     user_formats = cfg.get("filesystem", {}).get("audio_formats", [])
 
-    defaults = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".wma"}
+    defaults = {
+        ".mp3", ".flac", ".m4a", ".mp4", ".ogg", ".opus",
+        ".wav", ".aac", ".wma", ".aiff", ".aif", ".ape", ".wv",
+        ".dsf", ".dff",
+    }
 
     if user_formats:
         # User formats completely override defaults

@@ -202,22 +202,46 @@
     const active = data.active_scans || [];
     updateScanStatusBar(active);
 
-    const running = active.find((s) => s && s.is_running) || active[0];
+    // ⭐ A NAVIDROME IMPORT IS NOT A SCAN, SO IT MUST NOT TAKE THE BUTTON.
+    //
+    // ``navidrome_scan`` is in progress_service.SCAN_TYPES, so a running IMPORT
+    // publishes an ``active_scans`` entry with ``is_running: true``. Treating
+    // that as "a scan is running" hid the Start Scan button for the whole
+    // import — the reported "when a Navidrome import is happening, the start
+    // scan button on the dashboard isn't available to press".
+    //
+    // It is also self-defeating: the scan pre-flight exists precisely to offer
+    // "cancel the running scan and start the new one", and it can only ask once
+    // the button is reachable. Hiding the button removed the only way to reach
+    // that prompt.
+    const IMPORT_ONLY_TYPES = new Set(['navidrome_scan']);
+    const realScans = active.filter(
+      (s) => s && s.is_running && !IMPORT_ONLY_TYPES.has(String(s.scan_type || ''))
+    );
+    const running = realScans[0] || null;
+    const importRunning = active.find(
+      (s) => s && s.is_running && IMPORT_ONLY_TYPES.has(String(s.scan_type || ''))
+    ) || null;
     const idleState = document.getElementById('scannerIdleState');
     const activeState = document.getElementById('scannerActiveState');
     const stateLabel = document.getElementById('scannerState');
 
     if (idleState) idleState.classList.toggle('d-none', !!running);
-    if (activeState) activeState.classList.toggle('d-none', !running);
+    // The progress block stays visible for an import too, or the import's
+    // progress would vanish along with the button.
+    if (activeState) activeState.classList.toggle('d-none', !(running || importRunning));
     if (stateLabel) {
-      stateLabel.textContent = running ? `Scanning ${scanDisplayName(running.scan_type)}` : 'Idle';
+      if (running) stateLabel.textContent = `Scanning ${scanDisplayName(running.scan_type)}`;
+      else if (importRunning) stateLabel.textContent = 'Importing from Navidrome';
+      else stateLabel.textContent = 'Idle';
     }
 
     const badge = document.getElementById('scannerStatusBadge');
     if (badge) {
+      const activeNow = !!(running || importRunning);
       badge.innerHTML = '<i class="bi bi-circle-fill me-1 small"></i> ' +
-        (running ? 'Active' : 'Idle');
-      badge.className = 'badge ' + (running ? 'bg-success' : 'bg-secondary');
+        (activeNow ? 'Active' : 'Idle');
+      badge.className = 'badge ' + (activeNow ? 'bg-success' : 'bg-secondary');
       badge.style.fontSize = '0.65rem';
     }
 

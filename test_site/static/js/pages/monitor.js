@@ -537,6 +537,31 @@
     unmatchedPending = (async () => {
       try {
         const data = await global.api.getJson('/api/downloads/unmatched-folders');
+
+        // ⭐ A FAILED READ MUST NOT LOOK LIKE AN EMPTY LIBRARY.
+        //
+        // The route answers ``{"success": false, "error": "..."}`` when the
+        // folder walk throws, and a transport failure throws at the call above.
+        // Both used to fall into the same branch as "no folders": the card was
+        // hidden and NOTHING was said, so "the albums under the downloads
+        // directory are not showing" had no diagnostic anywhere on the page —
+        // the only trace was a console line nobody sees.
+        //
+        // An error now leaves the card UP and states the reason, which is the
+        // difference between "there is nothing here" and "I could not look".
+        if (data && data.success === false) {
+          section.style.display = 'block';
+          emptyFolders = [];
+          if (badge) badge.textContent = 'error';
+          list.innerHTML =
+            '<div class="list-group-item text-danger small">'
+            + '<i class="bi bi-exclamation-triangle me-1"></i>'
+            + 'Could not read the downloads folder: '
+            + esc(String(data.error || 'unknown error'))
+            + '</div>';
+          return;
+        }
+
         const folders = data.folders || [];
 
         if (!folders.length) {
@@ -579,7 +604,20 @@
         bindMatchedTracklistToggles(list);
         restoreOpenTracklists(list);
       } catch (error) {
+        // Same reasoning as the ``success: false`` branch: a transport failure
+        // (timeout, 500, gateway HTML) is NOT "no folders". Keep the card
+        // visible and say so, so the section can never silently vanish.
         console.error('Error loading unmatched folders:', error);
+        try {
+          section.style.display = 'block';
+          if (badge) badge.textContent = 'error';
+          list.innerHTML =
+            '<div class="list-group-item text-danger small">'
+            + '<i class="bi bi-exclamation-triangle me-1"></i>'
+            + 'Could not load folders: '
+            + esc(String((error && error.message) || error || 'unknown error'))
+            + '</div>';
+        } catch (_ignore) { /* never let the error path throw */ }
       } finally {
         unmatchedInFlight = false;
         unmatchedPending = null;

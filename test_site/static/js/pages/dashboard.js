@@ -398,24 +398,56 @@
     // the two controls that apply to a running scan. ONE card toggled, not two
     // — two would need this function to keep them in sync and would double the
     // empty-state surface.
-    const running = active.find((s) => s && s.is_running) || active[0];
+    //
+    // ⭐ A NAVIDROME IMPORT IS NOT A SCAN, SO IT MUST NOT TAKE THE BUTTON.
+    //
+    // ``navidrome_scan`` is in progress_service.SCAN_TYPES, so a running IMPORT
+    // publishes an ``active_scans`` entry with ``is_running: true``. Treating
+    // that as "a scan is running" hid the Start Scan button for the whole
+    // import — the reported "when a Navidrome import is happening, the start
+    // scan button on the dashboard isn't available to press".
+    //
+    // It is also self-defeating: ``services/scan-preflight.js`` exists precisely
+    // to offer "cancel the running scan and start the new one", and it can only
+    // ask once the button is reachable. Hiding the button removed the only way
+    // to reach that prompt.
+    //
+    // So an import keeps the button and shows its progress beside it. A REAL
+    // scan still swaps the card to its active state.
+    const IMPORT_ONLY_TYPES = new Set(['navidrome_scan']);
+    const realScans = active.filter(
+      (s) => s && s.is_running && !IMPORT_ONLY_TYPES.has(String(s.scan_type || ''))
+    );
+    const running = realScans[0] || null;
+    // An import is still SHOWN, just not in place of the Start button.
+    const importRunning = active.find(
+      (s) => s && s.is_running && IMPORT_ONLY_TYPES.has(String(s.scan_type || ''))
+    ) || null;
     const idleState = document.getElementById('scannerIdleState');
     const activeState = document.getElementById('scannerActiveState');
     const stateLabel = document.getElementById('scannerState');
 
     if (idleState) idleState.classList.toggle('d-none', !!running);
-    if (activeState) activeState.classList.toggle('d-none', !running);
+    // ⭐ The progress block stays visible for an IMPORT too — otherwise the
+    // import's progress would disappear along with the button, and the card
+    // would claim "Idle" while a scan of the library was still running.
+    if (activeState) activeState.classList.toggle('d-none', !(running || importRunning));
     if (stateLabel) {
       // "Scanning Library", not just "Active" — the heading names WHAT is
       // running, which is the fact the old badge could not carry.
-      stateLabel.textContent = running ? `Scanning ${scanDisplayName(running.scan_type)}` : 'Idle';
+      if (running) stateLabel.textContent = `Scanning ${scanDisplayName(running.scan_type)}`;
+      else if (importRunning) stateLabel.textContent = 'Importing from Navidrome';
+      else stateLabel.textContent = 'Idle';
     }
 
     const badge = document.getElementById('scannerStatusBadge');
     if (badge) {
+      // An import counts as ACTIVE here: the badge reports whether the library
+      // is being worked on, and hiding the Start button is a separate concern.
+      const activeNow = !!(running || importRunning);
       badge.innerHTML = '<i class="bi bi-circle-fill me-1 small"></i> ' +
-        (running ? 'Active' : 'Idle');
-      badge.className = 'badge ' + (running ? 'bg-success' : 'bg-secondary');
+        (activeNow ? 'Active' : 'Idle');
+      badge.className = 'badge ' + (activeNow ? 'bg-success' : 'bg-secondary');
       badge.style.fontSize = '0.65rem';
     }
 
