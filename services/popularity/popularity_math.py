@@ -6,6 +6,7 @@ This module should not import API clients or database modules.
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime
 from statistics import mean, median, stdev
 from typing import Any
@@ -578,6 +579,120 @@ def cross_album_track_score(row: Any) -> float:
     )
 
 
+def artist_catalogue_percentile(score: float, artist_scores: list[float]) -> float:
+    """Where *score* sits in the artist's WHOLE catalogue, as 0.0-1.0.
+
+    ⭐ WHY NOT THE ALBUM. ``apply_album_relative_popularity`` normalises within
+    one album, which is the right scale for "which track carried this release"
+    but the wrong one for "is this one of the act's hits". A deep cut on a
+    famous album outranks a genuine hit on an obscure one, because every
+    album-relative score is measured against its own record's mean.
+
+    Ranking against the artist's whole catalogue asks the question a Top Tracks
+    playlist actually poses: how does this recording compare to everything else
+    this act has released?
+
+    Returns 0.0 when there is nothing to compare against, which callers must
+    treat as "unknown", never as "bottom of the catalogue".
+    """
+    valid = [float(s) for s in (artist_scores or []) if float(s or 0) > 0]
+    if not valid:
+        return 0.0
+    try:
+        value = float(score or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if value <= 0:
+        return 0.0
+    below_or_equal = sum(1 for s in valid if s <= value)
+    return below_or_equal / len(valid)
+
+
+#: A track released within this many months has not yet earned the right to
+#: outrank an established hit on recency alone.
+NEW_TRACK_GRACE_MONTHS = 12
+
+
+def recency_boost_cap(
+    release_year: int | float | None,
+    current_year: int,
+    *,
+    grace_months: int = NEW_TRACK_GRACE_MONTHS,
+) -> float:
+    """The MOST a track younger than the grace window may gain. 0.0 = none.
+
+    ⭐⭐ A NEW RELEASE MUST NOT OUTRANK THE CATALOGUE ON NOVELTY.
+
+    The recency term exists so a brand-new single is not buried by decades-old
+    catalogue numbers, but it was unbounded: anything from this year could lead
+    a playlist before a single listener had heard it. The rule the collection
+    asked for is that a track less than ``grace_months`` old must not score
+    above the act's established hits UNLESS its listener count supports it.
+
+    So this returns a CAP, not a bonus: the recency path is clamped to it, and a
+    genuinely popular new release still wins on listeners — it simply cannot win
+    on being new.
+    """
+    try:
+        year = int(release_year or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year <= 0 or current_year <= 0:
+        return 0.0
+    months_old = max(0, (int(current_year) - year)) * 12
+    if months_old < 12:
+        # Released this year: no recency credit at all. Whatever it scores must
+        # come from listeners.
+        return 0.0
+    if months_old < max(1, int(grace_months)):
+        # Inside the grace window: a small, hard ceiling.
+        return 5.0
+    return 0.0
+
+
+#: Title markers that mean "this is not the canonical recording". Each carries a
+#: score MULTIPLIER — the value is how much of its score the version KEEPS.
+#:
+#: ⚠️ These are penalties, not exclusions. A demo or a remix can still be the
+#: best thing an artist ever recorded, so it is demoted rather than banned; a
+#: caller that wants them gone entirely should exclude them outright (the
+#: eligibility filter already drops live takes).
+_VERSION_PENALTIES: tuple[tuple[str, float], ...] = (
+    # Re-recordings and "reinterpretations" of the act's own material.
+    (r"\bre-?interpreted\b|\breinterprets?\b|\bre-?imagined\b|\breimagined\b", 0.55),
+    (r"\bre-?record(?:ed|ing)\b|\bre-record\b|\bnew recording\b", 0.70),
+    # Demos and early takes.
+    (r"\bdemo\b|\bearly version\b|\bwork[- ]in[- ]progress\b|\brough mix\b", 0.45),
+    # Remixes and alternate mixes.
+    (r"\bremix(?:ed)?\b|\bre-?mix\b|\balternate (?:mix|take)\b|\bdub\b", 0.70),
+    # Instrumentals and karaoke: real recordings, but not the song as released.
+    (r"\binstrumental\b|\bkaraoke\b|\bbacking track\b", 0.75),
+    # Reboots / reissues of the same performance.
+    (r"\breboot\b|\brework(?:ed)?\b", 0.60),
+)
+
+
+def version_penalty(title: str) -> float:
+    """Score MULTIPLIER for a non-canonical version of a track. 1.0 = canonical.
+
+    Reported as "lower the score of demos, remixes, reboots, instrumentals and
+    'reinterpreted' versions, or exclude them from Top Tracks". The multipliers
+    are deliberately gentle: this demotes a demo behind the released recording
+    of the same song without pretending the demo is worthless.
+
+    The LOWEST matching multiplier wins, so a "demo remix" is treated as a demo
+    rather than as only a remix.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return 1.0
+    multiplier = 1.0
+    for pattern, keep in _VERSION_PENALTIES:
+        if re.search(pattern, text, re.IGNORECASE):
+            multiplier = min(multiplier, keep)
+    return multiplier
+
+
 def star_then_popularity_order_key(row: Any) -> tuple[Any, ...]:
     """Sort key ranking a track list ACROSS albums, most preferred first.
 
@@ -900,6 +1015,7 @@ def calculate_combined_popularity_score(
     metadata_score_floor: float = 5.0,
     live_weight_penalty: float = 0.5,
     instrumental_weight_penalty: float = 0.8,
+    age_score_cap: float = 0.0,
 ) -> dict[str, float]:
     """Blend Last.fm + ListenBrainz + age into one weighted popularity score."""
     lastfm_log = calculate_lastfm_popularity_score(lastfm_listeners, 0)
@@ -945,8 +1061,33 @@ def calculate_combined_popularity_score(
         lb_score = max(lb_log, lb_percentile * 100.0)
     age_score = 0.0
     if release_date and age_source_value:
-        aged, _days = score_by_age(age_source_value, release_date)
+        aged, days_old = score_by_age(age_source_value, release_date)
         age_score = calculate_listenbrainz_popularity_score(int(aged or 0))
+        # ⭐ A BRAND-NEW TRACK MAY NOT WIN ON NOVELTY.
+        #
+        # ``score_by_age`` divides by log2(days+2), so a release from last week
+        # keeps almost all of its playcount while a five-year-old one keeps
+        # roughly a third. That IS the recency boost, and it was unbounded: a
+        # track nobody has heard could outrank an established hit purely for
+        # being new.
+        #
+        # A track inside the grace window is therefore scored as though it were
+        # EXACTLY ``NEW_TRACK_GRACE_MONTHS`` old. Its age component can no
+        # longer beat an established release's, but its listener count is
+        # untouched — so a genuinely popular new single still wins, on
+        # listeners rather than on freshness.
+        grace_days = int(NEW_TRACK_GRACE_MONTHS) * 30
+        if 0 < days_old < grace_days:
+            # The score this track would have if it were exactly grace-period
+            # old. ``score_by_age`` divides the playcount by log2(days+2), so
+            # the boundary value is that same division at ``grace_days``.
+            _at_grace = float(age_source_value) / math.log2(grace_days + 2)
+            age_score = min(
+                age_score,
+                calculate_listenbrainz_popularity_score(int(_at_grace or 0)),
+            )
+        if age_score_cap:
+            age_score = min(age_score, age_score_cap)
 
     has_mismatch = is_source_mismatch(lastfm_listeners, listenbrainz_listens)
     is_unreliable = is_lastfm_unreliable(lastfm_listeners, listenbrainz_listens)

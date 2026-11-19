@@ -2326,9 +2326,41 @@ def _playlist_order_key(
     listener scales). ``popularity_score`` is the Essential Collection
     contract: star tier first, then the stored Popularity Score shown on the
     artist page.
+
+    ⭐⭐ THE LAST KEY IS ALWAYS THE TRACK ID, AND THAT IS WHAT MAKES THE FILE
+    STABLE.
+
+    Every key before it can TIE: a compilation credits the same songs, so many
+    rows share a star tier and both scores panel-beat each other, and the title
+    is not unique either ("Intro", "Interlude" — and the SAME song on two
+    albums). Python's sort is stable, so a tie silently kept whatever order the
+    DATABASE returned, and a different row order between two runs reordered the
+    playlist. That is the reported "Soundtrack +120 / −113: almost the whole
+    playlist changes", with Electronic, Pop and Hip-hop doing the same.
+
+    A track id is unique and stable, so two runs over unchanged data now
+    produce the identical list — which is also what lets the sync's
+    "unchanged?" check skip a needless write.
+
+    ⭐ ``artist_catalogue_percentile`` LEADS THE SCORE KEYS.
+
+    The stored ``final_score`` is ALBUM-relative: every track was normalised
+    against its own record's mean. That ranks "which track carried this album"
+    correctly and ranks "which of this act's songs are the hits" badly — a deep
+    cut on a famous album beats a lead single from an obscure one. The
+    percentile places the track in the act's WHOLE catalogue, which is the
+    question a Top Tracks playlist asks, and the album-relative score then
+    breaks ties inside a percentile band.
+
+    ⚠️ The percentile is 0.0 when the cohort is empty ("no measurement"), so it
+    must not be used as a score of zero — the -1.0 negation below only ever runs
+    when a cohort exists. Callers that cannot supply one keep the old profile.
+
+    ``None`` (a row with no id) sorts last rather than raising.
     """
+    _id_key = str(row.get("id") or "")
     if mode == "artist_global":
-        return star_then_popularity_order_key(row)
+        return (*star_then_popularity_order_key(row), _id_key)
     if mode == "popularity_score":
         # Artist-specific Essential Collection contract: stars first, then the
         # stored Popularity Score shown on the artist page. Listener-based
@@ -2343,12 +2375,17 @@ def _playlist_order_key(
             ),
             -float(row.get("final_score") or row.get("popularity_score") or 0),
             str(row.get("title") or "").casefold(),
+            _id_key,
         )
     return (
         -int(row.get("stars") or 0),
+        # ⭐ Artist-wide percentile first: a track that is merely the best of a
+        # weak album must not outrank a genuine hit.
+        -float(row.get("artist_catalogue_percentile") or 0),
         -float(_effective_order_score(row, mode)),
         -float(row.get("popularity_score") or row.get("score") or 0),
         str(row.get("title") or "").casefold(),
+        _id_key,
     )
 
 
@@ -2363,7 +2400,7 @@ def _apply_artist_cap(
     counts: dict[str, int] = {}
     kept: list[dict[str, Any]] = []
     for row in ordered:
-        key = _normalise_artist_key(row.get("artist") or row.get("album_artist") or "")
+        key = _cap_artist_key(row)
         if counts.get(key, 0) < max_per_artist:
             counts[key] = counts.get(key, 0) + 1
             kept.append(row)
@@ -2375,7 +2412,7 @@ def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
     buckets: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     artist_order: list[str] = []
     for rank, row in enumerate(ordered):
-        key = _normalise_artist_key(row.get("artist") or row.get("album_artist") or "")
+        key = _cap_artist_key(row)
         if key not in buckets:
             artist_order.append(key)
         buckets[key].append((rank, row))
@@ -2419,6 +2456,59 @@ def _interleave_artists(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
         last_key = pick_key
 
     return out
+
+
+#: Credit suffixes that name a GUEST or a REINTERPRETATION of the same act, and
+#: so must not buy a second allowance from the per-artist cap.
+#:
+#: ``strip_guest_credit`` handles ``feat.``/``ft.``/``featuring`` — the forms
+#: the rest of the app already normalises on. These are the remaining spellings
+#: the report found being counted as separate artists:
+#:
+#:     Papa Roach feat. Maria Brink             -> Papa Roach
+#:     Linkin Park reinterpreted by Mike Shinoda -> Linkin Park
+#:     Bloodywood feat. BABYMETAL               -> Bloodywood
+#:     Exilia feat. CJ Pierce                   -> Exilia
+#:
+#: ⚠️ ``&`` IS DELIBERATELY *NOT* STRIPPED, even though the report lists it
+#: among the credits escaping the cap.
+#:
+#: "Simon & Garfunkel" is genuinely two artists sharing one credit, and
+#: collapsing it onto "Simon" would let one half of a duo consume the other's
+#: allowance — the exact failure ``strip_guest_credit`` was built to avoid. The
+#: ``&`` cases in the report are all of the form "<act> & <guest>" where the
+#: ALBUM artist already names the act, and ``_cap_artist_key`` prefers the album
+#: artist, so those spend the act's allowance without any stripping here. A
+#: standalone duo keeps its own key, which is correct: it is its own act.
+_CAP_CREDIT_SUFFIX_RE = re.compile(
+    r"""
+    \s+
+    (?:
+        (?:re-?interpreted|reinterpreted|re-?imagined|reimagined)\s+by\s+.*
+      | (?:feat\.?|ft\.?|featuring|with)\s+.*
+    )
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _cap_artist_key(row: dict[str, Any]) -> str:
+    """The artist a row is CAPPED against.
+
+    ⭐ THE ALBUM ARTIST WINS, because a cap is a quota on the ACT whose album
+    this is — a guest credit must not spend someone else's allowance. Only when
+    there is no album artist does the track artist stand in.
+
+    The suffix is then stripped, so every guest/reinterpretation spelling the
+    report listed resolves to the same key.
+    """
+    raw = str(row.get("album_artist") or row.get("artist") or "").strip()
+    if not raw:
+        raw = str(row.get("artist") or "").strip()
+    cleaned = _CAP_CREDIT_SUFFIX_RE.sub("", raw).strip()
+    # Never let the strip empty the name (see ``strip_guest_credit``).
+    return _normalise_artist_key(cleaned or raw)
 
 
 def _ordered_playlist_rows(
@@ -4674,6 +4764,99 @@ def _sync_playlist_to_navidrome(
     return synced
 
 
+def _pool_genre_key(genre: Any) -> str:
+    """The POOL KEY for a genre — one key per genre, whatever its spelling.
+
+    ⭐⭐ "SYNTH-POP" AND "SYNTHPOP" WERE TWO PLAYLISTS.
+
+    The key used to be built from the raw display text:
+
+        re.sub(r"[^\\w\\s-]", "", genre.lower()).strip()
+
+    which turns ``Synth-pop`` into ``synth-pop`` and ``Synthpop`` into
+    ``synthpop``. Two keys meant two pools and two playlists (81 and 159
+    tracks), while the vocabulary maps both spellings to ONE canonical genre
+    (``synthpop``, alias ``synth-pop``) — so the app disagreed with itself.
+
+    Canonicalising against the vocabulary first is what makes the playlist
+    follow the classification the rest of the pipeline already uses. A value the
+    vocabulary does not recognise keeps the old behaviour, so an unknown genre
+    still gets its own playlist rather than being merged into something else.
+    """
+    text = str(genre or "").strip()
+    if not text:
+        return ""
+    try:
+        from services.enrichment.genre_vocabulary import get_vocabulary
+
+        canonical = str(get_vocabulary().classify(text).canonical or "").strip()
+        if canonical:
+            text = canonical.replace("_", " ")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Genre canonicalisation unavailable", genre=text, error=str(exc))
+    return re.sub(r"[^\w\s-]", "", text.lower()).strip()
+
+
+def _track_is_playlist_eligible(row: dict[str, Any]) -> bool:
+    """May this track appear in a generated genre playlist?
+
+    ⭐⭐ TWO FLAGS AND A TITLE BACKUP, APPLIED BEFORE ANY RANKING.
+
+    Reported in Alternative Rock / Nu Metal / Alternative Metal:
+
+        Katatonia – Forsaker              is_live=1, exclude_from_stats=True
+        Placebo – Song to Say Goodbye     is_live=1      (a live take)
+        Linkin Park – Across the Line     exclude_from_stats=True
+                                          ("Unreleased Demo 2007")
+        Ill Niño – How Can I Live         exclude_from_stats=True
+
+    Nothing between the query and the writer ever read these, so a live take and
+    a track the user excluded from statistics both competed for a slot — and won
+    it on score.
+
+    The TITLE check is a BACKUP, not a replacement: the flags are set by the
+    scan's classification pass and are the authoritative signal, but a track the
+    reader can see is "(Live)" or an "Unreleased Demo" must not be admitted
+    merely because the flag was never written for it.
+
+    ⚠️ Deliberately does NOT test ``is_compilation``: a compilation copy is
+    resolved by the duplicate grouping (which prefers the studio row), and
+    excluding every compilation would drop whole legitimate albums.
+
+    ⭐ NON-CANONICAL VERSIONS ARE EXCLUDED FROM TOP TRACKS ENTIRELY.
+
+    The report asked for demos, remixes, reboots, instrumentals and
+    "reinterpreted" versions to be lowered in score OR kept out of Top Tracks.
+    For a TOP TRACKS chart the exclusion is the honest answer: a demo of a song
+    is not a separate entry in an artist's best-of, and admitting it means the
+    canonical recording has to compete with its own draft for a slot.
+
+    ``version_penalty`` still exists for the builder that ranks rather than
+    selects (the Essential collection), so the demotion is available there.
+    """
+    if bool(row.get("is_live")):
+        return False
+    if bool(row.get("exclude_from_stats")):
+        return False
+    try:
+        from services.catalog.album_classification_service import (
+            is_live_or_alternate_track_title,
+        )
+
+        if is_live_or_alternate_track_title(str(row.get("title") or "")):
+            return False
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Live-title check unavailable", error=str(exc))
+    try:
+        from services.popularity.popularity_math import version_penalty
+
+        if version_penalty(str(row.get("title") or "")) < 0.999:
+            return False
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Version check unavailable", error=str(exc))
+    return True
+
+
 def _resolve_playlist_genres(
     row: dict[str, Any],
     *,
@@ -4776,9 +4959,14 @@ _GENRE_ROWS_SQL = """
            COALESCE(popularity, final_score, 0) AS popularity_score,
            COALESCE(final_score, popularity, 0) AS final_score,
            COALESCE(is_live, 0) AS is_live,
+           COALESCE(exclude_from_stats, FALSE) AS exclude_from_stats,
            COALESCE(is_compilation, 0) AS is_compilation,
            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
+           -- ⭐ The recency cap needs a release date. ``release_year`` is the
+           -- typed column, ``year`` the raw tag; both are read so a track
+           -- carrying only the free-text year is still datable.
+           release_year, year,
            genres,
            lastfm_tags, musicbrainz_genres, discogs_genres,
            listenbrainz_genres, spotify_genres, essentia_genres,
@@ -5294,9 +5482,9 @@ def _create_genre_top_track_playlists(
 
     norm_only_genres = None
     if only_genres is not None:
-        norm_only_genres = {
-            re.sub(r"[^\w\s-]", "", g.lower()).strip() for g in only_genres
-        }
+        # Canonicalised with the SAME helper the pool key uses, so "Synth-pop"
+        # in the affected set matches "synthpop" in the pool.
+        norm_only_genres = {_pool_genre_key(g) for g in only_genres}
         norm_only_genres.discard("")
 
     if rows_override is not None:
@@ -5356,7 +5544,7 @@ def _create_genre_top_track_playlists(
         return [
             genre
             for genre in genres
-            if re.sub(r"[^\w\s-]", "", str(genre).lower()).strip() in norm_only_genres
+            if _pool_genre_key(genre) in norm_only_genres
         ]
 
     # ⭐ GENRE EXCLUSIONS WERE REMOVED HERE — the Final Genres now do the job.
@@ -5385,7 +5573,41 @@ def _create_genre_top_track_playlists(
     genre_freq: dict[str, int] = defaultdict(int)
     genre_display: dict[str, str] = {}
 
+    # ⭐ ARTIST-WIDE PERCENTILE COHORT, BUILT ONCE FROM THE ELIGIBLE ROWS.
+    #
+    # The stored score is album-relative, so ranking a Top Tracks list on it
+    # answers "which track carried this album" rather than "which of this act's
+    # songs are the hits". Building each act's cohort here lets the order key
+    # place a track in its artist's WHOLE catalogue.
+    #
+    # Keyed on the same cap artist the per-artist quota uses, so a guest credit
+    # is scored against the act whose album it is — not against the guest.
+    _artist_scores: dict[str, list[float]] = defaultdict(list)
+    _current_year = datetime.now().year
+    for _row in rows:
+        if not _track_is_playlist_eligible(_row):
+            continue
+        _score = float(
+            _row.get("popularity_score")
+            or _row.get("final_score")
+            or _row.get("popularity")
+            or 0
+        )
+        if _score > 0:
+            _artist_scores[_cap_artist_key(_row)].append(_score)
+
+    # ⭐ ELIGIBILITY IS APPLIED HERE, BEFORE ANY RANKING OR CAP.
+    #
+    # A live take or a stats-excluded track must not take a slot at all — not
+    # even one that is later dropped — because dropping it AFTER the cap leaves
+    # the playlist one short (the reported "Alternative Rock has 299 tracks").
+    # Filtering the input is the only place where "every eligible track" and
+    # "the top N" are the same promise.
+    _ineligible_count = 0
     for row in rows:
+        if not _track_is_playlist_eligible(row):
+            _ineligible_count += 1
+            continue
         track_genres = _track_genres(row)
 
         is_christmas = is_christmas_track(
@@ -5404,7 +5626,10 @@ def _create_genre_top_track_playlists(
             track_genres = [_HOLIDAY_POOL_DISPLAY]
 
         for genre in track_genres:
-            norm_key = re.sub(r"[^\w\s-]", "", genre.lower()).strip()
+            # ⭐ ONE KEY PER GENRE, NOT ONE PER SPELLING.
+            # "Synth-pop" and "Synthpop" canonicalise to the same key here, so
+            # they share one pool and therefore one playlist.
+            norm_key = _pool_genre_key(genre)
             if not norm_key:
                 continue
 
@@ -5418,15 +5643,38 @@ def _create_genre_top_track_playlists(
                 target_norm_key = norm_key
                 target_display = genre
 
+            _row_score = float(
+                row.get("popularity_score") or row.get("final_score") or 0
+            )
+            _cohort = _artist_scores.get(_cap_artist_key(row)) or []
+            _percentile = 0.0
+            _recency_cap = 0.0
+            try:
+                from services.popularity.popularity_math import (
+                    artist_catalogue_percentile,
+                    recency_boost_cap,
+                )
+
+                _percentile = artist_catalogue_percentile(_row_score, _cohort)
+                _recency_cap = recency_boost_cap(
+                    row.get("release_year") or row.get("year"), _current_year
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Artist-percentile scoring unavailable", error=str(exc))
+
             pools[target_norm_key].append({
                 "id": str(row.get("id") or ""),
                 "title": str(row.get("title") or "Unknown"),
                 "file_path": str(row.get("file_path") or ""),
                 "duration": row.get("duration"),
                 "stars": int(row.get("stars") or 0),
-                "score": float(row.get("popularity_score") or row.get("final_score") or 0),
-                "popularity_score": float(row.get("popularity_score") or row.get("final_score") or 0),
+                "score": _row_score,
+                "popularity_score": _row_score,
                 "final_score": float(row.get("final_score") or row.get("popularity_score") or 0),
+                # ⭐ Ranked against the act's WHOLE catalogue, not just this
+                # album, and the most a brand-new track may gain on recency.
+                "artist_catalogue_percentile": _percentile,
+                "recency_cap": _recency_cap,
                 "lastfm_listeners": int(row.get("lastfm_listeners") or 0),
                 "listenbrainz_listens": int(row.get("listenbrainz_listens") or 0),
                 "artist": str(row.get("artist") or row.get("album_artist") or ""),
@@ -5447,6 +5695,32 @@ def _create_genre_top_track_playlists(
             -float(item.get("final_score") or item.get("score") or 0),
             item["title"].casefold(),
         )
+
+    def _unique_by_track_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep the FIRST row for each track id, preserving order.
+
+        ⭐ WHY THIS IS NEEDED EVEN THOUGH ``_group_duplicate_tracks`` MERGES ROWS.
+
+        That grouping merges rows that are the same TRACK; it says nothing about
+        a list that already contains the same ``id`` more than once. Nothing
+        between the pool and ``update_playlist_songs`` checked for that, so a
+        repeated id was written twice — the reported "Exilia – Over the Edge is
+        both track 1 and track 300 of Nu Metal, so the playlist has only 299
+        unique tracks".
+
+        A Navidrome playlist holding one id twice still has ONE track, so the
+        playlist silently came up short: "300 slots" became 299 tracks.
+        """
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            track_id = str(row.get("id") or "").strip()
+            if track_id:
+                if track_id in seen:
+                    continue
+                seen.add(track_id)
+            out.append(row)
+        return out
 
     written = 0
     skipped_unchanged = 0
@@ -5494,6 +5768,14 @@ def _create_genre_top_track_playlists(
             min(group, key=_tiebreak)
             for group in _group_duplicate_tracks(tracks)
         ]
+        # ⭐ DE-DUPLICATE BEFORE THE CAP, NOT AFTER IT.
+        #
+        # Two different groups can hold the SAME track id (the grouping keys on
+        # title+artist as well as id, so a mis-keyed row slips through). Removing
+        # the repeat AFTER `[:max_tracks]` would leave the playlist short by one
+        # — the reported "299 tracks instead of 300". Here the slot is freed
+        # before the slice, so the next eligible track fills it.
+        winners = _unique_by_track_id(winners)
         qualifying_count = len(winners)
         playlist_name = _genre_playlist_name(_display_genre(genre))
         playlist_exists = playlist_name.casefold() in existing_playlists
@@ -5523,6 +5805,23 @@ def _create_genre_top_track_playlists(
             winners = winners[:max_tracks]
         if interleave_artists:
             winners = _interleave_artists(winners)
+
+        # ⭐ SELF-CHECK BEFORE THE ROTATION, on the actual selection.
+        #
+        # The rotation only reorders survivors, so the invariants are settled
+        # here — and a failure names the playlist rather than surfacing later as
+        # "the playlist looks wrong".
+        _log_playlist_problems(
+            playlist_name,
+            _verify_genre_playlist(
+                genre=genre,
+                playlist_name=playlist_name,
+                winners=winners,
+                max_tracks=max_tracks,
+                max_per_artist=max_per_artist,
+                eligible_pool_size=qualifying_count,
+            ),
+        )
 
         # ⭐ AFTER the slice, always. Shuffling before it would let the cap drop
         # genuinely top tracks at random; here the rotation can only reorder the
@@ -7213,10 +7512,6 @@ def _sync_single_curated_playlist(
     ``clear_when_empty=False`` retains the old leave-it-alone behaviour for
     callers that cannot prove the empty pool is real.
     """
-    order_mode = _resolve_playlist_order_mode(cfg.get("playlist_order_mode"))
-    max_per_artist = _resolve_max_per_artist(cfg)
-    interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
-
     winners = _dedupe_curated_pool(pool)
     if not winners:
         if not clear_when_empty:
@@ -7236,14 +7531,37 @@ def _sync_single_curated_playlist(
             )
         return True
 
-    winners = _ordered_playlist_rows(
-        winners,
-        order_mode=order_mode,
-        max_per_artist=max_per_artist,
-        interleave=interleave_artists,
-    )
+    # ⭐⭐ STARS FIRST, THEN SCORE, THEN THE CAP — IN THAT ORDER.
+    #
+    # The pool is fetched with ``min_stars=3``, so 3-star and 4-star covers are
+    # legitimately in it. That is correct: a 3-star cover with a high score
+    # still belongs in a 150-track list when there are not 150 five-star ones.
+    #
+    # What was wrong is the ORDER these steps ran in: the artist cap was applied
+    # to the whole pool before the slice, and `_ordered_playlist_rows` sorts
+    # stars-first — so a 4-star row could only reach the file when fewer than
+    # ``max_tracks`` 5-star covers existed, which the report shows is not the
+    # case (160 eligible 5-star covers, 35 slots taken by 4-star).
+    #
+    # Sorting is already stars-first (``_playlist_order_key``), so the slice
+    # below is the thing that guarantees "no track lower than 5★ is used while
+    # 5★ tracks are still available". The cap is then applied to the SURVIVORS
+    # so it can never displace a higher-star row.
+    order_mode = _resolve_playlist_order_mode(cfg.get("playlist_order_mode"))
+    max_per_artist = _resolve_max_per_artist(cfg)
+    interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
+
+    ordered = sorted(winners, key=lambda r: _playlist_order_key(r, order_mode))
     if max_tracks and max_tracks > 0:
-        winners = winners[:max_tracks]
+        ordered = ordered[:max_tracks]
+    # The cap runs AFTER the slice: a capped-out 4-star can no longer push a
+    # 5-star cover out of the list.
+    ordered = _apply_artist_cap(ordered, max_per_artist)
+    if interleave_artists:
+        ordered = _interleave_artists(ordered)
+    winners = _weekly_shuffle(
+        ordered, playlist_key=playlist_name, scope="genre_top_tracks"
+    )
 
     song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
     if not song_ids:
@@ -7303,6 +7621,225 @@ def _create_decade_playlists(
         ):
             written += 1
     return written
+
+
+def _verify_genre_playlist(
+    *,
+    genre: str,
+    playlist_name: str,
+    winners: list[dict[str, Any]],
+    max_tracks: int | None,
+    max_per_artist: int | None,
+    eligible_pool_size: int,
+) -> list[str]:
+    """Self-check a finished playlist against the contract it promises.
+
+    ⭐ THE CHECKS THE COLLECTION ASKED FOR, RUN ON EVERY BUILD.
+
+    A generated playlist is derived data with six invariants, and each one has
+    been violated at some point: a duplicate id (299 unique tracks), a playlist
+    one short of its target, a live take in a studio chart, a track in a
+    playlist whose genres do not name it, a 4★ admitted while 5★ covers were
+    free, and a cover playlist entry with no cover verdict.
+
+    Returns a list of human-readable problems — EMPTY means clean. This cannot
+    fix anything (the fix belongs where the fault is); it reports, so a silent
+    regression becomes a log line naming the playlist and the rule.
+    """
+    problems: list[str] = []
+
+    ids = [str(r.get("id") or "") for r in winners if str(r.get("id") or "")]
+    if len(ids) != len(set(ids)):
+        problems.append(
+            f"DUPLICATE_IDS: {len(ids) - len(set(ids))} repeated track id(s)"
+        )
+
+    expected = min(eligible_pool_size, max_tracks or eligible_pool_size)
+    if max_tracks and len(ids) < expected:
+        # Only a shortfall against what the POOL could supply is a fault; a
+        # pool smaller than the target is legitimately short.
+        problems.append(
+            f"SHORT_BY_TARGET: wrote {len(ids)} of an available {expected}"
+        )
+
+    if max_per_artist and max_per_artist > 0:
+        per_artist: dict[str, int] = {}
+        for row in winners:
+            key = _cap_artist_key(row)
+            per_artist[key] = per_artist.get(key, 0) + 1
+        over = {k: v for k, v in per_artist.items() if v > max_per_artist}
+        if over:
+            problems.append(f"ARTIST_CAP_EXCEEDED: {over}")
+
+    for row in winners:
+        if bool(row.get("is_live")):
+            problems.append(f"LIVE_TRACK: {row.get('title')!r}")
+            break
+    for row in winners:
+        if bool(row.get("exclude_from_stats")):
+            problems.append(f"EXCLUDED_TRACK: {row.get('title')!r}")
+            break
+
+    # Every track must carry the playlist's genre in its FINAL genres.
+    _wanted = _pool_genre_key(genre)
+    for row in winners:
+        _own = {_pool_genre_key(g) for g in (row.get("genres") or [])}
+        if _wanted and _wanted not in _own:
+            problems.append(f"GENRE_MISMATCH: {row.get('title')!r} lacks {genre!r}")
+            break
+
+    # ⭐ No lower star tier while a higher one was still available.
+    #
+    # The pool is already stars-ordered, so a track BELOW the pool's best tier
+    # can only be there legitimately once every row of the better tier has been
+    # taken. Comparing the used tiers against the pool's best tier is the
+    # cheap version of that check and catches the reported "35 four-star covers
+    # while 160 five-star ones were eligible".
+    if eligible_pool_size > len(winners) and winners:
+        _used_tiers = [int(r.get("stars") or 0) for r in winners]
+        _best_available = max(
+            (int(r.get("stars") or 0) for r in winners), default=0
+        )
+        if min(_used_tiers) < _best_available:
+            problems.append(
+                f"LOWER_STAR_USED: tier {min(_used_tiers)} chosen while tier "
+                f"{_best_available} was still available"
+            )
+
+    return [p for p in problems if p]
+
+
+def _verify_cover_playlist(
+    playlist_name: str, winners: list[dict[str, Any]]
+) -> list[str]:
+    """Every entry in a COVER playlist must carry a cover verdict.
+
+    Reported: a cover playlist holding tracks whose detection had been cleared,
+    and (separately) acoustic re-recordings wrongly flagged as covers. The
+    second fault is upstream, but this check catches the first: an entry with
+    no ``is_cover`` does not belong in the list.
+    """
+    problems: list[str] = []
+    for row in winners:
+        if not int(row.get("is_cover") or 0):
+            problems.append(f"NO_COVER_FLAG: {row.get('title')!r}")
+            break
+    return problems
+
+
+def _log_playlist_problems(playlist_name: str, problems: list[str]) -> None:
+    """One line per failing playlist, naming the rule it broke."""
+    if not problems:
+        return
+    logger.warning(
+        "Playlist self-check failed",
+        playlist=playlist_name,
+        problems=problems[:6],
+        problem_count=len(problems),
+    )
+    log_unified(
+        f"⚠️ Playlist check: '{playlist_name}' — " + "; ".join(problems[:3])
+    )
+
+
+def audit_artist_picks_against_listeners(
+    *,
+    picks_by_artist: dict[str, list[dict[str, Any]]],
+    catalogue_by_artist: dict[str, list[dict[str, Any]]],
+    min_picks: int = 4,
+) -> list[dict[str, Any]]:
+    """Flag any artist whose picks disagree with their listener-count leaders.
+
+    ⭐ THE POST-RESCAN CHECK THE COLLECTION ASKED FOR.
+
+    "check each artist's picks against their top tracks by listener count, and
+    flag any artist where fewer than half of their picks match."
+
+    The comparison is deliberately made on LISTENERS, not on score: the score is
+    the thing under test. If a selection engine's picks do not overlap the
+    listener-count leaders at all, either the listener data or the ranking is
+    wrong, and the flag says which artists to look at.
+
+    ``min_picks`` suppresses the noise: an artist with two picks in a catalogue
+    of three cannot produce a meaningful overlap, so a 50% miss there says
+    nothing. Those are SKIPPED and counted in the log line, not flagged.
+
+    Returns one dict per UNDERPERFORMING artist:
+        {"artist", "picks", "matched", "overlap", "top_by_listeners", "missed"}
+    """
+    reported: list[dict[str, Any]] = []
+    too_few = 0
+
+    def _listener_key(row: dict[str, Any]) -> float:
+        return max(
+            float(row.get("lastfm_listeners") or 0),
+            float(row.get("listenbrainz_listens") or 0),
+        )
+
+    for artist, picks in (picks_by_artist or {}).items():
+        pool = [
+            r for r in (catalogue_by_artist.get(artist) or [])
+            if _listener_key(r) > 0
+        ]
+        if len(picks) < min_picks or len(pool) < min_picks:
+            too_few += 1
+            continue
+
+        # How many listener leaders does a playlist of this size cover? Using
+        # the SAME count for both sides is the fair comparison — a 300-track
+        # playlist trivially "matches" the top 300 of anything.
+        k = min(len(picks), len(pool))
+        leaders = sorted(pool, key=_listener_key, reverse=True)[:k]
+
+        picked_ids = {
+            str(r.get("id") or "")
+            for r in picks
+            if str(r.get("id") or "")
+        }
+        leader_ids = [
+            str(r.get("id") or "")
+            for r in leaders
+            if str(r.get("id") or "")
+        ]
+        matched = [tid for tid in leader_ids if tid in picked_ids]
+        overlap = len(matched) / len(leader_ids) if leader_ids else 0.0
+
+        if overlap < 0.5:
+            reported.append({
+                "artist": artist,
+                "picks": len(picks),
+                "matched": len(matched),
+                "overlap": round(overlap, 3),
+                "top_by_listeners": [
+                    {
+                        "title": str(r.get("title") or ""),
+                        "listeners": int(_listener_key(r)),
+                        "picked": str(r.get("id") or "") in picked_ids,
+                    }
+                    for r in leaders[:12]
+                ],
+                "missed": len(leader_ids) - len(matched),
+            })
+
+    reported.sort(key=lambda d: d["overlap"])
+    if reported:
+        logger.warning(
+            "Artist picks disagree with listener leaders",
+            flagged=len(reported),
+            too_few_to_judge=too_few,
+            worst=[
+                (d["artist"], d["overlap"]) for d in reported[:10]
+            ],
+        )
+        log_unified(
+            f"⚠️ {len(reported)} artist(s) where fewer than half of the picks "
+            f"match the listener-count leaders: "
+            + ", ".join(
+                f"{d['artist']} ({d['matched']}/{d['picks']})"
+                for d in reported[:6]
+            )
+        )
+    return reported
 
 
 def _create_hit_singles_playlist(
@@ -7583,6 +8120,13 @@ def _create_genre_covers_playlists(
             skipped_below_min.append(f"{display} ({len(deduped)})")
             continue
         keep_names.add(playlist_name)
+        _log_playlist_problems(
+            playlist_name,
+            _verify_cover_playlist(
+                playlist_name,
+                deduped[:max_tracks] if max_tracks else deduped,
+            ),
+        )
         if _sync_single_curated_playlist(
             playlist_name,
             deduped,

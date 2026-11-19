@@ -44,7 +44,9 @@ silent spinner.
 
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
 from typing import Any
 
 import structlog
@@ -255,6 +257,46 @@ def _plan_playlists(proposed_by_id: dict[str, str] | None = None) -> dict[str, l
     return plan
 
 
+def _playlist_name_key(name: Any) -> str:
+    """The key two playlist NAMES must agree on to be the same playlist.
+
+    ⭐⭐ EXACT-STRING MATCHING MADE EXISTING PLAYLISTS LOOK NEW.
+
+    The preview decided "is this a create?" with ``name in server_counts`` — an
+    exact, case-sensitive test. Any difference between the name the PLAN
+    generates and the name Navidrome holds therefore reported a CREATE over a
+    playlist that was already there:
+
+        Experimental – Top Tracks     (server, 81 tracks)  "new, 0 -> 69"
+        Stoner Metal – Top Tracks     (server, 42 tracks)  "new, 0 -> 42"
+        Symphonic Rock – Top Tracks   (server, 56 tracks)  "new, 0 -> 61"
+
+    Applying that would have created a second playlist beside each one.
+
+    Normalisation folds everything that is not part of a playlist's identity:
+    case, surrounding whitespace, dash variants (``-``/``–``/``—``), and runs
+    of internal whitespace. It deliberately does NOT strip words — "Top Tracks"
+    versus "Great Covers" must stay different.
+
+    ⚠️ THE RISK THIS ACCEPTS: two playlists whose names differ only in case or
+    punctuation are treated as one. For MANAGED genre playlists that is the
+    desired behaviour — the name is generated from a template, so a variant
+    spelling is the same slot. It is also why this normaliser is used ONLY for
+    the managed-genre comparison, never for deleting user playlists.
+    """
+    text = str(name or "").strip().casefold()
+    if not text:
+        return ""
+    # Unicode-normalise first so accented templates compare consistently.
+    text = unicodedata.normalize("NFKC", text)
+    # Dash variants: hyphen, en dash, em dash, minus sign.
+    text = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", text)
+    # Collapse whitespace runs and drop the spaces AROUND the separator, so
+    # "Stoner Metal - Top Tracks" and "Stoner Metal-Top Tracks" agree.
+    text = re.sub(r"\s*-\s*", "-", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _server_playlists(
     only: set[str] | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, int]]:
@@ -327,12 +369,21 @@ def _server_playlists(
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
+        # ⚠️ KEYED BY THE NORMALISED NAME, NOT THE RAW ONE.
+        #
+        # The plan's name and the server's name can differ in case, dash
+        # character or spacing, and an exact key made an existing playlist look
+        # new — see ``_playlist_name_key``. The caller normalises its planned
+        # names with the same function, so both sides agree.
+        key = _playlist_name_key(name)
+        if not key:
+            continue
         try:
-            counts[name] = int(entry.get("songCount") or 0)
+            counts[key] = int(entry.get("songCount") or 0)
         except (TypeError, ValueError):
-            counts[name] = 0
+            counts[key] = 0
 
-        if only is not None and name not in only:
+        if only is not None and key not in only:
             # Existence and size came free from the listing; the contents are
             # only needed by the diff, and this playlist is not in it.
             continue
@@ -340,7 +391,7 @@ def _server_playlists(
         ids = _current_song_ids(client, str(entry.get("id") or ""))
         if ids is None:
             continue
-        contents[name] = list(ids)
+        contents[key] = list(ids)
     return contents, counts
 
 
@@ -445,7 +496,13 @@ def preview_genre_playlist_resync(
     # exist?" and "does it have tracks?" never need a getPlaylist call. Reading
     # all 659 playlists serially is what flooded Navidrome and tripped the
     # client's host cooldown, which then broke the unrelated playlist index.
-    current, server_counts = _server_playlists(only=set(planned))
+    # Both sides of the comparison are keyed by the NORMALISED name (see
+    # ``_playlist_name_key``): the plan's spelling and the server's spelling can
+    # differ in case, dash or spacing, and an exact match reported a CREATE over
+    # a playlist that was already there.
+    current, server_counts = _server_playlists(
+        only={_playlist_name_key(n) for n in planned}
+    )
 
     playlist_changes: list[dict[str, Any]] = []
     totals = {
@@ -465,17 +522,22 @@ def preview_genre_playlist_resync(
         # out. The listing's ``songCount`` separates them. Treating a read
         # failure as "new" would predict a create over a populated playlist;
         # treating it as "empty" would report every track as a gain.
-        exists = name in server_counts
-        readable = name in current
+        #
+        # ``key`` is the NORMALISED name the server map is keyed by, so an
+        # existing playlist whose stored spelling differs from the template is
+        # still recognised as existing (see ``_playlist_name_key``).
+        key = _playlist_name_key(name)
+        exists = key in server_counts
+        readable = key in current
         if exists and not readable:
             logger.debug(
                 "Genre/playlist resync preview: playlist contents unreadable, "
                 "not compared",
-                playlist=name, song_count=server_counts.get(name),
+                playlist=name, song_count=server_counts.get(key),
             )
             continue
 
-        before = current.get(name, [])
+        before = current.get(key, [])
         is_new = not exists
         is_clear = not after
         delta = _diff(after, before)
@@ -500,10 +562,13 @@ def preview_genre_playlist_resync(
     # the apply does not delete it (the orphan sweep owns deletion).
     #
     # Decided from ``server_counts`` — the listing — because unplanned playlists
-    # deliberately have no contents fetched.
+    # deliberately have no contents fetched. Both sides are normalised keys, so
+    # a spelling difference cannot report a managed playlist as unmanaged and
+    # send it to the orphan sweep.
+    _planned_keys = {_playlist_name_key(n) for n in planned}
     unmanaged = sorted(
         name for name, count in server_counts.items()
-        if name not in planned and count > 0
+        if name not in _planned_keys and count > 0
     )
 
     elapsed = round(time.monotonic() - started, 2)

@@ -378,7 +378,12 @@ class TestTheServerReadIsScoped:
         assert "only" in inspect.signature(svc._server_playlists).parameters, (
             "the read is unscoped, so a preview walks every playlist on the server"
         )
-        assert "name not in only" in src, (
+        # ⚠️ The skip is keyed on the NORMALISED name (``key``), not the raw
+        # one: an existing playlist whose stored spelling differs from the
+        # template must still be recognised, so the map is keyed by
+        # ``_playlist_name_key`` on both sides. The comparison is therefore
+        # ``key not in only``, and `only` is normalised by the caller.
+        assert "key not in only" in src, (
             "the contents fetch must skip playlists that are not being compared"
         )
 

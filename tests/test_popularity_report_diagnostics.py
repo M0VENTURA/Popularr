@@ -28,7 +28,12 @@ def test_every_new_report_column_is_actually_selected():
         "exclude_from_stats",
         "lastfm_playcount_available",
     } <= selected
-    assert selected <= set(svc.POPULARITY_REPORT_COLUMNS)
+    # ⚠️ ``id`` is a JOIN KEY, not a report column: the playlist-membership map
+    # is keyed by track id, and the value is written under
+    # ``playlists_included_in``. Every OTHER selected name must be a column the
+    # report actually writes, or the query is pulling data nothing reads.
+    non_report_keys = {"id"}
+    assert (selected - non_report_keys) <= set(svc.POPULARITY_REPORT_COLUMNS)
 
 
 def test_report_lists_every_genre_source_and_the_final_genre():

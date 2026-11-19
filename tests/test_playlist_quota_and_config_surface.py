@@ -385,6 +385,9 @@ class TestTheCsvIsWellFormed:
             for name in select_block.replace("SELECT", "").split(",")
             if name.strip()
         }
-        assert selected <= set(svc.POPULARITY_REPORT_COLUMNS), (
-            selected - set(svc.POPULARITY_REPORT_COLUMNS)
-        )
+        # ⚠️ ``id`` is a JOIN KEY, not a reported column: the playlist-membership
+        # map is keyed by track id and written under ``playlists_included_in``.
+        # Everything ELSE selected must be a real report column.
+        non_report_keys = {"id"}
+        unreported = (selected - non_report_keys) - set(svc.POPULARITY_REPORT_COLUMNS)
+        assert not unreported, unreported

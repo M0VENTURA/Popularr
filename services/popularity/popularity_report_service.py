@@ -24,10 +24,13 @@ import io
 import re
 from typing import Any
 
+import structlog
 from sqlalchemy import text
 
 from db.engine import db_session
 from db.repositories.popularity_repository import parse_genre_value
+
+logger = structlog.get_logger(__name__)
 
 #: Columns of the report, in file order. ``rank`` and ``last_scanned`` are
 #: computed after the query; every other name is a real ``tracks`` column
@@ -62,6 +65,11 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "listenbrainz_listens",
     "listenbrainz_users",
     "listenbrainz_score",
+    # Which playlists this track currently sits in, so the ranking can be read
+    # against where the track actually appears. Sourced from the playlist index
+    # (``playlist_entries``) rather than a live Subsonic walk; blank when the
+    # index has not been synced or the track is in no playlist.
+    "playlists_included_in",
     "exclude_from_stats",
     "is_single",
     "single_confidence",
@@ -105,7 +113,8 @@ _POPULARITY_REPORT_SELECT = """
            exclude_from_stats,
            is_single, single_confidence, single_confidence_score,
            is_live, popularity_frozen,
-           lastfm_last_updated, listenbrainz_last_updated
+           lastfm_last_updated, listenbrainz_last_updated,
+           id
     FROM tracks
     WHERE {where}
     ORDER BY COALESCE(NULLIF(raw_score, 0), final_score, popularity, stars, 0) DESC,
@@ -217,6 +226,20 @@ def build_popularity_report(*, artist: str | None = None, album: str | None = No
             .all()
         )
 
+    # ⭐ ONE QUERY FOR THE WHOLE FILE, not one per row.
+    #
+    # The index is optional: an unsynced or absent index yields an empty map and
+    # the column reads blank, which is honest — it does not silently claim the
+    # track is in no playlist. The failure is contained here so the export
+    # itself can never fail because of a convenience column.
+    playlists_by_track: dict[str, str] = {}
+    try:
+        from db.repositories.playlists import playlist_names_by_track_id
+
+        playlists_by_track = playlist_names_by_track_id()
+    except Exception as exc:
+        logger.debug("Playlist index unavailable for the report", error=str(exc))
+
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer)
     writer.writerow(POPULARITY_REPORT_COLUMNS)
@@ -229,6 +252,8 @@ def build_popularity_report(*, artist: str | None = None, album: str | None = No
         for column in POPULARITY_REPORT_COLUMNS[1:]:
             if column == "last_scanned":
                 values.append(last_scanned)
+            elif column == "playlists_included_in":
+                values.append(playlists_by_track.get(str(row.get("id") or ""), ""))
             elif column in _GENRE_COLUMNS:
                 values.append(_genre_cell(row.get(column)))
             else:

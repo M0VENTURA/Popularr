@@ -347,6 +347,54 @@ def artist_playlist_tracks_by_artist(
         return [dict(r) for r in rows]
 
 
+def playlist_names_by_track_id() -> dict[str, str]:
+    """``track_id -> "; "-joined playlist names``, for the whole library.
+
+    Backs the popularity CSV's "playlists_included_in" column: one track per
+    line, so the reader can see WHY a track scored where it did — a track that
+    only ever appears in a "Hidden Gems" playlist is being judged differently
+    from one that sits in five.
+
+    ⚠️ THIS IS NOT SCOPED, ON PURPOSE. The collection export IS the whole
+    library, so a per-artist variant would just be this query with a filter the
+    caller does not need. Reading it once here also costs ONE statement for the
+    entire report rather than one per row.
+
+    ⚠️ A track in the same playlist TWICE appears once. ``playlist_entries``
+    is keyed on ``(playlist_id, position)`` so a legitimate duplicate is two
+    rows; naming the playlist twice says nothing extra.
+
+    Returns ``{}`` when the index tables are absent (see ``_tables_exist``) —
+    a quiet answer, never an error, because the report must still export.
+    """
+    with db_session() as session:
+        if not _tables_exist(session):
+            return {}
+        try:
+            rows = session.execute(
+                text(
+                    "SELECT DISTINCT e.track_id, p.name "
+                    "FROM playlist_entries e "
+                    "JOIN playlists p ON p.playlist_id = e.playlist_id "
+                    "WHERE COALESCE(TRIM(p.name), '') <> '' "
+                    "ORDER BY e.track_id, LOWER(p.name)"
+                )
+            ).mappings().all()
+        except Exception:
+            return {}
+
+    grouped: dict[str, list[str]] = {}
+    for row in rows:
+        track_id = str(row.get("track_id") or "").strip()
+        name = str(row.get("name") or "").strip()
+        if not track_id or not name:
+            continue
+        names = grouped.setdefault(track_id, [])
+        if name.casefold() not in {n.casefold() for n in names}:
+            names.append(name)
+    return {tid: "; ".join(names) for tid, names in grouped.items()}
+
+
 def index_sizes() -> dict[str, int]:
     """Row counts, for the sync's report. Both zero when the tables are absent."""
     with db_session() as session:
