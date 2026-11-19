@@ -951,6 +951,7 @@ def apply_album_wide_ids(
     if clear_album_mbid:
         # ``update_album_ids`` writes only non-empty values, and an explicit
         # clear must not simply be skipped — push the clear directly.
+        cleared_ids: list[str] = []
         try:
             with db_session() as session:
                 result = session.execute(
@@ -963,12 +964,28 @@ def apply_album_wide_ids(
                     {"artist": artist, "album": album},
                 )
                 rows_updated = result.rowcount or 0
+                if rows_updated:
+                    cleared_ids = [
+                        str(r[0] or "")
+                        for r in session.execute(
+                            text(
+                                "SELECT id FROM tracks "
+                                "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) "
+                                "= LOWER(:artist) AND LOWER(album) = LOWER(:album)"
+                            ),
+                            {"artist": artist, "album": album},
+                        ).fetchall() or []
+                    ]
         except Exception as exc:
             logger.warning(
                 "Album-wide release id clear failed",
                 artist=artist, album=album, error=str(exc),
             )
             return {"rows_updated": 0, "files_updated": 0}
+
+        # A CLEAR is a correction too: without the stamp the next import simply
+        # writes the old id back.
+        _mark_local_correction(cleared_ids)
 
         files_updated = _clear_album_id_file_tags(artist, album)
         return {"rows_updated": rows_updated, "files_updated": files_updated}
@@ -1063,6 +1080,7 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         file_tag_updates["musicbrainz_releasegroupid"] = release_group_id
 
     file_updated = 0
+    stamped_ids: list[str] = []
     with db_session() as session:
         # Case-insensitive scoping: the caller's artist/album name and the
         # stored value may differ only in casing ("Afi" vs "AFI"), and the
@@ -1077,6 +1095,26 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             bind_values,
         )
         rows = result.rowcount or 0
+
+        # ⚠️ EVERY ROW THE UPDATE TOUCHED MUST BE STAMPED — collect the ids from
+        # the SAME predicate as the UPDATE, not from the file loop below (which
+        # skips rows whose path does not resolve).
+        if rows:
+            try:
+                stamped_ids = [
+                    str(r[0] or "")
+                    for r in session.execute(
+                        text(
+                            "SELECT id FROM tracks "
+                            "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) "
+                            "= LOWER(:artist) "
+                            "AND LOWER(album) = LOWER(:album)"
+                        ),
+                        {"artist": artist, "album": album},
+                    ).fetchall() or []
+                ]
+            except Exception as exc:
+                logger.debug("Album id stamp id load failed", error=str(exc))
 
         if file_tag_updates:
             from services.metadata.tag_file_service import (
@@ -1094,12 +1132,50 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 _path = resolve_music_file_path(str(r[1] or "") if r[1] else None)
                 if _path:
                     try:
-                        if update_file_tags(_path, file_tag_updates):
+                        # ``force=True``: an explicit album-id correction is
+                        # AUTHORITATIVE for the field it submits. Without it a
+                        # populated MUSICBRAINZ_ALBUMID frame is left alone
+                        # whenever ``tagging.fill_missing_only`` is on, so the
+                        # FILE kept the old id and Navidrome re-split the album
+                        # even though the database was correct.
+                        if update_file_tags(_path, file_tag_updates, force=True):
                             file_updated += 1
                     except Exception as exc:
                         logger.debug("File tag write failed", track_id=r[0], error=str(exc))
 
+    _mark_local_correction(stamped_ids)
+
     return {"success": True, "rows_updated": rows, "files_updated": file_updated}, 200
+
+
+def _mark_local_correction(track_ids: list[str]) -> None:
+    """Stamp *track_ids* as a LOCAL correction so an import cannot undo them.
+
+    ⭐⭐ THIS IS WHAT STOPS A SAVED RELEASE ID BEING REVERTED.
+
+    The Navidrome import protects a row only when
+    ``metadata_dirty_for_navidrome`` is set: with it, a differing remote value
+    is reported as a conflict and the LOCAL value wins; without it, the payload
+    is written straight over the row.
+
+    ``_persist_album_track_payloads`` stamps the rows the page save itself
+    wrote — but an ALBUM-WIDE id write touches every row of the album, and the
+    rows the page did not display are the very ones that carry the stale id.
+    Unstamped, they were unprotected: the next import re-applied the old id and
+    the album split apart again ("they saved, Navidrome joined them, then
+    something updated and unlinked them again").
+    """
+    ids = [str(t).strip() for t in track_ids or [] if str(t or "").strip()]
+    if not ids:
+        return
+    try:
+        from services.scanning.reconciliation import (
+            mark_local_tags_written_for_track_ids,
+        )
+
+        mark_local_tags_written_for_track_ids(ids)
+    except Exception as exc:
+        logger.debug("Album id correction stamp failed", error=str(exc))
 
 
 # =============================================================================
