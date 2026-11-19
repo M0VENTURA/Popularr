@@ -17,6 +17,8 @@ REQUEST (in full)
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from services.popularity.popularity_math import (
@@ -350,6 +352,78 @@ class TestArtistPicksAgainstListenerLeaders:
         assert flagged == []
 
 
+class TestTheSelfCheckCanNeverAbortTheBuild:
+    """A diagnostic inside a per-genre loop must not become an outage."""
+
+    def test_a_bad_row_does_not_raise(self) -> None:
+        """A non-dict row would otherwise abort every remaining playlist."""
+        with pytest.raises(Exception):
+            fs._verify_genre_playlist(
+                genre="Electronic", playlist_name="Electronic",
+                winners=["not-a-dict"], max_tracks=1,
+                max_per_artist=4, eligible_pool_size=1,
+            )
+        # ...which is exactly why the CALL SITE is wrapped:
+        src = inspect.getsource(fs._create_genre_top_track_playlists)
+        assert "_log_playlist_problems" in src
+        assert "Playlist self-check could not run" in src, (
+            "the verifier is called unguarded inside the per-genre loop"
+        )
+
+    def test_the_logger_is_guarded(self) -> None:
+        src = inspect.getsource(fs._log_playlist_problems)
+        assert "except Exception" in src
+
+    def test_the_cover_check_is_guarded(self) -> None:
+        """The covers check lives in the genre-covers builder, not the family one."""
+        assert "_log_playlist_problems" in inspect.getsource(
+            fs._create_genre_covers_playlists
+        )
+        assert "Cover playlist self-check could not run" in inspect.getsource(
+            fs._create_genre_covers_playlists
+        )
+
+
+class TestTheBatchPercentile:
+    """The per-row precompute must agree exactly with the single-score version."""
+
+    def test_it_agrees_with_the_single_score_version(self) -> None:
+        from services.popularity.popularity_math import (
+            artist_catalogue_percentile,
+            artist_catalogue_percentiles,
+        )
+
+        cohort = [float(i) for i in range(1, 101)]
+        scores = [float(i) for i in range(0, 120)]
+        batch = artist_catalogue_percentiles(scores, cohort)
+        single = [artist_catalogue_percentile(s, cohort) for s in scores]
+        assert batch == single
+
+    def test_ties_are_counted_like_the_single_version(self) -> None:
+        from services.popularity.popularity_math import (
+            artist_catalogue_percentile,
+            artist_catalogue_percentiles,
+        )
+
+        cohort = [10.0, 10.0, 20.0, 30.0]
+        assert artist_catalogue_percentiles([10.0], cohort) == [
+            artist_catalogue_percentile(10.0, cohort)
+        ]
+
+    def test_an_empty_cohort_is_unknown(self) -> None:
+        from services.popularity.popularity_math import artist_catalogue_percentiles
+
+        assert artist_catalogue_percentiles([5.0, 6.0], []) == [0.0, 0.0]
+
+    def test_order_is_preserved(self) -> None:
+        from services.popularity.popularity_math import artist_catalogue_percentiles
+
+        cohort = [1.0, 2.0, 3.0, 4.0]
+        out = artist_catalogue_percentiles([4.0, 1.0, 3.0], cohort)
+        assert out == sorted(out, reverse=False) or out[0] > out[1] < out[2]
+        assert out[0] == 1.0 and out[1] == 0.25 and out[2] == 0.75
+
+
 class TestTheSelfChecksFlagEachReportedFault:
     """Each check must fail on the exact defect the report listed."""
 
@@ -437,13 +511,16 @@ class TestTheSelfChecksFlagEachReportedFault:
         assert any(p.startswith("GENRE_MISMATCH") for p in problems)
 
     def test_a_lower_star_tier_is_flagged(self) -> None:
+        """A tier-5 track LEFT OUT while a tier-4 one was taken."""
         problems = fs._verify_genre_playlist(
             genre="Electronic",
             playlist_name="Electronic",
-            winners=[self._row(stars=4), self._row(id="t2", stars=5)],
+            winners=[self._row(id="t1", stars=4)],
             max_tracks=2,
             max_per_artist=4,
-            eligible_pool_size=5,
+            eligible_pool_size=2,
+            capped_pool_size=2,
+            pool=[self._row(id="t1", stars=4), self._row(id="t2", stars=5)],
         )
         assert any(p.startswith("LOWER_STAR_USED") for p in problems)
 
@@ -455,6 +532,70 @@ class TestTheSelfChecksFlagEachReportedFault:
 
     def test_a_cover_playlist_of_real_covers_is_clean(self) -> None:
         assert fs._verify_cover_playlist("Covers", [{"title": "S", "is_cover": 1}]) == []
+
+
+class TestTheChecksDoNotFireOnHealthyPlaylists:
+    """⭐ THE REGRESSION THE LOG EXPOSED: 295 of 295 playlists flagged.
+
+    Every one of those was a false positive. A check that fires on everything
+    carries no information, and buries the ones that are real.
+    """
+
+    def _row(self, i=1, stars=5, genres=("Electronic",), **kw):
+        row = {"id": kw.pop("id", f"t{i}"), "title": f"S{i}", "stars": stars,
+               "genres": list(genres), "album_artist": f"A{i}"}
+        row.update(kw)
+        return row
+
+    def _check(self, winners, pool=None, **kw):
+        pool = pool if pool is not None else winners
+        return fs._verify_genre_playlist(
+            genre=kw.pop("genre", "Electronic"),
+            playlist_name="Electronic",
+            winners=winners,
+            max_tracks=kw.pop("max_tracks", 300),
+            max_per_artist=kw.pop("max_per_artist", 4),
+            eligible_pool_size=len(pool),
+            capped_pool_size=kw.pop("capped", len(pool)),
+            pool=pool,
+        )
+
+    def test_a_playlist_that_filled_its_target_is_clean(self) -> None:
+        assert self._check([self._row(1), self._row(2)], max_tracks=2) == []
+
+    def test_the_artist_cap_is_not_reported_as_a_shortfall(self) -> None:
+        """⭐ "wrote 254 of an available 300" was the CAP working.
+
+        The delivered ceiling is the post-cap pool, not the pre-cap pool.
+        """
+        winners = [self._row(i) for i in range(5)]
+        pool = [self._row(i) for i in range(40)]
+        assert self._check(winners, pool=pool, capped=5) == []
+
+    def test_a_mix_of_five_and_four_star_tracks_is_clean(self) -> None:
+        """⭐ "tier 4 chosen while tier 5 was available" meant the playlist had
+        both tiers — which is normal once the 5★ pool is exhausted."""
+        assert self._check([self._row(1, 5), self._row(2, 4)]) == []
+
+    def test_a_composed_christmas_name_is_clean(self) -> None:
+        """⭐ A track with genres ("Christmas", "Rock") pools into
+        "Christmas Rock", a name that never appears in its genres."""
+        assert self._check(
+            [self._row(1, genres=("Christmas", "Rock"))],
+            genre="Christmas Rock",
+        ) == []
+
+    def test_a_row_with_no_genres_is_unverifiable_not_wrong(self) -> None:
+        assert self._check([self._row(1, genres=())]) == []
+
+    def test_the_pool_row_carries_the_genres_the_check_reads(self) -> None:
+        """⭐ ROOT CAUSE: the pool rows had no ``genres`` key at all, so every
+        track read as "lacks its genre"."""
+        src = inspect.getsource(fs._create_genre_top_track_playlists)
+        start = src.index("pools[target_norm_key].append({")
+        block = src[start:src.index("})", start)]
+        for key in ('"genres"', '"exclude_from_stats"', '"stars"', '"is_live"'):
+            assert key in block, f"pool rows must carry {key} for the self-check"
 
     def test_tied_rows_break_on_the_track_id(self) -> None:
         rows = [

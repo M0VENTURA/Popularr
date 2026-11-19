@@ -5596,6 +5596,40 @@ def _create_genre_top_track_playlists(
         if _score > 0:
             _artist_scores[_cap_artist_key(_row)].append(_score)
 
+    # ⭐ ONE PERCENTILE PER ROW, COMPUTED ONCE — NOT ONCE PER GENRE.
+    #
+    # A track pools into up to ``max_genres`` playlists, so computing the
+    # percentile inside the genre loop repeated identical work 3-5x per track
+    # and made the per-track cost 309x what it replaced (~15 s per 60k tracks).
+    # The cohort does not depend on the genre, so it is resolved here.
+    _percentile_by_row: dict[int, float] = {}
+    try:
+        from services.popularity.popularity_math import (
+            artist_catalogue_percentiles,
+        )
+
+        _by_artist: dict[str, list[tuple[int, float]]] = defaultdict(list)
+        for _i, _row in enumerate(rows):
+            if not _track_is_playlist_eligible(_row):
+                continue
+            _s = float(
+                _row.get("popularity_score")
+                or _row.get("final_score")
+                or _row.get("popularity")
+                or 0
+            )
+            if _s > 0:
+                _by_artist[_cap_artist_key(_row)].append((_i, _s))
+
+        for _key, _pairs in _by_artist.items():
+            _pcts = artist_catalogue_percentiles(
+                [s for _i, s in _pairs], _artist_scores.get(_key) or []
+            )
+            for (_i, _s), _p in zip(_pairs, _pcts):
+                _percentile_by_row[_i] = _p
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Artist-percentile precompute unavailable", error=str(exc))
+
     # ⭐ ELIGIBILITY IS APPLIED HERE, BEFORE ANY RANKING OR CAP.
     #
     # A live take or a stats-excluded track must not take a slot at all — not
@@ -5604,7 +5638,7 @@ def _create_genre_top_track_playlists(
     # Filtering the input is the only place where "every eligible track" and
     # "the top N" are the same promise.
     _ineligible_count = 0
-    for row in rows:
+    for _row_index, row in enumerate(rows):
         if not _track_is_playlist_eligible(row):
             _ineligible_count += 1
             continue
@@ -5646,16 +5680,15 @@ def _create_genre_top_track_playlists(
             _row_score = float(
                 row.get("popularity_score") or row.get("final_score") or 0
             )
-            _cohort = _artist_scores.get(_cap_artist_key(row)) or []
             _percentile = 0.0
             _recency_cap = 0.0
             try:
-                from services.popularity.popularity_math import (
-                    artist_catalogue_percentile,
-                    recency_boost_cap,
-                )
+                from services.popularity.popularity_math import recency_boost_cap
 
-                _percentile = artist_catalogue_percentile(_row_score, _cohort)
+                # ⭐ The percentile was resolved ONCE per row before the genre
+                # loop; recomputing it here repeated identical work for every
+                # genre this track pools into.
+                _percentile = _percentile_by_row.get(_row_index, 0.0)
                 _recency_cap = recency_boost_cap(
                     row.get("release_year") or row.get("year"), _current_year
                 )
@@ -5675,6 +5708,11 @@ def _create_genre_top_track_playlists(
                 # album, and the most a brand-new track may gain on recency.
                 "artist_catalogue_percentile": _percentile,
                 "recency_cap": _recency_cap,
+                # ⭐ The genres this track ACTUALLY carries, so the playlist
+                # self-check can verify membership. Without this the verifier
+                # read a missing key and reported every track as a mismatch.
+                "genres": list(track_genres or []),
+                "exclude_from_stats": bool(row.get("exclude_from_stats")),
                 "lastfm_listeners": int(row.get("lastfm_listeners") or 0),
                 "listenbrainz_listens": int(row.get("listenbrainz_listens") or 0),
                 "artist": str(row.get("artist") or row.get("album_artist") or ""),
@@ -5801,6 +5839,9 @@ def _create_genre_top_track_playlists(
             # Spreading the artists afterwards only reorders the survivors.
             interleave=False,
         )
+        # ⭐ The post-cap pool, BEFORE the target slice. Kept so the self-check
+        # can distinguish "the cap removed tracks" from "the playlist is short".
+        _capped_pool = list(winners)
         if max_tracks:
             winners = winners[:max_tracks]
         if interleave_artists:
@@ -5811,17 +5852,28 @@ def _create_genre_top_track_playlists(
         # The rotation only reorders survivors, so the invariants are settled
         # here — and a failure names the playlist rather than surfacing later as
         # "the playlist looks wrong".
-        _log_playlist_problems(
-            playlist_name,
-            _verify_genre_playlist(
-                genre=genre,
-                playlist_name=playlist_name,
-                winners=winners,
-                max_tracks=max_tracks,
-                max_per_artist=max_per_artist,
-                eligible_pool_size=qualifying_count,
-            ),
-        )
+        #
+        # ⚠️ WRAPPED: this is a DIAGNOSTIC. It runs inside the per-genre loop, so
+        # an exception here would abort every remaining playlist of the rebuild.
+        try:
+            _log_playlist_problems(
+                playlist_name,
+                _verify_genre_playlist(
+                    genre=genre,
+                    playlist_name=playlist_name,
+                    winners=winners,
+                    max_tracks=max_tracks,
+                    max_per_artist=max_per_artist,
+                    eligible_pool_size=qualifying_count,
+                    capped_pool_size=len(_capped_pool),
+                    pool=_capped_pool,
+                ),
+            )
+        except Exception as _verify_exc:
+            logger.debug(
+                "Playlist self-check could not run",
+                playlist=playlist_name, error=str(_verify_exc),
+            )
 
         # ⭐ AFTER the slice, always. Shuffling before it would let the cap drop
         # genuinely top tracks at random; here the rotation can only reorder the
@@ -7631,20 +7683,35 @@ def _verify_genre_playlist(
     max_tracks: int | None,
     max_per_artist: int | None,
     eligible_pool_size: int,
+    capped_pool_size: int | None = None,
+    pool: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Self-check a finished playlist against the contract it promises.
 
     ⭐ THE CHECKS THE COLLECTION ASKED FOR, RUN ON EVERY BUILD.
 
-    A generated playlist is derived data with six invariants, and each one has
-    been violated at some point: a duplicate id (299 unique tracks), a playlist
-    one short of its target, a live take in a studio chart, a track in a
-    playlist whose genres do not name it, a 4★ admitted while 5★ covers were
-    free, and a cover playlist entry with no cover verdict.
-
     Returns a list of human-readable problems — EMPTY means clean. This cannot
     fix anything (the fix belongs where the fault is); it reports, so a silent
     regression becomes a log line naming the playlist and the rule.
+
+    ⚠️⚠️ THE FIRST VERSION OF THIS FUNCTION WAS WRONG ON ALL THREE CHECKS.
+
+    It flagged 295 of 295 playlists, which is the signature of a broken meter
+    rather than a broken library. Each fault, and why:
+
+    1. ``GENRE_MISMATCH`` read ``row["genres"]`` — but the POOL ROWS do not
+       carry a ``genres`` key at all, so every track read as "lacks its genre".
+       The rows are built from the genre they were pooled by, so a track's
+       membership is only meaningful if the row carries the genres it matched.
+    2. ``SHORT_BY_TARGET`` compared the final length against the PRE-CAP pool
+       size. The per-artist cap legitimately removes tracks, so "wrote 254 of an
+       available 300" was the cap doing its job, reported as a fault every time.
+    3. ``LOWER_STAR_USED`` compared the selected tiers against *each other* —
+       "tier 4 chosen while tier 5 was still available" meant "this playlist has
+       both 5★ and 4★ tracks", which is normal once the 5★ pool is exhausted.
+
+    A check that fires on everything carries no information, so each one now
+    measures something that can actually be wrong.
     """
     problems: list[str] = []
 
@@ -7654,13 +7721,24 @@ def _verify_genre_playlist(
             f"DUPLICATE_IDS: {len(ids) - len(set(ids))} repeated track id(s)"
         )
 
-    expected = min(eligible_pool_size, max_tracks or eligible_pool_size)
-    if max_tracks and len(ids) < expected:
-        # Only a shortfall against what the POOL could supply is a fault; a
-        # pool smaller than the target is legitimately short.
-        problems.append(
-            f"SHORT_BY_TARGET: wrote {len(ids)} of an available {expected}"
+    # ⭐ A SHORTFALL IS ONLY A FAULT IF NOTHING LEGITIMATE EXPLAINS IT.
+    #
+    # The ceiling is what the pipeline could actually deliver: the pool AFTER
+    # the per-artist cap, bounded by the target. Comparing against the pre-cap
+    # pool reported the cap's own effect as a fault on every capped playlist.
+    #
+    # ``capped_pool_size`` defaults to the pre-cap pool, so a caller that does
+    # not cap at all still gets an honest ceiling.
+    if max_tracks:
+        _deliverable = (
+            capped_pool_size if capped_pool_size is not None
+            else eligible_pool_size
         )
+        _ceiling = min(max_tracks, _deliverable)
+        if len(ids) < _ceiling:
+            problems.append(
+                f"SHORT_BY_TARGET: wrote {len(ids)} of a deliverable {_ceiling}"
+            )
 
     if max_per_artist and max_per_artist > 0:
         per_artist: dict[str, int] = {}
@@ -7680,31 +7758,58 @@ def _verify_genre_playlist(
             problems.append(f"EXCLUDED_TRACK: {row.get('title')!r}")
             break
 
-    # Every track must carry the playlist's genre in its FINAL genres.
+    # ⭐ EVERY TRACK MUST CARRY THE PLAYLIST'S GENRE — checked against the
+    # genres the POOL row recorded, not against a key it does not have.
+    #
+    # ⚠️ A CHRISTMAS POOL IS A COMPOSED NAME. A track whose genres are
+    # ("Christmas", "Rock") pools into "Christmas Rock", but that composed string
+    # never appears in its genres — so an exact match flagged every seasonal
+    # playlist. Any component the pool was built from is acceptable.
     _wanted = _pool_genre_key(genre)
-    for row in winners:
-        _own = {_pool_genre_key(g) for g in (row.get("genres") or [])}
-        if _wanted and _wanted not in _own:
-            problems.append(f"GENRE_MISMATCH: {row.get('title')!r} lacks {genre!r}")
+    _wanted_parts = [p for p in _wanted.split() if p and p != "christmas"]
+    if _wanted:
+        for row in winners:
+            _own = {_pool_genre_key(g) for g in (row.get("genres") or [])}
+            if not _own:
+                # The row records no genres at all: membership cannot be
+                # verified, and "unverifiable" is not "wrong".
+                continue
+            if _wanted in _own:
+                continue
+            if _wanted_parts and any(p in _own for p in _wanted_parts):
+                continue
+            problems.append(
+                f"GENRE_MISMATCH: {row.get('title')!r} lacks {genre!r}"
+            )
             break
 
-    # ⭐ No lower star tier while a higher one was still available.
+    # ⭐ A HIGHER STAR TIER MUST NOT BE LEFT OUT WHILE A LOWER ONE IS TAKEN.
     #
-    # The pool is already stars-ordered, so a track BELOW the pool's best tier
-    # can only be there legitimately once every row of the better tier has been
-    # taken. Comparing the used tiers against the pool's best tier is the
-    # cheap version of that check and catches the reported "35 four-star covers
-    # while 160 five-star ones were eligible".
-    if eligible_pool_size > len(winners) and winners:
-        _used_tiers = [int(r.get("stars") or 0) for r in winners]
-        _best_available = max(
-            (int(r.get("stars") or 0) for r in winners), default=0
-        )
-        if min(_used_tiers) < _best_available:
-            problems.append(
-                f"LOWER_STAR_USED: tier {min(_used_tiers)} chosen while tier "
-                f"{_best_available} was still available"
+    # This compares the selection against the POOL it came from. Comparing the
+    # selected tiers with each other says nothing: a playlist holding both 5★
+    # and 4★ tracks is normal once every 5★ row has been taken.
+    #
+    # The artist cap is deliberately NOT a licence here: it limits how many
+    # tracks one act may contribute, not which star tier is preferred, so an
+    # unselected track of a better tier is still a fault.
+    if pool and winners:
+        _selected_ids = set(ids)
+        _leftover = [
+            r for r in pool
+            if str(r.get("id") or "") and str(r.get("id") or "") not in _selected_ids
+        ]
+        if _leftover:
+            _selected_floor = min(
+                (int(r.get("stars") or 0) for r in winners), default=0
             )
+            _leftover_best = max(
+                (int(r.get("stars") or 0) for r in _leftover), default=0
+            )
+            if _leftover_best > _selected_floor:
+                problems.append(
+                    f"LOWER_STAR_USED: tier {_selected_floor} selected while a "
+                    f"tier {_leftover_best} track was left unselected"
+                )
 
     return [p for p in problems if p]
 
@@ -7728,18 +7833,33 @@ def _verify_cover_playlist(
 
 
 def _log_playlist_problems(playlist_name: str, problems: list[str]) -> None:
-    """One line per failing playlist, naming the rule it broke."""
+    """One line per failing playlist, naming the rule it broke.
+
+    ⚠️ A SELF-CHECK MUST NEVER TAKE THE BUILD DOWN.
+
+    This runs inside the per-genre loop, so an exception here aborts every
+    remaining playlist of the rebuild — turning a diagnostic into an outage.
+    The callers already compute ``problems`` defensively, but the log call
+    itself (and anything the list contains) is wrapped too: a check that cannot
+    complete is SILENT, never fatal.
+    """
     if not problems:
         return
-    logger.warning(
-        "Playlist self-check failed",
-        playlist=playlist_name,
-        problems=problems[:6],
-        problem_count=len(problems),
-    )
-    log_unified(
-        f"⚠️ Playlist check: '{playlist_name}' — " + "; ".join(problems[:3])
-    )
+    try:
+        logger.warning(
+            "Playlist self-check failed",
+            playlist=playlist_name,
+            problems=problems[:6],
+            problem_count=len(problems),
+        )
+    except Exception:
+        return
+    try:
+        log_unified(
+            f"⚠️ Playlist check: '{playlist_name}' — " + "; ".join(problems[:3])
+        )
+    except Exception:
+        pass
 
 
 def audit_artist_picks_against_listeners(
@@ -8120,13 +8240,19 @@ def _create_genre_covers_playlists(
             skipped_below_min.append(f"{display} ({len(deduped)})")
             continue
         keep_names.add(playlist_name)
-        _log_playlist_problems(
-            playlist_name,
-            _verify_cover_playlist(
+        try:
+            _log_playlist_problems(
                 playlist_name,
-                deduped[:max_tracks] if max_tracks else deduped,
-            ),
-        )
+                _verify_cover_playlist(
+                    playlist_name,
+                    deduped[:max_tracks] if max_tracks else deduped,
+                ),
+            )
+        except Exception as _verify_exc:
+            logger.debug(
+                "Cover playlist self-check could not run",
+                playlist=playlist_name, error=str(_verify_exc),
+            )
         if _sync_single_curated_playlist(
             playlist_name,
             deduped,
