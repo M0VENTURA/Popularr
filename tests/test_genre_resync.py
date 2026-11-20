@@ -236,6 +236,139 @@ class TestCommaSeparatedEvidenceIsRead:
         )
 
 
+class TestApplyProgressAndSpeed:
+    """The apply must not look hung between the walk and the file writes.
+
+    Reported: "Seems to be stuck here — genre_playlist_resync 25% · Writing
+    genres · Recomputing genres (67000/67039 tracks)…". The walk reports every
+    500 tracks, so the last frame can be one short of the total; the save was a
+    single silent 70k-row UPDATE; and the file loop waited for file 100 before
+    its first frame. On a slow mount that whole stretch looked frozen.
+    """
+
+    def _rows(self, count=2):
+        return [
+            _row(id=str(i), musicbrainz_genres='["Punk"]', file_path=f"/music/{i}.mp3")
+            for i in range(1, count + 1)
+        ]
+
+    def test_the_walk_end_is_reported_and_each_stage_is_named(self, monkeypatch):
+        updates: list = []
+        rows = self._rows()
+        monkeypatch.setattr(svc, "db_session", lambda: _session_cm(rows, updates))
+
+        from services.metadata import tag_file_service as tfs
+        monkeypatch.setattr(tfs, "update_file_tags", lambda path, tags: True)
+        monkeypatch.setattr(tfs, "_resolve_music_file_path", lambda path: path)
+
+        frames: list[tuple] = []
+        svc.resync_genres(
+            dry_run=False,
+            write_file_tags=True,
+            sync_navidrome=False,
+            on_progress=lambda *args: frames.append(args),
+        )
+
+        assert (2, 2, 0, "aggregate") in frames, frames
+        assert any(f[3] == "persist" for f in frames), frames
+        assert any(f[3] == "files" for f in frames), frames
+
+    def test_the_column_save_is_chunked_and_reports(self, monkeypatch):
+        calls: list = []
+
+        @contextmanager
+        def _db():
+            class _S:
+                def execute(self, statement, params=None):
+                    calls.append(params)
+            yield _S()
+
+        monkeypatch.setattr(svc, "db_session", _db)
+
+        frames: list[tuple[int, int]] = []
+        changes = [(str(i), "Punk") for i in range(2500)]
+        svc._persist(changes, on_progress=lambda done, total: frames.append((done, total)))
+
+        assert len(calls) == 3, f"expected three chunks, got {len(calls)}"
+        assert frames == [
+            (0, 2500), (1000, 2500), (2000, 2500), (2500, 2500),
+        ], frames
+
+    def test_the_file_write_uses_the_carried_path(self, monkeypatch):
+        """No per-track DB lookup on the slowest phase of the job."""
+        from services.metadata import tag_file_service as tfs
+
+        monkeypatch.setattr(tfs, "update_file_tags", lambda path, tags: True)
+        monkeypatch.setattr(tfs, "_resolve_music_file_path", lambda path: path)
+        monkeypatch.setattr(
+            svc,
+            "_resolve_track_file_path",
+            lambda _id: (_ for _ in ()).throw(AssertionError("DB lookup per file")),
+        )
+
+        out = svc._push_to_files(
+            [{"track_id": "1", "file_path": "/music/one.mp3", "after": "Punk"}],
+            write_file_tags=True,
+            sync_navidrome=False,
+        )
+        assert out["files_written"] == 1, out
+
+    def test_apply_does_not_recompute_selector_explanations(self, monkeypatch):
+        """``removed`` is preview-only; computing it re-ran the selector 70k times."""
+        updates: list = []
+        monkeypatch.setattr(
+            svc, "db_session", lambda: _session_cm(self._rows(1), updates)
+        )
+        monkeypatch.setattr(
+            svc,
+            "_explain",
+            lambda *args: (_ for _ in ()).throw(AssertionError("selector re-run")),
+        )
+
+        result = svc.resync_genres(
+            dry_run=False, write_file_tags=False, sync_navidrome=False
+        )
+        assert result["changed"] == 1, result
+
+
+class TestStaleProgressRows:
+    """A dead daemon thread must not block retries forever."""
+
+    @staticmethod
+    def _patch_state(monkeypatch, state):
+        from services.scanning import scan_state
+
+        monkeypatch.setattr(scan_state, "read_progress_file", lambda _path: state)
+
+    def test_a_fresh_running_row_is_running(self, monkeypatch):
+        from datetime import datetime
+
+        from services.enrichment import genre_playlist_resync_service as gpr
+
+        self._patch_state(
+            monkeypatch,
+            {"is_running": True, "last_updated": datetime.now().isoformat()},
+        )
+        assert gpr.is_resync_running() is True
+
+    def test_an_old_running_row_is_not_running(self, monkeypatch):
+        from datetime import datetime, timedelta
+
+        from services.enrichment import genre_playlist_resync_service as gpr
+
+        old = (datetime.now() - timedelta(minutes=30)).isoformat()
+        self._patch_state(monkeypatch, {"is_running": True, "last_updated": old})
+        assert gpr.is_resync_running() is False, (
+            "a restarted app could never start a new resync"
+        )
+
+    def test_a_finished_row_is_not_running(self, monkeypatch):
+        from services.enrichment import genre_playlist_resync_service as gpr
+
+        self._patch_state(monkeypatch, {"is_running": False})
+        assert gpr.is_resync_running() is False
+
+
 class TestWiring:
     def test_the_route_exists_and_offloads(self):
         source = (REPO_ROOT / "routes" / "misc_routes.py").read_text(encoding="utf-8")

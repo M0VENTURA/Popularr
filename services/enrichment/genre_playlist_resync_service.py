@@ -140,24 +140,59 @@ def _write_progress(
         logger.debug("Genre/playlist resync progress write failed", error=str(exc))
 
 
+#: A progress row older than this is treated as a DEAD job, not a running one.
+#:
+#: The job is a daemon thread, so a restart (or a killed worker) leaves its last
+#: row saying ``is_running: true`` forever — and because that row is the only
+#: "is running" signal, every retry answered 409 even though nothing was running.
+#: The live job now publishes at least every few seconds (the walk every 500
+#: tracks, the save every chunk, the file writes every 2s), so a quarter of an
+#: hour of silence means the writer is gone.
+_PROGRESS_STALE_SECONDS = 15 * 60
+
+
+def _progress_row_is_stale(
+    state: dict[str, Any], stale_after: float = _PROGRESS_STALE_SECONDS
+) -> bool:
+    """True when a row claims to be running but has not been touched recently."""
+    if not state.get("is_running"):
+        return False
+    raw = str(state.get("last_updated") or "").strip()
+    if not raw:
+        # No timestamp: do not invent staleness (older rows may predate it).
+        return False
+    try:
+        from datetime import datetime
+
+        updated = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return False
+    now = datetime.now(updated.tzinfo) if updated.tzinfo else datetime.now()
+    return (now - updated).total_seconds() > stale_after
+
+
 def is_preview_running() -> bool:
     """True while the background PREVIEW holds its own progress row."""
     try:
         from services.scanning.scan_state import read_progress_file
 
         state = read_progress_file(PREVIEW_PROGRESS_FILE) or {}
-        return bool(state.get("is_running"))
+        return bool(state.get("is_running")) and not _progress_row_is_stale(state)
     except Exception:
         return False
 
 
 def is_resync_running() -> bool:
-    """True while a resync job holds the progress row."""
+    """True while a resync job holds the progress row.
+
+    A stale row (last frame longer ago than ``_PROGRESS_STALE_SECONDS``) is a
+    dead job, so the caller may start a new one instead of waiting forever.
+    """
     try:
         from services.scanning.scan_state import read_progress_file
 
         state = read_progress_file(_PROGRESS_FILE) or {}
-        return bool(state.get("is_running"))
+        return bool(state.get("is_running")) and not _progress_row_is_stale(state)
     except Exception:
         return False
 
@@ -698,9 +733,22 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
         #
         # The callback splits the phase honestly: aggregation is the first half
         # of the band, the file writes the second.
-        def _genre_progress(done: int, total: int, files_written: int) -> None:
+        def _genre_progress(
+            done: int, total: int, files_written: int, stage: str = "aggregate"
+        ) -> None:
             try:
-                if files_written:
+                if stage == "persist":
+                    # Saving the genre COLUMN. It used to be one silent 70k-row
+                    # UPDATE between "67000/67039" and the first file write.
+                    frac = (done / total) if total else 0.0
+                    _write_progress(
+                        running=True, percent=23.0 + 2.0 * min(1.0, frac),
+                        phase=PHASE_APPLY,
+                        processed=done, total=total,
+                        detail=f"Saving genres to the database ({done}/{total} tracks)…",
+                        status="running",
+                    )
+                elif files_written or stage == "files":
                     # File-writing sub-phase: the tail of this band.
                     frac = (files_written / total) if total else 0.0
                     _write_progress(
@@ -711,10 +759,10 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
                         status="running",
                     )
                 else:
-                    # Aggregation sub-phase: the first half.
+                    # Aggregation sub-phase: the first band.
                     frac = (done / total) if total else 0.0
                     _write_progress(
-                        running=True, percent=2.0 + 23.0 * min(1.0, frac),
+                        running=True, percent=2.0 + 21.0 * min(1.0, frac),
                         phase=PHASE_APPLY,
                         processed=done, total=total,
                         detail=f"Recomputing genres ({done}/{total} tracks)…",

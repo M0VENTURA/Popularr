@@ -20,6 +20,7 @@ from db.engine import db_session
 from db.repositories.metadata import (
     fetch_track_for_delete,
     delete_track_row,
+    another_track_uses_file_path,
     merge_album_names,
     count_album_disc_numbers,
     clear_album_disc_numbers,
@@ -246,7 +247,14 @@ def delete_track(track_id: str, delete_file: bool = True) -> tuple[dict[str, Any
 
     deleted_file = False
     file_path = data.get("file_path")
-    if delete_file and file_path:
+    # ⚠️ THE FILE MAY BELONG TO ANOTHER ROW. Two duplicate rows can point at the
+    # SAME path (a re-import whose metadata differed). Deleting the "duplicate"
+    # file would then orphan the copy being kept, so only the redundant ROW is
+    # removed in that case.
+    _shared_file = bool(
+        file_path and another_track_uses_file_path(None, str(file_path), str(track_id))
+    )
+    if delete_file and file_path and not _shared_file:
         normalized = str(file_path).replace("\\", "/")
         if not normalized.startswith("__queued_for_download__") and os.path.exists(file_path):
             try:

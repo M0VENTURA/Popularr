@@ -501,6 +501,37 @@ def fetch_track_for_delete(conn: Any = None, track_id: str = "") -> tuple | None
         return result.fetchone()
 
 
+def another_track_uses_file_path(
+    conn: Any = None,
+    file_path: str = "",
+    exclude_id: str = "",
+) -> bool:
+    """True when a DIFFERENT row still points at *file_path*.
+
+    ⭐ DELETING THE FILE WOULD ORPHAN THE SURVIVOR.
+
+    Two rows can share one path (a re-import whose metadata differed). The
+    duplicate-cleanup action deletes one ROW and, with ``delete_file``, its
+    file — but the path is still referenced by the copy being kept, so removing
+    it turns the kept track into a dead row. Callers must skip the file delete
+    when this returns True and remove only the redundant row.
+    """
+    if not file_path:
+        return False
+
+    sql = text("""
+        SELECT 1 FROM tracks
+        WHERE CAST(id AS TEXT) != CAST(:exclude_id AS TEXT)
+          AND file_path IS NOT NULL
+          AND LOWER(REPLACE(file_path, :backslash, '/'))
+              = LOWER(REPLACE(:file_path, :backslash, '/'))
+        LIMIT 1
+    """)
+    params = {"exclude_id": exclude_id, "file_path": file_path, "backslash": "\\"}
+    with db_session() as session:
+        return session.execute(sql, params).fetchone() is not None
+
+
 def merge_album_names(conn: Any = None, artist: str = "", source_albums: list[str] | None = None, canonical_name: str = "") -> int:
     if not source_albums:
         return 0

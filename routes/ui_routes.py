@@ -2342,6 +2342,8 @@ async def album_detail(album_path: str) -> Any:
     # Off the event loop: shared by GET and POST, and a slow database here
     # used to stall every other request on this worker (timeout fix).
     def _load_album_tracks() -> list[dict[str, Any]]:
+        from db.repositories.tracks import dedupe_track_rows_by_file_path
+
         with db_session() as session:
             result = session.execute(
                 text("""
@@ -2357,7 +2359,14 @@ async def album_detail(album_path: str) -> Any:
                 """),
                 {"artist": artist_name, "album": album_name},
             )
-            return [dict(r._mapping) for r in result.fetchall()]
+            rows = [dict(r._mapping) for r in result.fetchall()]
+
+        # One file is one track. Two rows pointing at the SAME path are a
+        # bookkeeping duplicate (a re-import whose metadata differed), not two
+        # songs; rendering both made "All Day and All of the Night" appear
+        # twice with the same file path. The DB rows are left for the existing
+        # duplicate cleanup — this only stops the page from showing them twice.
+        return dedupe_track_rows_by_file_path(rows)
 
     tracks = await asyncio.to_thread(_load_album_tracks)
 

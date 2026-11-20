@@ -284,7 +284,7 @@ class MP3ImportScanner:
         album = (metadata.get("album") or "Unknown Album").strip()
 
         try:
-            existing_id = self._find_existing_track(title, artist, album)
+            existing_id = self._find_existing_track(title, artist, album, file_path)
 
             if existing_id:
                 if not self.dry_run:
@@ -305,9 +305,35 @@ class MP3ImportScanner:
     # DB helpers
     # ------------------------------------------------------------------
 
-    def _find_existing_track(self, title: str, artist: str, album: str) -> str | None:
-        """Return a track id when a matching row already exists."""
+    def _find_existing_track(
+        self, title: str, artist: str, album: str, file_path: str = ""
+    ) -> str | None:
+        """Return a track id when a matching row already exists.
+
+        ⭐ THE FILE PATH IS CHECKED FIRST.
+
+        Metadata-matching alone made a re-import non-idempotent: if the file's
+        title/artist/album tags had changed since the first import, no row
+        matched and a SECOND row was inserted for the SAME path. The album page
+        then listed the song twice. A path match is the strongest identity there
+        is — the file itself — so it wins before any metadata heuristic.
+        """
         with db_session() as session:
+            if file_path:
+                result = session.execute(
+                    text("""
+                        SELECT id FROM tracks
+                        WHERE file_path IS NOT NULL
+                          AND LOWER(REPLACE(file_path, :backslash, '/'))
+                              = LOWER(REPLACE(:file_path, :backslash, '/'))
+                        LIMIT 1
+                    """),
+                    {"file_path": file_path, "backslash": "\\"},
+                )
+                row = result.fetchone()
+                if row:
+                    return str(row[0])
+
             result = session.execute(
                 text("""
                     SELECT id FROM tracks

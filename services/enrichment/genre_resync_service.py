@@ -41,7 +41,7 @@ SOURCE_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 _SELECT_COLUMNS = (
-    "id", "title", "album", "artist", "album_artist", "genres",
+    "id", "title", "album", "artist", "album_artist", "genres", "file_path",
     *(column for _source, column in SOURCE_COLUMNS),
 )
 
@@ -99,28 +99,56 @@ def _load_rows(artist: str | None, album: str | None) -> list[dict[str, Any]]:
     return out
 
 
-def _persist(changes: list[tuple[str, str]]) -> None:
+#: Rows per transaction for the genre column write. Large enough that 70k rows
+#: are a handful of statements, small enough that any one statement (and the
+#: lock it holds) is bounded, and that progress is published during the save.
+_PERSIST_CHUNK = 1000
+
+
+def _persist(
+    changes: list[tuple[str, str]],
+    on_progress: Callable[[int, int], None] | None = None,
+) -> None:
     if not changes:
         return
     stmt = text("UPDATE tracks SET genres = :genres WHERE CAST(id AS TEXT) = :id")
     batch = [{"genres": after, "id": track_id} for track_id, after in changes]
-    try:
-        with db_session() as session:
-            session.execute(stmt, batch)
-    except Exception as batch_exc:
-        logger.debug(
-            "Genre resync batch update failed, falling back to per-row",
-            error=str(batch_exc),
-        )
-        for param in batch:
+    total = len(batch)
+
+    # Announce the save BEFORE the first (possibly blocking) statement, so the
+    # UI can say what it is waiting on instead of showing the last walk frame.
+    if on_progress is not None:
+        try:
+            on_progress(0, total)
+        except Exception as exc:
+            logger.debug("Genre resync persist progress failed", error=str(exc))
+
+    for start in range(0, total, _PERSIST_CHUNK):
+        chunk = batch[start:start + _PERSIST_CHUNK]
+        try:
+            with db_session() as session:
+                session.execute(stmt, chunk)
+        except Exception as batch_exc:
+            logger.debug(
+                "Genre resync batch update failed, falling back to per-row",
+                error=str(batch_exc),
+            )
+            for param in chunk:
+                try:
+                    with db_session() as session:
+                        session.execute(stmt, param)
+                except Exception as exc:
+                    logger.warning(
+                        "Genre resync row update failed",
+                        track_id=param["id"],
+                        error=str(exc),
+                    )
+
+        if on_progress is not None:
             try:
-                with db_session() as session:
-                    session.execute(stmt, param)
+                on_progress(min(start + len(chunk), total), total)
             except Exception as exc:
-                logger.warning(
-                    "Genre resync row update failed",
-                    track_id=param["id"], error=str(exc),
-                )
+                logger.debug("Genre resync persist progress failed", error=str(exc))
 
 
 def _explain(
@@ -212,9 +240,10 @@ def _push_to_files(
     Returns ``{"files_written", "files_failed", "navidrome"}`` so the caller can
     report what actually reached the library rather than only what the DB says.
 
-    ``on_progress`` is called with ``(files_done, files_total)`` every 100 files.
-    This loop is the slow half of an apply — one read-modify-write per changed
-    track — so it is the half that most needs a moving progress bar.
+    ``on_progress`` is called with ``(files_done, files_total)`` for the FIRST
+    file, every 100 files after that, and at least every 2 seconds. This loop is
+    the slow half of an apply — one read-modify-write per changed track — so it
+    is the half that most needs a moving progress bar.
     """
     out: dict[str, Any] = {"files_written": 0, "files_failed": 0, "navidrome": None}
 
@@ -228,8 +257,18 @@ def _push_to_files(
             logger.warning("Genre resync: tag writer unavailable", error=str(exc))
         else:
             total = len(changed_rows)
+            last_report = 0.0
             for index, row in enumerate(changed_rows, start=1):
-                if on_progress is not None and index % 100 == 0:
+                # ⚠️ REPORT THE FIRST FILE TOO. Waiting for file 100 left the
+                # bar on the previous phase for however long 100 read-modify-
+                # writes take (minutes on a slow/network mount), which read as
+                # "stuck". After that, a time budget keeps it moving even when
+                # the per-file cost is high.
+                now = time.monotonic()
+                if on_progress is not None and (
+                    index == 1 or index % 100 == 0 or now - last_report >= 2.0
+                ):
+                    last_report = now
                     try:
                         on_progress(index, total)
                     except Exception as exc:
@@ -241,7 +280,10 @@ def _push_to_files(
                 if not track_id:
                     continue
                 try:
-                    path = _resolve_track_file_path(track_id)
+                    # The path was selected with the row, so the common case no
+                    # longer costs one DB query PER TRACK. Only a row built by a
+                    # caller that omitted it falls back to a lookup.
+                    path = str(row.get("file_path") or "").strip() or _resolve_track_file_path(track_id)
                     if not path:
                         out["files_failed"] += 1
                         continue
@@ -306,11 +348,12 @@ def resync_genres(
             this the column changed but Navidrome kept showing the old genres,
             because Navidrome reads the FILES.
         sync_navidrome: Override the configured rescan request.
-        on_progress: Called with ``(done, total, files_written)`` as the work
-            advances. The full-library pass is the longest step of a genre
-            apply — aggregation over ~70k tracks, then a tag write per changed
-            file — and without this the apply's progress bar sat at its opening
-            2% for the entire job.
+        on_progress: Called with ``(done, total, files_written, stage)`` as the
+            work advances; ``stage`` is ``aggregate`` (the walk), ``persist``
+            (the genre-column save) or ``files`` (tag writes). The full-library
+            pass is the longest step of a genre apply — aggregation over ~70k
+            tracks, then a tag write per changed file — and without this the
+            apply's progress bar sat still for the entire job.
 
     Returns:
         ``{"ok", "dry_run", "tracks", "with_evidence", "changed",
@@ -340,12 +383,19 @@ def resync_genres(
 
     total_rows = len(rows)
 
-    def _report(done: int, files_written: int = 0) -> None:
-        """Publish progress. Never fatal — a callback must not abort the job."""
+    def _report(done: int, files_written: int = 0, stage: str = "aggregate") -> None:
+        """Publish progress. Never fatal — a callback must not abort the job.
+
+        ``stage`` names WHICH half of the phase the counter belongs to
+        (``aggregate`` / ``persist`` / ``files``). Without it the caller cannot
+        tell "the walk finished" from "the file writes have not started", which
+        is exactly what left the bar reading "67000/67039" while the job was
+        saving rows and rewriting tags.
+        """
         if on_progress is None:
             return
         try:
-            on_progress(done, total_rows, files_written)
+            on_progress(done, total_rows, files_written, stage)
         except Exception as exc:
             logger.debug("Genre resync progress callback failed", error=str(exc))
 
@@ -382,29 +432,52 @@ def resync_genres(
                 "title": str(row.get("title") or ""),
                 "artist": str(row.get("artist") or ""),
                 "album": str(row.get("album") or ""),
+                # Carried so the file-write phase does not need a DB lookup per
+                # changed track (tens of thousands of round trips on a full
+                # library, on the slowest phase of the job).
+                "file_path": str(row.get("file_path") or ""),
                 "before": str(existing or ""),
                 "after": proposed_str,
                 # WHY each candidate lost its slot — the preview's explanation.
-                "removed": _explain(source_map, max_genres, proposed),
+                # ⚠️ ONLY THE PREVIEW READS THIS. Computing it re-runs the whole
+                # selector per changed track; doing that on an APPLY doubled the
+                # aggregation cost for data nothing consumed.
+                "removed": _explain(source_map, max_genres, proposed) if dry_run else [],
             }
         )
+
+    # The walk is DONE. Publish it explicitly: the every-500 cadence can end on
+    # e.g. 67000/67039, and without this frame the last visible state stays
+    # there while the save and the file writes run.
+    _report(total_rows)
 
     pushed: dict[str, Any] = {
         "files_written": 0, "files_failed": 0, "navidrome": None,
     }
     if not dry_run:
-        _persist(changes)
+        # Chunked, and every chunk publishes progress: a single 70k-row UPDATE
+        # (and the lock it holds) was the other long, silent stretch.
+        _persist(
+            changes,
+            on_progress=(
+                lambda done, total: _report(done, stage="persist")
+            ) if on_progress else None,
+        )
         # ⭐ THE COLUMN ALONE IS NOT THE JOB. Navidrome reads the FILES, so a
         # pass that only updated the database left the library showing the old
         # genres forever ("Final Genres show this, but they haven't been pushed
         # to the tracks in Navidrome").
+        # Name the file-write phase before its first read-modify-write, for the
+        # same reason: file #1 can take a while on a network mount.
+        if on_progress is not None and write_file_tags:
+            _report(total_rows, files_written=0, stage="files")
         pushed = _push_to_files(
             changed_rows,
             write_file_tags=bool(write_file_tags),
             sync_navidrome=bool(sync_navidrome),
             on_progress=(
                 lambda done, total: _report(
-                    total_rows, files_written=done
+                    total_rows, files_written=done, stage="files"
                 )
             ) if on_progress else None,
         )

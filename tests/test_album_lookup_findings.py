@@ -176,8 +176,17 @@ def _seed_track(track_id: str, *, title: str, track_number: str = "1",
 
 class TestFindDuplicateTracks:
     def test_double_download_is_flagged(self):
-        _seed_track("d1", title="Song")
-        _seed_track("d2", title="Song")
+        # TWO FILES, one song. Rows sharing one path are a bookkeeping
+        # duplicate and are deliberately not flagged (see
+        # ``dedupe_track_rows_by_file_path``).
+        _seed_track(
+            "d1", title="Song",
+            file_path="/music/Dup Artist/Dup Album/Song.flac",
+        )
+        _seed_track(
+            "d2", title="Song",
+            file_path="/music/Dup Artist/Dup Album/Song.mp3",
+        )
 
         result = ams.find_duplicate_tracks("Dup Artist", "Dup Album")
 
@@ -188,6 +197,16 @@ class TestFindDuplicateTracks:
         assert group["count"] == 2
         assert sorted(group["track_ids"]) == ["d1", "d2"]
         assert sorted(result["duplicate_track_ids"]) == ["d1", "d2"]
+
+    def test_two_rows_for_the_same_file_are_not_a_duplicate(self):
+        """A re-import duplicate is ONE physical file, not "downloaded twice"."""
+        _seed_track("same1", title="Song")
+        _seed_track("same2", title="Song")  # same default path as same1
+
+        result = ams.find_duplicate_tracks("Dup Artist", "Dup Album")
+
+        assert result["duplicates"] == [], result
+        assert result["duplicate_track_ids"] == []
 
     def test_single_copy_is_not_flagged(self):
         _seed_track("s1", title="Once")
@@ -230,8 +249,14 @@ class TestFindDuplicateTracks:
 
     def test_year_prefixed_album_name_still_matches(self):
         """`_album_key` strips a leading year, like every album-scope query."""
-        _seed_track("y1", title="Song", album="1999 - Dup Album")
-        _seed_track("y2", title="Song", album="1999 - Dup Album")
+        _seed_track(
+            "y1", title="Song", album="1999 - Dup Album",
+            file_path="/music/Dup Artist/1999 - Dup Album/Song.flac",
+        )
+        _seed_track(
+            "y2", title="Song", album="1999 - Dup Album",
+            file_path="/music/Dup Artist/1999 - Dup Album/Song.mp3",
+        )
 
         result = ams.find_duplicate_tracks("Dup Artist", "Dup Album")
 
@@ -473,8 +498,14 @@ class TestAlbumFindingRoutes:
         assert resp.status_code == 400
 
     async def test_duplicate_tracks_returns_groups(self, client):
-        _seed_track("d1", title="Song")
-        _seed_track("d2", title="Song")
+        _seed_track(
+            "d1", title="Song",
+            file_path="/music/Dup Artist/Dup Album/Song.flac",
+        )
+        _seed_track(
+            "d2", title="Song",
+            file_path="/music/Dup Artist/Dup Album/Song.mp3",
+        )
 
         resp = await client.get(
             "/api/album/duplicate-tracks?artist=Dup%20Artist&album=Dup%20Album"

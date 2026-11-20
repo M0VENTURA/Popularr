@@ -674,18 +674,33 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
                 # NOT here because it is not a stored column — file quality is
                 # read from the file itself by the shared scorer.
                 "duration, stars, recording_mbid, isrc, musicbrainz_albumid, "
-                "year, composer, writer, genres, recordlabel "
+                "year, composer, writer, genres, recordlabel, last_scanned "
                 "FROM tracks "
                 "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
             ),
             {"artist": artist},
         ).mappings().all()
 
-    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    from db.repositories.tracks import dedupe_track_rows_by_file_path
+
+    scoped_rows = []
     for raw in rows:
         row = dict(raw)
         if not _album_scope_matches(album, str(row.get("album") or "")):
             continue
+        scoped_rows.append(row)
+
+    # ⭐ TWO ROWS, ONE FILE, IS NOT "DOWNLOADED TWICE".
+    #
+    # A re-import with changed metadata can leave two rows pointing at the same
+    # path. Grouping them by title/position made the album page show the song
+    # twice with an identical path and a "Duplicate ×2" badge whose delete
+    # action would have removed the file the surviving row still references.
+    # Collapse by path first; the extra ROW is for the duplicate-row cleanup.
+    scoped_rows = dedupe_track_rows_by_file_path(scoped_rows)
+
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for row in scoped_rows:
         title = str(row.get("title") or "").strip()
         if not title:
             continue

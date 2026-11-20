@@ -160,13 +160,14 @@ class TestTheApplyReportsProgressDuringTheGenrePhase:
         """No frame may be published only after the whole phase completes."""
         src = APPLY_SERVICE.read_text(encoding="utf-8")
         start = src.index("def _genre_progress")
-        body = src[start:start + 1400]
-        # Two distinct bands: aggregation then writes.
+        body = src[start:start + 3000]
+        # Three distinct bands: aggregation, the DB save, then file writes.
         assert "Recomputing genres" in body
+        assert "Saving genres to the database" in body
         assert "Writing genre tags to files" in body
 
     def test_a_failing_progress_write_cannot_abort_the_job(self) -> None:
         src = APPLY_SERVICE.read_text(encoding="utf-8")
         start = src.index("def _genre_progress")
-        body = src[start:start + 1600]
+        body = src[start:start + 3000]
         assert "except Exception" in body

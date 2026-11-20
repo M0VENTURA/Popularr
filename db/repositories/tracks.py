@@ -24,6 +24,75 @@ from services.metadata.tag_file_service import (
 )
 
 
+def _file_path_identity(value: Any) -> str:
+    """A comparable key for one physical file, or ``""`` when there is none.
+
+    Paths reach the DB from several writers (Navidrome, the MP3 import, manual
+    edits) with either separator, so the comparison is separator- and
+    case-insensitive. Queued placeholders are NOT files and never collapse.
+    """
+    text_value = str(value or "").strip()
+    if not text_value or text_value.startswith("__queued_for_download__"):
+        return ""
+    return text_value.replace("\\", "/").casefold()
+
+
+def _track_row_completeness(row: dict[str, Any]) -> tuple[bool, bool, bool, str]:
+    """How much a duplicate ROW is worth keeping for display.
+
+    Prefer a row that carries the identifiers the page and the scans need, then
+    one with a duration, then the most recently scanned.
+    """
+    def _has(name: str) -> bool:
+        return bool(str(row.get(name) or "").strip())
+
+    return (
+        _has("recording_mbid") or _has("mbid"),
+        bool(row.get("duration")),
+        _has("title"),
+        str(row.get("last_scanned") or ""),
+    )
+
+
+def dedupe_track_rows_by_file_path(
+    rows: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse rows that point at the SAME file into one.
+
+    ⭐ ONE FILE IS ONE TRACK, whatever the table says.
+
+    A re-import whose metadata differed from the stored row (the MP3 import used
+    to match on title/artist/album only) can leave TWO rows with the identical
+    ``file_path``. The album page then rendered the same song twice, and the
+    duplicate badge called it "downloaded more than once" — although there is
+    one file on disk. The extra row is a bookkeeping duplicate, not another
+    copy, so it must not be shown (or recommended for file deletion) as one.
+
+    The database rows are left alone: the existing duplicate-row cleanup
+    (``/api/database/cleanup-duplicates``) removes them. This function keeps the
+    most complete one for the page, preserving the first occurrence's position.
+    """
+    kept: list[dict[str, Any]] = []
+    index_by_path: dict[str, int] = {}
+
+    for row in rows:
+        key = _file_path_identity(row.get("file_path"))
+        if not key:
+            kept.append(row)
+            continue
+
+        existing = index_by_path.get(key)
+        if existing is None:
+            index_by_path[key] = len(kept)
+            kept.append(row)
+            continue
+
+        if _track_row_completeness(row) > _track_row_completeness(kept[existing]):
+            kept[existing] = row
+
+    return kept
+
+
 def upsert_track_payload(
     track_payload: dict[str, Any],
 ) -> bool:
