@@ -387,6 +387,18 @@
 </div>
 
 {# ── Simple single-field edit ──────────────────────────────────────────── #}
+{#
+  ⚠️ SAVE BUTTON FIXED. This called onclick="saveEditedTrackFromArtistPage()",
+  a function defined ONLY in the LIVE tree's static/js/artist_detail.js, which
+  the artist pages do not load. The served page loads pages/artist.js, which
+  provides ``saveArtistEditedTrack()`` — the same operation, named differently
+  (the two modals in this file already disagree about the name: the one further
+  up correctly calls saveArtistEditedTrack).
+
+  The modal IS reachable: services/genres.js::editTrackArtist shows
+  #editTrackModal on the artist page, so Save threw ReferenceError every time
+  and the edit was silently lost.
+#}
 <div class="modal fade" id="editTrackModal" tabindex="-1">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -401,7 +413,7 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" onclick="saveEditedTrackFromArtistPage()">Save</button>
+        <button type="button" class="btn btn-primary" onclick="saveArtistEditedTrack()">Save</button>
       </div>
     </div>
   </div>

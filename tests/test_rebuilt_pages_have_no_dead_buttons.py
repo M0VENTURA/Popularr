@@ -288,15 +288,6 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     ("album_detail.html", "confirmOrganizeGroup"): (
         "Same _organize_group.html sharing problem."
     ),
-    # ── defined only in the LIVE tree, which these pages do not load ────────
-    ("artist_detail.html", "saveEditedTrackFromArtistPage"): (
-        "Defined only in static/js/artist_detail.js (live). Needs hoisting "
-        "into the rebuilt pages/ modules."
-    ),
-    ("artist_detail_v2.html", "saveEditedTrackFromArtistPage"): (
-        "Same function, same cause as artist_detail.html above."
-    ),
-
     # ── shared partials whose buttons need their controllers ────────────────
     #
     # downloads/monitor.html used to BE the stray artist page (its handlers
