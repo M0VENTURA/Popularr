@@ -5,8 +5,14 @@
    Load order:
        utils/dom.js  →  utils/api.js  →  utils/poller.js
        ui/toast.js  →  ui/button-state.js  →  ui/status-badge.js
-       upcoming_releases.js
+       services/upcoming-releases.js      (this tree)
        dashboard.js
+
+   ⚠️ The upstream LIVE-tree equivalent of the service is `js/upcoming_releases.js`
+   (underscores, at static/js/). Under `features.use_test_site` the rebuilt tree
+   is served instead and this page loads `services/upcoming-releases.js`. The two
+   are NOT interchangeable — different filenames AND different export shape —
+   so a reference to one must never be "corrected" into the other.
 
    ── THE BIG ONE: postJSON SWALLOWED EVERY FAILURE ─────────────────────────
        async function postJSON(u, b) {
@@ -57,10 +63,13 @@
       produces the " — 3m 20s" SUFFIX including the em dash, so it is not
       interchangeable with formatDuration from utils/dom.js.
 
-   NOTE: `.source-key-badge` is rendered by _buildUpcomingReleaseRow here and
-   by upcoming_releases.js. It has NO definition in popularr.css — the rule
-   used to be injected from JS by upcoming_releases.js and that injection was
-   removed. Add the CSS rule, or both tables render an unstyled span.
+   NOTE: `.source-key-badge` IS defined in popularr.css (two rules: the badge and
+   its mobile variant). This comment used to claim it had "NO definition" and
+   that the rule had to be re-added — both were stale: the CSS rule was added,
+   and the local `_buildUpcomingReleaseRow` that this note was written about no
+   longer exists here (the upcoming table is rendered entirely by
+   services/upcoming-releases.js). Kept as a correction so the note is not
+   re-added on the strength of the old claim.
    ========================================================================== */
 
 (function (global) {
