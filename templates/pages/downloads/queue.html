@@ -66,10 +66,13 @@
 </div>
 
 {# Shared Modals #}
+{#
+  _slskd_results.html and _manual_match.html are DELETED: nothing opened their
+  modals, and their handlers (searchAgainSlskd, searchMatchTargets) exist in no
+  tree. See test_site/templates/Pages/album_detail.html for the full note.
+#}
 {% include 'components/modals/_track_edit.html' %}
 {% include 'components/modals/_organize_group.html' %}
-{% include 'components/modals/_slskd_results.html' %}
-{% include 'components/modals/_manual_match.html' %}
 {% include 'components/modals/_soulseek_manual_search.html' ignore missing %}
 {% endblock %}
 

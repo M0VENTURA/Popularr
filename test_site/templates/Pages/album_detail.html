@@ -895,12 +895,44 @@
       instructions.
 #}
 {% include 'components/modals/_track_edit.html' ignore missing %}
+{#
+  INERT ON THIS PAGE, AND DELIBERATELY STILL INCLUDED.
+
+  _organize_group.html's controls call searchMBForOrganize /
+  searchDiscogsForOrganize / clearMBSelection / confirmOrganizeGroup, which are
+  defined ONLY in pages/download-queue.js — and this page does not load it. Its
+  modal (#organizeGroupModal) is likewise only opened by
+  download-queue.js::openOrganizeGroupModal, from a queue-page row.
+
+  So on the album page these buttons are markup with no behaviour. It stays here
+  because the downloads pages share the partial and it costs nothing to render a
+  hidden modal; do NOT "fix" this by loading download-queue.js here — that would
+  drag the whole queue controller (and its polling) onto the album page.
+
+  REMOVED from this list, because they were dead in every respect — nothing
+  opened their modals, and their handlers exist nowhere:
+    components/modals/_slskd_results.html  — "Search Again" called
+      searchAgainSlskd(), defined in no tree, and #slskdResultsModal had no
+      opener (download-queue.js's only route to it, global.showSlskdResults, is
+      an explicit alert-only stub in static/js/downloads.js).
+    components/modals/_manual_match.html   — onkeyup called searchMatchTargets(),
+      also defined nowhere, and #manualMatchModal had no opener.
+#}
 {% include 'components/modals/_organize_group.html' ignore missing %}
-{% include 'components/modals/_slskd_results.html' ignore missing %}
-{% include 'components/modals/_manual_match.html' ignore missing %}
 {% include 'components/modals/_soulseek_manual_search.html' ignore missing %}
 {% include 'components/modals/_release_picker.html' ignore missing %}
 {% include 'components/modals/_bulk_delete.html' ignore missing %}
+{#
+  Serves the "Match to an existing track" button (.mb-match-existing) that
+  pages/album.js renders on a MusicBrainz-missing row. openMatchModal() needs
+  #albumMatchTrackModal and #albumMatchCandidatesTbody; without this include it
+  bailed at `if (!tbody) return` and the button silently did nothing.
+
+  NOTE: this file lives in the LIVE tree only (there is no test_site copy), so a
+  plain include resolves through the ChoiceLoader fallback. That is fine — it is
+  markup with no build step.
+#}
+{% include 'components/modals/_track_match.html' %}
 {#
   REMOVED: {% include 'components/modals/_musicbrainz_release_match.html' %}
 

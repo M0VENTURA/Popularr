@@ -100,8 +100,18 @@
                         </div>
                         
                         <!-- FIXED IDs HERE to prevent collisions -->
+                        {#
+                          ⚠️ NO INLINE `style="display:none !important"` HERE.
+
+                          download-queue.js::setOrganizeLookupLoading() shows this
+                          by toggling `d-none` / `d-flex`, and an inline
+                          !important cannot be beaten by a class (or by
+                          `el.style.display`). With the attribute present the
+                          spinner NEVER appeared. Kept in step with the test_site
+                          copy so the two trees cannot drift.
+                        #}
                         <div id="orgMbSearchResults" class="mb-2"></div>
-                        <div id="orgMbSearchLoading" class="d-flex align-items-center justify-content-center gap-2 py-3" style="display:none !important;">
+                        <div id="orgMbSearchLoading" class="d-none align-items-center justify-content-center gap-2 py-3">
                             <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
                             <span class="text-muted extra-small fw-semibold" id="searchStatusText">Searching...</span>
                         </div>
@@ -112,7 +122,8 @@
                                     <strong class="d-block mb-1 extra-small"><i class="bi bi-check-circle-fill me-1"></i> Match Applied:</strong>
                                     <div id="mbSelectedInfo" class="extra-small"></div>
                                 </div>
-                                <button class="btn btn-xs btn-outline-success py-0" onclick="clearMBSelection()">Undo</button>
+                                {# `btn-xs` is not a Bootstrap class — it did nothing. #}
+                                <button class="btn btn-sm btn-outline-success py-0" onclick="clearMBSelection()">Undo</button>
                             </div>
                         </div>
                     </div>

@@ -52,34 +52,29 @@ PAGES = (
 
 #: (page, function) pairs still dead on the served pages, with the reason.
 #:
-#: The album entries are the SHARED-PARTIAL gap that
-#: ``test_rebuilt_pages_have_no_dead_buttons.py`` already records for the rebuilt
-#: downloads pages (see its "same _organize_group.html sharing problem" notes).
-#: The controllers live in ``pages/download-queue.js``, which the album page does
-#: not load; the partials come from ``_organize_group.html`` / ``_manual_match.html``
-#: / ``_slskd_results.html``, which it does. Fixing it properly means giving the
-#: album page its own organizer controller, not duplicating the whole queue page.
+#: THE ALBUM ENTRIES ARE NOW FOUR, NOT SIX. ``_slskd_results.html`` and
+#: ``_manual_match.html`` were deleted, so ``searchAgainSlskd`` and
+#: ``searchMatchTargets`` no longer render anywhere — their entries were removed
+#: along with the partials. What remains is ``_organize_group.html``, which the
+#: album page keeps for markup only: its controls come from
+#: ``pages/download-queue.js``, which this page does not load (and must not — that
+#: would drag the whole queue controller and its polling onto the album page).
+#:
+#: ``test_the_register_has_no_stale_entries`` below is authoritative: if one of
+#: these starts resolving, or stops being called, it fails and names the entry.
 KNOWN_DEAD: dict[tuple[str, str], str] = {
-    ("Pages/album_detail.html", "searchMatchTargets"): (
-        "SHARED PARTIAL. _manual_match.html is included here; its controller "
-        "lives in pages/download-queue.js, which this page does not load."
-    ),
     ("Pages/album_detail.html", "searchMBForOrganize"): (
-        "SHARED PARTIAL. Same _organize_group.html situation — recorded in the "
-        "rebuilt-tree test too."
+        "INERT PARTIAL. _organize_group.html keeps its MusicBrainz button here, "
+        "but its controller (pages/download-queue.js) is not loaded on this page."
     ),
     ("Pages/album_detail.html", "searchDiscogsForOrganize"): (
-        "SHARED PARTIAL. Same _organize_group.html situation."
+        "INERT PARTIAL. Same _organize_group.html situation."
     ),
     ("Pages/album_detail.html", "clearMBSelection"): (
-        "SHARED PARTIAL. Same _organize_group.html situation."
+        "INERT PARTIAL. Same _organize_group.html situation."
     ),
     ("Pages/album_detail.html", "confirmOrganizeGroup"): (
-        "SHARED PARTIAL. Same _organize_group.html situation."
-    ),
-    ("Pages/album_detail.html", "searchAgainSlskd"): (
-        "SHARED PARTIAL. _slskd_results.html's re-search button; defined nowhere "
-        "at all, so it is dead on every page that renders the partial."
+        "INERT PARTIAL. Same _organize_group.html situation."
     ),
 }
 
@@ -206,6 +201,219 @@ def test_no_dead_inline_handler(rel: str) -> None:
         + "\n\nThis page is the one actually served. Fix the button, or record "
         "the pair in KNOWN_DEAD with the reason."
     )
+
+
+def test_the_register_has_no_stale_entries() -> None:
+    """Every KNOWN_DEAD pair must STILL be dead, or the register is lying.
+
+    A stale entry is worse than no entry: it makes a fixed bug look broken, and
+    it hides the next real one behind an allow-list that no longer means
+    anything. (This is the same contract
+    ``test_rebuilt_pages_have_no_dead_buttons`` enforces for its own register.)
+
+    Deleting ``_slskd_results.html`` and ``_manual_match.html`` is exactly the
+    change that makes an entry stale, so this test is what forces the follow-up.
+    """
+    stale: list[str] = []
+    for (rel, name), _reason in sorted(KNOWN_DEAD.items()):
+        page = TS_TEMPLATES / rel
+        if not page.is_file():
+            stale.append(f"{rel} does not exist")
+            continue
+
+        templates = _template_chain(page)
+        called = {n for n, _t, _l in _handlers(templates)}
+        defined = _defined(templates)
+
+        if name not in called:
+            stale.append(f"{rel} no longer calls {name}() — drop the entry")
+        elif name in defined:
+            stale.append(f"{rel} now DEFINES {name}() — drop the entry")
+
+    assert not stale, (
+        "these KNOWN_DEAD entries are out of date:\n  "
+        + "\n  ".join(stale)
+        + "\n\nDelete each entry so the register keeps naming only live bugs."
+    )
+
+
+def test_an_included_partial_brings_its_own_controllers() -> None:
+    """A modal include must come with a page that can DRIVE it.
+
+    ⭐ THE CLASS, NOT THE INSTANCE. ``_slskd_results.html`` and
+    ``_manual_match.html`` were included by the album page while their handlers
+    lived in a controller it never loaded — and nothing ever opened their modals,
+    so the markup was dead weight carrying dead handlers.
+
+    This checks the real property rather than a blanket declaration: for every
+    modal the album page includes, the handlers it renders must EITHER resolve
+    on this page, OR the partial must be listed in INERT_PARTIALS as knowingly
+    markup-only. That is what separates the five live partials from the one
+    deliberately inert one, without a hand-maintained list of everything.
+    """
+    INERT_PARTIALS: dict[str, str] = {
+        "_organize_group.html": (
+            "Markup only on the album page: its controls come from "
+            "pages/download-queue.js, which this page does not load, and its "
+            "modal is only opened from a queue-page row."
+        ),
+    }
+
+    page = TS_TEMPLATES / "Pages/album_detail.html"
+    if not page.is_file():
+        pytest.skip("album page absent")
+
+    templates = _template_chain(page)
+    defined = _defined(templates)
+    raw = _blank_template_comments(page.read_text(encoding="utf-8"))
+
+    included = re.findall(
+        r"\{%-?\s*include\s+['\"]components/modals/([^'\"]+)['\"]", raw
+    )
+    assert included, "the album page stopped including any modals — check the scan"
+
+    modules_dir = TS_TEMPLATES / "components/modals"
+    live_modules_dir = LIVE_TEMPLATES / "components/modals"
+
+    problems: list[str] = []
+    for name in sorted(set(included)):
+        path = modules_dir / name
+        if not path.is_file():
+            path = live_modules_dir / name
+        if not path.is_file():
+            problems.append(f"{name} — INCLUDED BUT MISSING ON DISK")
+            continue
+        if name in INERT_PARTIALS:
+            continue
+
+        # A live partial: every handler it renders must resolve on this page.
+        partial = _template_chain(path)
+        unresolvable = sorted({
+            handler for handler, _t, _l in _handlers(partial)
+            if handler not in defined
+        })
+        if unresolvable:
+            problems.append(
+                f"{name} — renders {unresolvable} which this page cannot resolve. "
+                "Load its controller here, or list it in INERT_PARTIALS."
+            )
+
+    assert not problems, (
+        "modal includes on the album page that come without their controllers:\n  "
+        + "\n  ".join(problems)
+    )
+
+
+class TestTheDeletedPartials:
+    """Pins the removals so the dead markup cannot quietly come back."""
+
+    @pytest.mark.parametrize("name", ["_slskd_results.html", "_manual_match.html"])
+    def test_the_partial_is_gone_from_both_trees(self, name: str) -> None:
+        assert not (TS_TEMPLATES / "components/modals" / name).exists()
+        assert not (LIVE_TEMPLATES / "components/modals" / name).exists()
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "Pages/album_detail.html",
+            "Pages/downloads/queue.html",
+            "Pages/downloads/monitor.html",
+        ],
+    )
+    @pytest.mark.parametrize("name", ["_slskd_results", "_manual_match"])
+    def test_no_template_still_includes_them(self, rel: str, name: str) -> None:
+        page = TS_TEMPLATES / rel
+        if not page.is_file():
+            pytest.skip(f"{rel} absent")
+        raw = _blank_template_comments(page.read_text(encoding="utf-8"))
+        assert f"components/modals/{name}.html" not in raw, (
+            f"{rel} still includes the deleted partial {name}.html — a Jinja "
+            "include of a missing file is a 500 at render time unless the tag "
+            "carries `ignore missing`, and either way it is dead markup"
+        )
+
+
+class TestTheOrganizeSpinnerCanActuallyAppear:
+    """`display:none !important` defeats the class toggle that shows the spinner.
+
+    ``download-queue.js::setOrganizeLookupLoading()`` reveals the lookup spinner
+    by toggling ``d-none`` / ``d-flex``. An INLINE ``!important`` cannot be beaten
+    by a class (nor by ``el.style.display``), so while the template carried it the
+    spinner never appeared and the MusicBrainz lookup ran with no feedback at all.
+
+    ``download-queue.js``'s own doc comment already says "make sure the template
+    no longer sets that inline style" — both tree copies still did, so this is
+    asserted against both rather than trusting that comment.
+    """
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "test_site/templates/components/modals/_organize_group.html",
+            "templates/components/modals/_organize_group.html",
+        ],
+    )
+    def test_no_inline_important_on_the_loading_element(self, rel: str) -> None:
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            pytest.skip(f"{rel} absent")
+        src = path.read_text(encoding="utf-8")
+
+        match = re.search(
+            r'<div[^>]*id="orgMbSearchLoading"[^>]*>', src
+        )
+        assert match, f"{rel}: #orgMbSearchLoading not found"
+        tag = match.group(0)
+        assert "!important" not in tag, (
+            f"{rel}: the loading element carries an inline !important, so "
+            "setOrganizeLookupLoading() cannot reveal it"
+        )
+        assert "d-none" in tag, (
+            f"{rel}: the element must start hidden via the d-none CLASS, so the "
+            "class toggle in setOrganizeLookupLoading() actually controls it"
+        )
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "test_site/templates/components/modals/_organize_group.html",
+            "templates/components/modals/_organize_group.html",
+        ],
+    )
+    def test_the_undo_button_uses_a_real_bootstrap_size_class(self, rel: str) -> None:
+        """`btn-xs` is not a Bootstrap class — it silently did nothing."""
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            pytest.skip(f"{rel} absent")
+        live = _blank_template_comments(path.read_text(encoding="utf-8"))
+        assert "btn-xs" not in live, f"{rel}: 'btn-xs' is not a Bootstrap class"
+
+
+class TestTheAlbumMatchModal:
+    """The reachable fix: #albumMatchTrackModal is now included."""
+
+    def test_the_album_page_includes_it(self) -> None:
+        page = TS_TEMPLATES / "Pages/album_detail.html"
+        raw = _blank_template_comments(page.read_text(encoding="utf-8"))
+        assert "components/modals/_track_match.html" in raw, (
+            "pages/album.js::openMatchModal needs #albumMatchTrackModal; without "
+            "the include the 'Match to an existing track' button does nothing"
+        )
+
+    def test_the_modal_provides_the_ids_the_handler_needs(self) -> None:
+        modal = LIVE_TEMPLATES / "components/modals/_track_match.html"
+        assert modal.is_file(), "_track_match.html vanished from the live tree"
+        src = modal.read_text(encoding="utf-8")
+        for dom_id in ("albumMatchTrackModal", "albumMatchCandidatesTbody",
+                       "albumMatchMbTitle", "albumMatchMbTrackNum"):
+            assert f'id="{dom_id}"' in src, (
+                f"openMatchModal reads #{dom_id}; the modal no longer provides it"
+            )
+
+    def test_the_button_that_opens_it_is_still_rendered(self) -> None:
+        album_js = (REBUILT_STATIC / "js/pages/album.js").read_text(encoding="utf-8")
+        assert "mb-match-existing" in album_js
+        assert "openMatchModal(" in album_js
 
 
 class TestTheArtistTrackEditModal:
