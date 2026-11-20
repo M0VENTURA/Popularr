@@ -545,40 +545,37 @@ class TestCondensation:
         })
         assert result == ["Heavy Metal"], result
 
-    def test_metalcore_absorbs_hardcore(self) -> None:
-        """``metalcore`` and ``hardcore`` are ONE identity, not two.
+    def test_conditional_keep_still_applies_between_non_rock_families(self) -> None:
+        """``metalcore`` + ``hardcore_punk`` are NOT a rock/metal pair.
 
-        REPORTED: "hardcore and hardcore punk are also separate genres, hardcore
-        is closely aligned to metalcore."
-
-        Two changes make that true:
-
-        * ``hardcore punk`` and ``hardcore`` are one canonical genre (the older
-          spelling is an alias), so a track never shows both spellings;
-        * ``metalcore`` descends from ``hardcore``, and the pair is now
-          ``mutually_exclusive`` — so the ANCESTOR (Hardcore) is dropped even
-          when it carries more support. Metalcore is the more specific reading
-          of the same sound.
-
-        ⚠️ This INVERTS the previous contract of the same test, which asserted
-        both survived (``conditional_keep``). That rule treated them as
-        different genres; the report says they are not.
+        The metal-over-rock policy only touches rock-family genres, so this
+        conditional pair keeps its own rule: both survive when the narrower one
+        stands on track evidence.
         """
         result = select({
             "lastfm@track": ["metalcore"],
             "musicbrainz@album": ["hardcore punk"],
             "listenbrainz@track": ["metalcore", "hardcore punk"],
         })
-        assert result == ["Metalcore"], result
+        assert "Metalcore" in result, result
+        assert "Hardcore Punk" in result, result
 
-    def test_hardcore_survives_without_metalcore(self) -> None:
-        """CONTROL — the pair only collapses when BOTH are present."""
+    def test_hardcore_and_hardcore_punk_are_different_genres(self) -> None:
+        """REPORTED — they are NOT one genre.
+
+        "Hardcore Punk and Hardcore are different genres. Hardcore Punk is Punk,
+        Hardcore is Metal."
+
+        Collapsing them (Hardcore Punk as an alias of Hardcore) was the defect:
+        it pulled metal Hardcore tracks into the Hardcore Punk playlist.
+        """
         result = select({
-            "lastfm@track": ["hardcore"],
-            "musicbrainz@album": ["hardcore"],
+            "lastfm@track": ["hardcore", "hardcore punk"],
+            "musicbrainz@album": ["hardcore", "hardcore punk"],
             "listenbrainz@track": ["hardcore"],
         })
-        assert result == ["Hardcore"], result
+        assert "Hardcore" in result, result
+        assert "Hardcore Punk" in result, result
 
 
 # ---------------------------------------------------------------------------

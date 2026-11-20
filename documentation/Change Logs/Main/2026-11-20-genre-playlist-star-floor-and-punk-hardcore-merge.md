@@ -1,18 +1,31 @@
-# Top genre playlists are 4★/5★ only; Punk Rock and Hardcore merge
+# Top genre playlists are 4★/5★ only; Punk Rock merges into Punk, Hardcore splits from Hardcore Punk
 
 **Date:** 2026-11-20
 **Area:** `services/enrichment/genre_vocabulary.json` ·
 `services/enrichment/genre_selection.py` ·
 `services/enrichment/genre_aggregation_service.py` ·
 `services/popularity/stages/finalise_stage.py`
-**Commit:** `fix(genre): enforce the star floor in Top Tracks, merge punk rock
-into punk and hardcore punk into hardcore`
+**Commit:** `fix(genre): enforce the star floor in Top Tracks; merge punk rock
+into punk; make Hardcore a metal genre`
 
 ## Reported
 
 > "Tracks rated only 3 star are showing in top genre tracks playlists, also punk
 > and punk rock are showing as separate genres, hardcore and hardcore punk are
 > also separate genres, hardcore is closely aligned to metalcore"
+
+Clarified:
+
+> "Hardcore Punk and Hardcore are different genres. Hardcore Punk is Punk,
+> Hardcore is Metal. Currently Hardcore has Hardcore punk included which was the
+> problem"
+
+So the two punk cases are **not** symmetric:
+
+| pair | wanted |
+|---|---|
+| Punk / Punk Rock | ONE genre |
+| Hardcore Punk / Hardcore | TWO genres, different families |
 
 ## 1. The 3★ tracks — the star floor lived in exactly one place
 
@@ -30,15 +43,14 @@ the BUILDER. Three routes reached the selection loop without it:
   arbitrary row set and never calls the query;
 * **`_GENRE_ROWS_CACHE`** — serves rows for 120 s keyed on `min_stars` alone, so
   a rating DEMOTED to 3★ between the fetch and the rebuild was still pooled at
-  its old tier (only the resync apply and the star-persist path invalidated it,
-  not an ordinary finalise);
+  its old tier;
 * **`COALESCE(stars, star_rating)`** — a stale second rating column could satisfy
   the threshold while the displayed `stars` reads 3.
 
 `_create_genre_top_track_playlists` now re-asserts the floor on the row's own
 `stars` after it has resolved its rows, whatever route they came from — the same
 "hard membership floor" the Essential Collection already applied
-(`rows = [row for row in rows if int(row.get("stars") or 0) >= 4]`).
+(`rows = [row for row in rows if int(row.get("stars") or 0) >= 4`).
 
 `_verify_genre_playlist` gained a **`BELOW_STAR_FLOOR`** check. Nothing used to
 test membership against the floor: `LOWER_STAR_USED` compares tiers *within* the
@@ -48,66 +60,70 @@ Ordering already put 3★ last (`_playlist_order_key` leads on the star tier,
 2026-10-07), which is why the symptom was "in the playlist" rather than "at the
 top" once the pool exceeded the cap.
 
-## 2. Punk Rock → Punk, Hardcore Punk → Hardcore
+## 2. Punk Rock → Punk (one genre)
 
-The vocabulary is the authority for "is this one genre or two", and it listed
-both spellings as **separate entries** — so `_pool_genre_key` built two keys and
-the builder wrote two playlists.
+The vocabulary listed both spellings as **separate entries**, so
+`_pool_genre_key` built two keys and the builder wrote two playlists.
 
-| was | now |
-|---|---|
-| `punk` + `punk_rock` (specificity 1) | one `punk`, `"punk rock"` / `"punk-rock"` aliases |
-| `hardcore_punk` (`"hardcore"` alias) | one `hardcore`, `"hardcore punk"` / `"hardcore-punk"` aliases |
+* removed the `punk_rock` entry; `"punk rock"` / `"punk-rock"` are aliases of
+  `punk`
+* `pop_punk` / `ska_punk` / `riot_grrrl` reparent from `punk_rock` to `punk`
 
-`pop_punk` / `ska_punk` / `riot_grrrl` reparent from `punk_rock` to `punk`;
-`melodic_hardcore` / `post_hardcore` / `grindcore` / `metalcore` reparent from
-`hardcore_punk` to `hardcore`.
-
-Because the merge removes the ancestry edge that used to absorb the umbrella,
+Because the merge removes the edge that used to absorb the Rock umbrella,
 `("punk", "rock")` is now stated explicitly in `mutually_exclusive` — the report
-that previously drove "rock removed by punk rock" (175 tracks in the export)
-still holds, but no longer by a naming coincidence.
+that drove "rock removed by punk rock" (175 tracks in the export) still holds,
+but no longer by a naming coincidence.
 
-The legacy vote engine mirrors the same merge in `_BUILTIN_SYNONYMS`,
-`_SPECIFIC_TO_GENERIC` and `_GENERIC_ROOTS`, or it would emit the two spellings
-the vocabulary just collapsed.
+## 3. Hardcore is METAL; Hardcore Punk is PUNK (two genres)
 
-## 3. Hardcore is aligned with Metalcore
+The defect was that `"hardcore"` was listed as an **alias of `hardcore_punk`**,
+so a metal Hardcore tag classified as the punk genre and the track was pooled
+into the Hardcore Punk playlist.
 
-`metalcore` descends from `hardcore` (and stays **metal-family**, so the
-metal-over-rock policy still suppresses rock around it). The pair moved from
-`conditional_keep` ("both survive when the narrower has track evidence") to
-`mutually_exclusive` — the same rule `alternative_metal` / `alternative_rock`
-uses: one identity, and the ANCESTOR is dropped. Metalcore is the more specific
-reading of that sound.
+* `hardcore_punk` is its own entry again: `"Hardcore Punk"`, `parent: punk`,
+  family **punk**, no alias
+* `hardcore` is a NEW entry: `"Hardcore"`, `parent: metal`, family **metal**
+* `melodic_hardcore` / `post_hardcore` / `grindcore` reparent back to
+  `hardcore_punk`
+* `metalcore` descends from `metal` + `hardcore_punk` (its real fusion) and stays
+  metal-family — which is the "closely aligned to metalcore" the report asked
+  for, without making it the same genre as Hardcore
+
+`DEFAULT_CONDITIONAL_KEEP` keeps `("metalcore", "hardcore_punk")` (both survive
+when Metalcore has its own track evidence). `("metalcore", "hardcore")` is
+deliberately NOT a pair — they are siblings in the metal family.
+
+The legacy vote engine mirrors the split: `_BUILTIN_SYNONYMS` maps only
+`"punk rock"` → `"punk"`, and `_SPECIFIC_TO_GENERIC` has `"hardcore punk"` → punk
+plus `"hardcore"` → metal/heavy metal.
 
 ## Files
 
-* `services/enrichment/genre_vocabulary.json` — the two merges and reparenting
+* `services/enrichment/genre_vocabulary.json` — punk_rock alias, hardcore as a
+  metal genre, hardcore_punk restored, reparenting
 * `services/enrichment/genre_selection.py` — `DEFAULT_MUTUALLY_EXCLUSIVE`,
   `DEFAULT_CONDITIONAL_KEEP`, doc examples
 * `services/enrichment/genre_aggregation_service.py` — legacy mirror tables
 * `services/popularity/stages/finalise_stage.py` — builder floor + self-check
 * `tests/test_genre_playlist_star_floor.py` — new (10 tests)
-* `tests/test_genre_redundancy_cleanup.py` — `TestPunkAndHardcoreAreOneGenre`
+* `tests/test_genre_redundancy_cleanup.py` — `TestPunkRockMergeAndTheHardcoreSplit`
 * `tests/test_genre_selection_engine.py`, `test_genre_metal_over_rock_policy.py`,
-  `test_genre_selection_evidence_order.py`, `test_rock_metal_conflict_arbitration.py`,
-  `test_genre_pooling_and_weekly_rotation.py` — assertions updated to the
-  canonical names
+  `test_genre_selection_evidence_order.py`, `test_rock_metal_conflict_arbitration.py`
+  — assertions updated to the canonical names
 
 ## Tests
 
 * **Oracle:** with the builder floor disabled, `test_genre_playlist_star_floor`
   → **3 failed / 4 passed** (the three membership tests; the self-check still
   fires and names the track). Restored → **all pass**.
-* `test_genre_selection_engine`, `test_genre_redundancy_cleanup`,
-  `test_genre_metal_over_rock_policy`, `test_genre_selection_evidence_order`,
-  `test_rock_metal_conflict_arbitration`, `test_genre_pooling_and_weekly_rotation`,
-  `test_playlist_ordering`, `test_playlist_selection_integrity`,
-  `test_covers_genre_playlists` → **416 passed**.
-* Sweep of the genre/playlist/star selection vs a clean `HEAD` worktree: the
-  pre-existing failure set is **identical** (network-dependent and unrelated
-  suites); the only delta is the intended inversion documented above.
+* Genre/playlist suites (`test_genre_redundancy_cleanup`,
+  `test_genre_selection_engine`, `test_genre_metal_over_rock_policy`,
+  `test_genre_selection_evidence_order`, `test_rock_metal_conflict_arbitration`,
+  `test_genre_pooling_and_weekly_rotation`, `test_playlist_ordering`,
+  `test_playlist_selection_integrity`, `test_covers_genre_playlists`) → all pass
+  except one pre-existing failure
+  (`test_a_weakly_supported_companion_still_loses_its_slot`, identical on a
+  clean `HEAD` worktree).
 
 ## If a 3★ track still appears
 

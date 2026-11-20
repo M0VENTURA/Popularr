@@ -83,7 +83,7 @@ REDUNDANT_PAIRS = [
     ("rock", "punk"),
     ("rock", "indie rock"),
     ("heavy metal", "nu metal"),
-    ("punk", "hardcore"),
+    ("punk", "hardcore punk"),
 ]
 
 
@@ -289,73 +289,90 @@ class TestTheReportedTracks:
         )
 
 
-class TestPunkAndHardcoreAreOneGenre:
+class TestPunkRockMergeAndTheHardcoreSplit:
     """REPORTED
 
     > "punk and punk rock are showing as separate genres, hardcore and hardcore
     > punk are also separate genres, hardcore is closely aligned to metalcore"
 
-    The vocabulary is the authority for "is this one genre or two", so these
-    tests drive classification rather than a rule table — a spelling is only
-    merged if the vocabulary says both spellings resolve to the same identity.
+    Then corrected:
+
+    > "Hardcore Punk and Hardcore are different genres. Hardcore Punk is Punk,
+    > Hardcore is Metal. Currently Hardcore has Hardcore punk included which was
+    > the problem"
+
+    So Punk Rock is the SAME genre as Punk (one playlist), while Hardcore and
+    Hardcore Punk are DELIBERATELY different genres in different families. The
+    defect was "hardcore" being an alias of "hardcore punk": it classified metal
+    Hardcore tracks as the punk genre and pooled them into that playlist.
     """
 
-    @pytest.mark.parametrize(
-        "spelling,canonical",
-        [
-            ("Punk", "punk"),
-            ("punk rock", "punk"),
-            ("Punk Rock", "punk"),
-            ("punk-rock", "punk"),
-            ("Hardcore", "hardcore"),
-            ("hardcore punk", "hardcore"),
-            ("Hardcore Punk", "hardcore"),
-        ],
-    )
-    def test_the_spellings_are_one_canonical_genre(self, spelling, canonical) -> None:
+    @pytest.mark.parametrize("spelling", ["Punk", "punk rock", "Punk Rock", "punk-rock"])
+    def test_punk_rock_is_the_same_genre_as_punk(self, spelling) -> None:
         vocab = get_vocabulary()
-        assert vocab.classify(spelling).canonical == canonical, (
-            f"{spelling!r} must resolve to {canonical!r}; otherwise two playlists "
-            "are built for one genre"
-        )
+        assert vocab.classify(spelling).canonical == "punk"
 
     def test_punk_rock_does_not_get_its_own_entry(self) -> None:
-        """A separate entry is what produces the second playlist."""
-        vocab = get_vocabulary()
-        assert "punk_rock" not in vocab.genres
-        assert "hardcore_punk" not in vocab.genres
+        assert "punk_rock" not in get_vocabulary().genres
 
-    def test_hardcore_descends_from_punk(self) -> None:
+    def test_hardcore_punk_is_a_punk_genre(self) -> None:
         vocab = get_vocabulary()
-        assert "punk" in vocab.genres["hardcore"].ancestors(vocab.genres)
+        classification = vocab.classify("Hardcore Punk")
+        assert classification.canonical == "hardcore_punk"
+        assert classification.family == "punk"
 
-    def test_metalcore_is_aligned_with_hardcore(self) -> None:
-        """Metalcore is a metal genre that descends from Hardcore."""
+    def test_hardcore_is_a_metal_genre(self) -> None:
         vocab = get_vocabulary()
-        entry = vocab.genres["metalcore"]
-        assert "hardcore" in entry.ancestors(vocab.genres)
-        assert entry.family_of(vocab.genres) == "metal", (
-            "Metalcore must stay metal-family, or the metal-over-rock policy "
-            "stops suppressing rock around it"
-        )
+        classification = vocab.classify("Hardcore")
+        assert classification.canonical == "hardcore"
+        assert classification.family == "metal"
 
-    def test_metalcore_replaces_hardcore_on_the_same_track(self) -> None:
-        """The reported pairing: one track, two identities, so one must go."""
+    def test_the_two_hardcores_are_distinct_identities(self) -> None:
+        vocab = get_vocabulary()
+        assert (
+            vocab.classify("Hardcore").canonical
+            != vocab.classify("Hardcore Punk").canonical
+        ), "the two hardcores must not collapse into one canonical genre"
+
+    def test_hardcore_punk_does_not_descend_from_hardcore(self) -> None:
+        """The defect was exactly this ancestry/alias edge."""
+        vocab = get_vocabulary()
+        assert "hardcore" not in vocab.genres["hardcore_punk"].ancestors(vocab.genres)
+
+    def test_hardcore_is_aligned_with_metalcore(self) -> None:
+        """Both are METAL-family, which is the reported alignment."""
+        vocab = get_vocabulary()
+        assert vocab.genres["hardcore"].family_of(vocab.genres) == "metal"
+        assert vocab.genres["metalcore"].family_of(vocab.genres) == "metal"
+
+    def test_a_track_can_carry_both_hardcores(self) -> None:
+        """They are different genres, so both survive on one track."""
         result = select({
-            "lastfm@track": ["metalcore", "hardcore"],
-            "musicbrainz@album": ["metalcore", "hardcore punk"],
-            "listenbrainz@track": ["metalcore", "hardcore"],
+            "lastfm@track": ["hardcore", "hardcore punk"],
+            "musicbrainz@album": ["hardcore", "hardcore punk"],
+            "listenbrainz@track": ["hardcore"],
         })
-        assert result == ["Metalcore"], result
+        assert "Hardcore" in result, result
+        assert "Hardcore Punk" in result, result
 
-    def test_an_unknown_punk_spelling_keeps_its_own_playlist(self) -> None:
-        """CONTROL — merging must not swallow a genre the vocabulary lacks.
+    def test_punk_rock_no_longer_produces_two_genres(self) -> None:
+        result = select({
+            "lastfm@track": ["punk", "punk rock"],
+            "musicbrainz@album": ["punk", "punk rock"],
+            "listenbrainz@track": ["punk rock"],
+        })
+        assert result == ["Punk"], result
 
-        ``streetpunk`` is not in the vocabulary, so it keeps its old behaviour
-        (its own key) rather than being folded into Punk.
-        """
-        from services.enrichment.genre_vocabulary import get_vocabulary as _v
+    def test_punk_spellings_share_one_playlist(self) -> None:
+        """The pool key is what decides playlists, not the classification."""
+        from services.popularity.stages.finalise_stage import _pool_genre_key
 
-        assert _v().classify("streetpunk").canonical == "", (
-            "this control only holds while streetpunk is not a known genre"
+        assert _pool_genre_key("Punk") == _pool_genre_key("Punk Rock")
+
+    def test_the_two_hardcores_get_different_playlists(self) -> None:
+        """The reported defect: metal Hardcore pooled into Hardcore Punk."""
+        from services.popularity.stages.finalise_stage import _pool_genre_key
+
+        assert _pool_genre_key("Hardcore") != _pool_genre_key("Hardcore Punk"), (
+            "a metal Hardcore track would land in the Hardcore Punk playlist again"
         )

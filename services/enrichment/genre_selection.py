@@ -352,6 +352,7 @@ DEFAULT_KEEP_TOGETHER: frozenset[tuple[str, str]] = frozenset({
 #: unless the narrower one has independent track/album evidence.
 DEFAULT_CONDITIONAL_KEEP: frozenset[tuple[str, str]] = frozenset({
     ("hard_rock", "heavy_metal"),
+    ("metalcore", "hardcore_punk"),
 })
 
 #: Pairs where only ONE may appear on a track. ``alternative_metal`` descends
@@ -359,18 +360,18 @@ DEFAULT_CONDITIONAL_KEEP: frozenset[tuple[str, str]] = frozenset({
 #: track must not carry both "Alternative Rock" and "Alternative Metal" even
 #: when the rock tag has more sources (the reported regression).
 #:
-#: ``metalcore`` + ``hardcore`` are the same case: Metalcore descends from
-#: Hardcore, so a track must not carry Hardcore beside it. Both were reported as
-#: two separate genres rather than one identity.
-#:
 #: ``rock`` + ``punk`` is here because Punk Rock is now the SAME genre as Punk
 #: (one canonical id, "punk rock" an alias). The rock umbrella was previously
 #: absorbed by "Punk Rock" naming "Rock"; with one identity that name test no
 #: longer fires, so the pair is stated explicitly rather than left to a naming
 #: coincidence. Punk is the more specific identity, so the umbrella goes.
+#:
+#: ⚠️ ``hardcore`` and ``hardcore_punk`` are deliberately NOT a pair — they are
+#: different genres in different families (Hardcore is metal, Hardcore Punk is
+#: punk). Collapsing them is what put metal Hardcore tracks in the Hardcore Punk
+#: playlist.
 DEFAULT_MUTUALLY_EXCLUSIVE: frozenset[tuple[str, str]] = frozenset({
     ("alternative_metal", "alternative_rock"),
-    ("metalcore", "hardcore"),
     ("punk", "rock"),
 })
 
@@ -963,7 +964,7 @@ def remove_generic_parents(
 
         Metal; Death Metal          -> Death Metal
         Rock; Alternative Rock      -> Alternative Rock
-        Punk; Hardcore              -> Hardcore
+        Punk; Hardcore Punk         -> Hardcore Punk
         Electronic; House           -> House
 
     ⚠️ DELIBERATELY UNCONDITIONAL — the ratio does NOT apply here. The generic
