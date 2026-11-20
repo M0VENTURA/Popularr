@@ -2309,6 +2309,12 @@ def get_genre_selection_config() -> dict[str, Any]:
         # ...but only when the metal evidence is comparable to the rock side.
         # A thin metal tag must not delete a stronger rock body of evidence.
         "metal_over_rock_min_ratio": _ratio("metal_over_rock_min_ratio", 0.8),
+        # Heavy Metal is absorbed by a narrower metal genre only when that
+        # genre carries comparable support. Without it one stray "nu metal"
+        # tag deleted a three-source Heavy Metal reading.
+        "umbrella_absorb_min_ratio": _ratio("umbrella_absorb_min_ratio", 0.6),
+        # A genre needs this many INDEPENDENT providers to take a slot.
+        "min_independent_sources": max(1, _int("min_independent_sources", 2)),
         # Nu Metal alone is a metal/rock hybrid, so it keeps its approved
         # companions instead of suppressing them.
         "nu_metal_exception": bool(selection.get("nu_metal_exception", True)),

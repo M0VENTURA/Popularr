@@ -102,6 +102,11 @@ class Candidate:
     entities: set[str] = field(default_factory=set)
     contributions: list[Contribution] = field(default_factory=list)
     manual: bool = False
+    #: Kept by the corroboration gate's last-resort rescue. Such a candidate is
+    #: the ONLY answer left when the providers disagreed, so the confidence
+    #: floors must not discard it and blank the track — see
+    #: ``require_source_corroboration``.
+    rescued: bool = False
 
     @property
     def entity_count(self) -> int:
@@ -127,6 +132,7 @@ class Candidate:
             "specificity": self.specificity,
             "family": self.family,
             "manual": self.manual,
+            "rescued": self.rescued,
             "evidence": [
                 {
                     "provider": c.source,
@@ -229,6 +235,21 @@ class SelectionSettings:
     #: this fraction of the ancestor's score. A weaker ``synthpop`` must not
     #: delete the better-supported ``pop`` tag.
     ancestor_replace_min_ratio: float = 0.80
+    #: How much support a narrower metal genre needs before it may absorb the
+    #: ``heavy_metal`` umbrella. The rule exists so "Heavy Metal is the Same as
+    #: Metal" keeps working beside Thrash/Death/Power Metal, but it must not let
+    #: a STRAY tag delete the best-supported answer:
+    #:
+    #:     Judas Priest - Redeemer of Souls
+    #:         Heavy Metal   3 sources, score 2.87
+    #:         Nu Metal      1 source,  score 0.95   <- ratio 0.33
+    #:
+    #: Absorbing on mere presence made that track "Nu Metal". Measured across
+    #: the collection, legitimate absorptions have a median ratio of 1.35 and a
+    #: 10th percentile of 0.53, so 0.60 removes the weak tail without disabling
+    #: the rule: Heavy Metal beside Thrash/Death/Black/Power still condenses,
+    #: and so does the album-level "Heavy Metal + Nu Metal" case (ratio 0.75).
+    umbrella_absorb_min_ratio: float = 0.60
     #: When NOTHING else produced a genre, accept the best local audio-derived
     #: candidate (Essentia) even though its weight cannot clear the first-slot
     #: floor on its own.
@@ -489,6 +510,7 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         # overrule a stronger rock body of evidence.
         metal_over_rock_min_ratio=_num("metal_over_rock_min_ratio", 0.80),
         ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
+        umbrella_absorb_min_ratio=_num("umbrella_absorb_min_ratio", 0.60),
         essentia_fallback=_bool("essentia_fallback", True),
         fallback_source=str(raw.get("fallback_source") or "essentia").strip(),
         # ⭐ 2 by default. A lone provider tag cannot take a slot on its own —
@@ -1009,6 +1031,7 @@ UMBRELLA_METAL_GENRES: frozenset[str] = frozenset({"heavy_metal"})
 def _absorb_umbrella_genres(
     candidates: list[Candidate],
     *,
+    settings: SelectionSettings | None = None,
     reasons: list[dict[str, Any]] | None = None,
 ) -> list[Candidate]:
     """Drop an umbrella genre when a more specific genre of its family is present.
@@ -1021,7 +1044,19 @@ def _absorb_umbrella_genres(
     is a genuine rock-vs-metal rivalry settled on evidence by
     ``apply_metal_over_rock_policy``, and absorbing Heavy Metal there would
     reinstate the exact Judas Priest bug this exists to prevent.
+
+    ⚠️⚠️ PRESENCE IS NOT ENOUGH — the narrower genre must carry comparable
+    support (``settings.umbrella_absorb_min_ratio``). Absorbing on mere presence
+    let ONE stray ``nu metal`` tag delete a three-source Heavy Metal reading:
+
+        Judas Priest - Redeemer of Souls
+            Heavy Metal   (MusicBrainz + Discogs + ListenBrainz)  -> "Nu Metal"
+
+    The rule's own cases (Heavy Metal beside Thrash/Death/Power Metal) are
+    close calls on evidence, so the floor is 0.60 — low enough to keep them,
+    high enough to reject the weak tail that caused the misassignment.
     """
+    settings = settings or _settings_from_config(None)
     if not candidates:
         return candidates
 
@@ -1032,12 +1067,14 @@ def _absorb_umbrella_genres(
         if candidate.manual or candidate.genre_id not in UMBRELLA_METAL_GENRES:
             continue
         family = family_of.get(candidate.genre_id)
+        threshold = float(candidate.score or 0.0) * settings.umbrella_absorb_min_ratio
         narrower = [
             other
             for other in candidates
             if other.genre_id != candidate.genre_id
             and other.specificity > candidate.specificity
             and (other.family or other.genre_id) == family
+            and float(other.score or 0.0) >= threshold
         ]
         if not narrower:
             continue
@@ -1079,9 +1116,20 @@ def require_source_corroboration(
     MANUAL genres are never dropped: an explicit user correction outranks the
     gate by definition.
 
-    ⚠️ RUNS AFTER family-outlier rejection and BEFORE ``trim_to_final``. Earlier
-    would let a rejected lone tag influence the family totals; later would let it
-    consume a slot a corroborated genre needs.
+    ⚠️ RUNS AFTER family-outlier rejection and BEFORE the collection policy and
+    hierarchy condensation. That order is deliberate:
+
+    * Earlier would let a rejected lone tag influence the family totals.
+    * Later — the original placement, between condensation and the trim — let a
+      lone tag DELETE a well-supported ancestor before being dropped itself:
+
+          The Offspring - Want You Bad
+              Punk Rock (MusicBrainz + ListenBrainz) removed as Pop Punk's
+              ancestor; Pop Punk (MusicBrainz only) then gated out. Neither
+              survived, so the track kept only "Alternative Rock".
+
+    Validating the evidence first means an uncorroborated child can no longer
+    take its corroborated parent down with it.
     """
     settings = settings or _settings_from_config(None)
     minimum = max(1, int(settings.min_independent_sources or 1))
@@ -1169,6 +1217,11 @@ def require_source_corroboration(
             candidates,
             key=lambda c: (c.specificity, c.confidence, c.score),
         )
+        # ⚠️ The rescue must survive the CONFIDENCE FLOORS too. Rescuing it here
+        # and then letting ``trim_to_final`` reject it (a lone provider tag
+        # usually scores below the 0.60 first floor) blanked the track anyway —
+        # the exact outcome this safeguard exists to prevent.
+        best.rescued = True
         kept.append(best)
         if reasons is not None:
             for entry in list(reasons):
@@ -1610,7 +1663,10 @@ def select_genres(
     weak artist-only fallback cannot fill a blank slot.
 
     A manual/locked genre is never subject to the thresholds — an explicit user
-    choice outranks the model, which is the point of making it manual.
+    choice outranks the model, which is the point of making it manual. A genre
+    rescued by the corroboration gate is exempt for the same practical reason:
+    it is the ONLY answer left, so applying the floors would blank the track
+    instead of returning the best available reading.
 
     ``candidates`` should already be ranked and CLEANED (see the pipeline in
     :func:`select_album_or_track_genres`); they are re-sorted here so the
@@ -1629,7 +1685,7 @@ def select_genres(
         if len(selected) >= settings.max_genres:
             break
 
-        if candidate.manual:
+        if candidate.manual or candidate.rescued:
             selected.append(candidate)
             continue
 
@@ -1778,14 +1834,18 @@ def select_album_or_track_genres(
     ⭐ THE ORDER BELOW IS THE REQUIREMENT, not an implementation detail:
 
     1. rank, then reject weak family OUTLIERS — evidence is validated first;
-    2. take a POOL of the best candidates;
-    3. apply the metal-over-rock COLLECTION POLICY;
-    4. remove redundant generic parents and ancestors;
-    5. trim the cleaned pool to the final count.
+    2. drop uncorroborated genres (the SINGLE-SOURCE gate);
+    3. take a POOL of the best candidates;
+    4. apply the metal-over-rock COLLECTION POLICY;
+    5. remove redundant generic parents and ancestors;
+    6. trim the cleaned pool to the final count.
 
-    Reversing 1 and 3 would let an isolated bad metal tag delete a
-    well-supported rock cluster. Reversing 4 and 5 would let the trim decide
-    which genre "wins" a redundancy conflict, so a redundant parent could
+    Reversing 1 and 4 would let an isolated bad metal tag delete a
+    well-supported rock cluster. Reversing 2 and 5 lets an uncorroborated child
+    delete its corroborated parent before being dropped itself, leaving neither
+    (The Offspring "Want You Bad": Punk Rock gone because of a MusicBrainz-only
+    Pop Punk that the gate then removed). Reversing 5 and 6 would let the trim
+    decide which genre "wins" a redundancy conflict, so a redundant parent could
     survive by outscoring its own child.
     """
     settings = settings or _settings_from_config(None)
@@ -1805,17 +1865,28 @@ def select_album_or_track_genres(
     ranked = rank_and_condense(candidates, vocab=vocab, settings=settings)
     ranked = remove_family_outliers(ranked, settings=settings, reasons=removed)
 
-    # ── 2. The pool: more candidates than the final count, so the policy has
+    # The post-outlier set is what the result can EXPLAIN; the gate below narrows
+    # what may be SELECTED but must not erase a candidate from the provenance.
+    considered = ranked
+
+    # ── 2. Corroboration ─────────────────────────────────────────────────
+    # ⭐ BEFORE the collection policy, condensation and the pool slice. A lone
+    # tag must not delete a corroborated ancestor (see the ordering note in
+    # ``require_source_corroboration``) and must not consume one of the pool's
+    # alternatives either.
+    ranked = require_source_corroboration(ranked, settings=settings, reasons=removed)
+
+    # ── 3. The pool: more candidates than the final count, so the policy has
     # something to promote when it removes a genre.
     pool_size = max(settings.selection_pool, settings.max_genres)
     pool = ranked[:pool_size]
     overflow = ranked[pool_size:]
 
-    # ── 3. Collection policy ─────────────────────────────────────────────
+    # ── 4. Collection policy ─────────────────────────────────────────────
     pool, policy_removed = apply_metal_over_rock_policy(pool, settings=settings)
     removed.extend(policy_removed)
 
-    # ── 4. Redundancy ────────────────────────────────────────────────────
+    # ── 5. Redundancy ────────────────────────────────────────────────────
     pool, generic_removed = remove_generic_parents(pool, settings=settings)
     removed.extend(generic_removed)
 
@@ -1823,20 +1894,14 @@ def select_album_or_track_genres(
     # "Heavy Metal is the Same as Metal" rule, kept separate from the
     # specificity-0 mechanism that used to implement it (see
     # ``UMBRELLA_METAL_GENRES``).
-    pool = _absorb_umbrella_genres(pool, reasons=removed)
+    pool = _absorb_umbrella_genres(pool, settings=settings, reasons=removed)
 
     pool = remove_redundant_ancestors(
         pool, vocab=vocab, settings=settings, reasons=removed
     )
     pool = enforce_family_diversity(pool, settings=settings)
 
-    # ── 4b. Corroboration ────────────────────────────────────────────────
-    # ⭐ After the family/ancestry work (so a lone tag cannot skew a family
-    # total) and BEFORE the final cardinality (so a rejected lone tag does not
-    # hold a slot a corroborated genre could take).
-    pool = require_source_corroboration(pool, settings=settings, reasons=removed)
-
-    # ── 5. Final cardinality ─────────────────────────────────────────────
+    # ── 6. Final cardinality ─────────────────────────────────────────────
     selected, trim_removed = trim_to_final(pool, settings=settings)
 
     # ── 5b. Local-audio fallback ─────────────────────────────────────────
@@ -1876,7 +1941,7 @@ def select_album_or_track_genres(
         "taxonomy_version": _vocabulary_version(vocab),
         "genres": [c.display for c in selected],
         "candidates": [
-            {**c.to_dict(), "selected": c.genre_id in winners} for c in ranked
+            {**c.to_dict(), "selected": c.genre_id in winners} for c in considered
         ],
         "removed": removed,
         "moved": {kind: values for kind, values in moved.items() if values},

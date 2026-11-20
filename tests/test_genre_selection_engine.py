@@ -1099,6 +1099,10 @@ class TestConfig:
         assert cfg["nu_metal_exception"] is True
         assert cfg["remove_generic_parents"] is True
         assert cfg["nu_metal_rock_companions"] == ["hard_rock"]
+        # The gate and the umbrella's support guard must both be configurable —
+        # the selector reads them, but this helper is what hands them over.
+        assert cfg["min_independent_sources"] == 2
+        assert cfg["umbrella_absorb_min_ratio"] == 0.6
 
     def test_the_engine_defaults_lead_with_musicbrainz(self) -> None:
         assert gs.DEFAULT_SOURCE_WEIGHTS["musicbrainz"] == 1.00
