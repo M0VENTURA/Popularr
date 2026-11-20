@@ -265,24 +265,45 @@ class TestConsensusThreshold:
         result = gas.aggregate_genres({"lastfm": ["2014", "beautiful"]}, max_genres=3)
         assert result == []
 
-    def test_a_lone_track_tag_is_now_ACCEPTED_where_the_gate_rejected_it(self, cfg):
-        """⚠️ A DELIBERATE behaviour change, documented rather than asserted away.
+    def test_a_lone_tag_survives_when_no_other_provider_speaks(self, cfg):
+        """The precise rule, isolated so it cannot drift again.
 
-        The legacy gate rejected a lone Last.fm tag because the legacy weights
-        made Last.fm nearly worthless (0.10 against a 0.25 floor). The canonical
-        engine gives Last.fm 0.70 — the recommended provider trust for broad
-        coverage — so a TRACK's own Last.fm tag is real evidence of that track's
-        genre and clears the first-position floor.
+        ONE provider, nothing else in the map: the tag stands. Gating it would
+        blank every track whose providers only partly cover it, which is worse
+        than the tag itself.
 
-        The safety property that mattered is kept by a different route: an
-        ARTIST-level lone tag still cannot define a track (see
-        ``test_a_lone_ARTIST_tag_still_cannot_define_a_track``).
+        ⚠️ This test has now asserted three different things across its life:
+        originally "a lone tag is accepted"; then, when the corroboration gate
+        landed, "a lone tag is rejected". The final rule is narrower than both,
+        and is what the collection asked for: corroboration needs a SECOND VOICE
+        to exist. One provider alone has nothing to corroborate against.
         """
         cfg(min_weight=0.25)
-        result = gas.aggregate_genres({"lastfm": ["k-pop"]}, max_genres=3)
-        assert _lower(result) == ["k-pop"], (
-            "a track's own Last.fm genre should now be accepted"
+        assert _lower(gas.aggregate_genres({"lastfm": ["k-pop"]}, max_genres=3)) == [
+            "k-pop"
+        ]
+
+    def test_a_lone_tag_is_dropped_when_another_provider_disagrees(self, cfg):
+        """The reported shape: MusicBrainz says Jazz, Discogs says Pop Punk."""
+        cfg(min_weight=0.25)
+        result = gas.aggregate_genres(
+            {
+                "musicbrainz": ["jazz", "rock"],
+                "discogs": ["pop punk"],
+            },
+            max_genres=3,
         )
+        assert "jazz" not in _lower(result), (
+            f"a MusicBrainz-only 'Jazz' must not survive beside Discogs: {result!r}"
+        )
+
+    def test_two_sources_still_accept_that_genre(self, cfg):
+        """CONTROL for the change above: corroboration is the whole point."""
+        cfg(min_weight=0.25)
+        result = gas.aggregate_genres(
+            {"lastfm": ["k-pop"], "musicbrainz": ["k-pop"]}, max_genres=3
+        )
+        assert _lower(result) == ["k-pop"]
 
     def test_a_lone_ARTIST_tag_still_cannot_define_a_track(self, cfg):
         """CONTROL for the change above: the guard that matters still holds.

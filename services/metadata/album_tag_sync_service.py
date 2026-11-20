@@ -712,6 +712,108 @@ def _merge_album_blend_with_affiliations(
     return ", ".join(merged)
 
 
+def _select_track_own_genres(
+    tracks: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    """Each track's genres from ITS OWN provider columns, keyed by track id.
+
+    ⭐⭐ WHY THIS EXISTS.
+
+    Genres were assigned PER ALBUM: one blended list was written to every track
+    of a release. So one odd tag on one track became the genre of the whole
+    album, which is the reported "every track on an album gets that album's
+    tags". The concrete cases:
+
+        Green Day – Demolicious      Rock; Jazz; Trance   (bad MB release tags)
+        Lacuna Coil – In a Reverie   Gothic Metal; Blues  (a bad MB tag)
+        Evanescence – My Immortal    Nu Metal / Prog Metal — it is a piano ballad
+        Linkin Park – One More Light Euro House
+
+    This runs the SAME selector over only this track's ``@track`` columns. A
+    track whose own evidence resolves keeps that answer; a track with nothing of
+    its own returns no entry, and the caller falls back to the album blend.
+
+    ⚠️ NO ``@album`` KEYS HERE. Feeding the album pool back in would reproduce
+    the bug this exists to fix: every track would resolve the same list and the
+    distinction would be lost.
+
+    ⚠️ A TRACK WITH NO SOURCE COLUMNS OF ITS OWN IS NOT A TRACK WITH NO GENRES.
+    Returning ``{}`` for it (not ``[]``) is what lets the caller tell "resolved
+    nothing" apart from "had nothing to resolve" — both fall back, but the log
+    can say which.
+    """
+    from services.enrichment.genre_aggregation_service import _genre_track_limit
+
+    _SOURCE_COLUMNS = (
+        ("musicbrainz", "musicbrainz_genres"),
+        ("discogs", "discogs_genres"),
+        ("lastfm", "lastfm_tags"),
+        ("listenbrainz", "listenbrainz_genres"),
+        ("spotify", "spotify_genres"),
+        ("navidrome", "navidrome_genres"),
+        ("audiodb", "audiodb_genres"),
+        ("wikidata", "wikidata_genres"),
+        ("essentia", "essentia_genres"),
+        ("manual", "manual_genres"),
+    )
+
+    out: dict[str, list[str]] = {}
+    max_genres = _genre_track_limit()
+
+    try:
+        from services.enrichment.genre_selection import (
+            select_album_or_track_genres,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Per-track genre selector unavailable", error=str(exc))
+        return out
+
+    for track in tracks or []:
+        track_id = str(track.get("id") or "")
+        if not track_id:
+            continue
+
+        source_map: dict[str, Any] = {}
+        for source, column in _SOURCE_COLUMNS:
+            raw = track.get(column)
+            if not raw:
+                continue
+            if isinstance(raw, str) and not raw.strip():
+                continue
+            source_map[f"{source}@track"] = raw
+
+        if not source_map:
+            continue
+
+        try:
+            # ⚠️ NO ``context_title`` / ``context_album`` HERE. The canonical
+            # selector's signature is ``(source_map, *, max_genres, settings,
+            # vocab)`` — the legacy ``aggregate_genres`` is the one that takes
+            # context, for its title-derived markers. Passing them raised
+            # TypeError, which the ``except`` below swallowed into "resolved
+            # nothing", so EVERY track fell back to the album blend and the fix
+            # was inert while looking correct.
+            result = select_album_or_track_genres(
+                source_map,
+                max_genres=max_genres,
+            )
+        except Exception as exc:
+            # ⚠️ WARNING, NOT DEBUG. A swallowed DEBUG here is exactly how the
+            # ``context_title`` TypeError above stayed invisible: every track
+            # quietly fell back to the album blend and the fix looked applied.
+            logger.warning(
+                "Per-track genre selection failed",
+                track_id=track_id, error=str(exc),
+            )
+            continue
+
+        genres = [str(g) for g in (result.get("genres") or []) if str(g).strip()]
+        if genres:
+            out[track_id] = genres
+
+    return out
+
+
 def sync_album_file_tags(
     artist: str,
     album: str,
@@ -842,59 +944,62 @@ def sync_album_file_tags(
                 # ``is_cover = 1`` but no "Cover" genre, which is the reported
                 # "the Cover genre isn't being applied".
                 #
-                # One album-wide UPDATE cannot express that, so when any track
-                # earned a marker the write is split: the un-marked tracks take
-                # the album blend in one statement (the common case stays a
-                # single query), and each marked track gets the blend plus its
-                # own markers.
-                _marked: list[tuple[dict[str, Any], list[str]]] = []
-                for t in tracks:
-                    _markers = _track_affiliation_markers(t)
-                    if _markers:
-                        _marked.append((t, _markers))
+                # The per-value grouping below handles this without a special
+                # case: a marked track's final string differs from an unmarked
+                # one's, so it lands in its own UPDATE group.
+                #
+                # ⭐⭐ A TRACK WITH ITS OWN EVIDENCE KEEPS ITS OWN GENRES.
+                #
+                # The album blend is an ALBUM-SCOPED pool: every provider column
+                # from every track of the release, tagged ``@album``. Writing it
+                # to all tracks made one odd tag on one release the genre of the
+                # whole album — the reported "genres are being assigned per
+                # album, so every track on an album gets that album's tags", and
+                # the reason Green Day's Demolicious came out "Rock; Jazz;
+                # Trance" and Lacuna Coil's In a Reverie "Gothic Metal; Blues".
+                #
+                # So the blend is now a FALLBACK, not an overwrite: a track whose
+                # OWN columns produce a selection keeps that, and only a track
+                # that resolved nothing inherits the album's list. This is also
+                # what fixes the per-song cases — Evanescence's "My Immortal"
+                # (a piano ballad on a metal album) and Linkin Park's "One More
+                # Light" — because those tracks now answer for themselves.
+                _per_track_genres = _select_track_own_genres(tracks)
 
-                _marked_ids = {str(t.get("id")) for t, _m in _marked}
-
-                # ⚠️ Written BY THE IDS ALREADY LOADED, never by artist/album.
-                # ``_load_fresh_tracks`` matches case-insensitively and across
-                # every "X feat. Y" album-artist variant; the old exact
-                # ``album_artist = :a AND album = :alb`` UPDATE could match
-                # NOTHING for exactly those albums, while the file pass below
-                # still wrote the new genres — file and DB then disagreed.
-                _unmarked_ids = sorted(
-                    str(t.get("id")) for t in tracks
-                    if t.get("id") is not None and str(t.get("id")) not in _marked_ids
-                )
+                def _final_genres_for(_track: dict[str, Any]) -> str:
+                    """One track's stored value: its own evidence, else the blend."""
+                    _own = _per_track_genres.get(str(_track.get("id") or "")) or []
+                    _base = ", ".join(_own) if _own else clean_genres
+                    _markers = _track_affiliation_markers(_track)
+                    return (
+                        _merge_album_blend_with_affiliations(_base, _markers)
+                        if _markers else _base
+                    )
 
                 with db_session() as session:
-                    if _unmarked_ids:
+                    # ONE statement per DISTINCT VALUE, not per track: an album
+                    # whose blend still applies to every track (the common case)
+                    # costs a single UPDATE, exactly as before.
+                    _by_value: dict[str, list[str]] = {}
+                    for _t in tracks:
+                        if _t.get("id") is None:
+                            continue
+                        _by_value.setdefault(_final_genres_for(_t), []).append(
+                            str(_t.get("id"))
+                        )
+                    for _value, _ids in _by_value.items():
                         session.execute(
                             text(
                                 "UPDATE tracks SET genres = :g "
                                 "WHERE CAST(id AS TEXT) IN :ids"
                             ).bindparams(bindparam("ids", expanding=True)),
-                            {"g": clean_genres, "ids": _unmarked_ids},
-                        )
-                    for _track, _markers in _marked:
-                        _tid = str(_track.get("id") or "")
-                        if not _tid:
-                            continue
-                        session.execute(
-                            text("UPDATE tracks SET genres = :g WHERE CAST(id AS TEXT) = :id"),
-                            {
-                                "g": _merge_album_blend_with_affiliations(
-                                    clean_genres, _markers
-                                ),
-                                "id": _tid,
-                            },
+                            {"g": _value, "ids": sorted(_ids)},
                         )
 
+                # Bind the STORED values onto the rows so the file pass writes
+                # exactly what the database now holds.
                 for t in tracks:
-                    _markers = _track_affiliation_markers(t)
-                    t["genres"] = (
-                        _merge_album_blend_with_affiliations(clean_genres, _markers)
-                        if _markers else clean_genres
-                    )
+                    t["genres"] = _final_genres_for(t)
     except Exception as exc:
         logger.warning("Active genre database cleanup failed", error=str(exc))
     # -------------------------------------------------------------------------

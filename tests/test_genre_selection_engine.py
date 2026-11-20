@@ -599,8 +599,16 @@ class TestSelection:
             "listenbrainz@track": ["death metal"],
         })
         assert result["genres"][0] == "Death Metal"
-        by_id = {c["id"]: c for c in result["candidates"]}
-        assert by_id["death_metal"]["score"] > by_id["bebop"]["score"]
+
+        # ⭐ CHANGED WITH THE CORROBORATION GATE. This used to compare the two
+        # candidates' scores, which required "bebop" to still BE a candidate.
+        # It no longer is: a lone lastfm tag is removed, and for this input the
+        # FAMILY-OUTLIER rule gets it first (the jazz family scores 0.54 against
+        # metal's 2.85, under the 30% floor) — see ``remove_family_outliers``.
+        # So the honest assertion is that the single-source genre does not
+        # survive, not which stage removed it.
+        assert "Bebop" not in result["genres"]
+        assert [c["id"] for c in result["candidates"]] == ["death_metal"]
 
     def test_an_artist_only_genre_is_penalised(self) -> None:
         result = full({"lastfm@artist": ["death metal"]})
@@ -1037,12 +1045,21 @@ class TestWiring:
 
     def test_filter_tags_still_survive_the_new_engine(self, monkeypatch) -> None:
         """⚠️ Live/Cover/Acoustic/Christmas are NOT genres but other code depends
-        on them; the genre slots changing must not remove them."""
+        on them; the genre slots changing must not remove them.
+
+        ⚠️ "death metal" is claimed by TWO sources. The single-source
+        corroboration gate would otherwise drop it, and the assertion below
+        would fail for a reason this test is not about — it pins the FILTER
+        tags surviving, not whether a lone genre clears the gate.
+        """
         from services.enrichment import genre_aggregation_service as gas
 
         monkeypatch.setattr(gas, "_selection_engine_v2_enabled", lambda: True)
         out = gas.aggregate_genres(
-            {"lastfm@track": ["death metal", "live", "acoustic"]},
+            {
+                "lastfm@track": ["death metal", "live", "acoustic"],
+                "musicbrainz@track": ["death metal"],
+            },
             context_title="Song (Live)",
             max_genres=3,
         )

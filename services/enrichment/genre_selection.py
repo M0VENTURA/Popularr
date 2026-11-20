@@ -243,6 +243,24 @@ class SelectionSettings:
     #: provider pool produced nothing, so it cannot displace or outrank a
     #: MusicBrainz/Last.fm/Discogs result.
     essentia_fallback: bool = True
+    #: A genre must be backed by at least this many INDEPENDENT sources to take
+    #: a final slot.
+    #:
+    #: ⭐⭐ THE SINGLE-SOURCE PROBLEM.
+    #:
+    #: A lone MusicBrainz release tag scores ``1.00 × 0.70`` = 0.70, which clears
+    #: the 0.60 first-slot floor on its own. So one odd tag on one release was
+    #: enough to become a track's genre — the reported Green Day "Rock; Jazz;
+    #: Trance", Lacuna Coil "Gothic Metal; Blues", Arch Enemy "…; Black Metal",
+    #: and Avenged Sevenfold "…; Symphonic Metal". In each case MusicBrainz said
+    #: it and NOTHING else did.
+    #:
+    #: ``agreement_2`` already REWARDED corroboration but never required it.
+    #: This makes it a gate.
+    #:
+    #: ⚠️ MANUAL IS EXEMPT — a user correction must never be second-guessed.
+    #: ⚠️ Set to 1 to restore the old "trust any single source" behaviour.
+    min_independent_sources: int = 2
     #: Source key the fallback may rescue from. Only LOCAL audio analysis is
     #: eligible: a provider is never "nothing else exists" in the same sense,
     #: because a lone provider tag is exactly the weak evidence the floors exist
@@ -473,6 +491,9 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
         essentia_fallback=_bool("essentia_fallback", True),
         fallback_source=str(raw.get("fallback_source") or "essentia").strip(),
+        # ⭐ 2 by default. A lone provider tag cannot take a slot on its own —
+        # see ``min_independent_sources``. Set 1 to restore the old behaviour.
+        min_independent_sources=max(1, _int("min_independent_sources", 2)),
         keep_together=_pairs("keep_together", DEFAULT_KEEP_TOGETHER),
         conditional_keep=_pairs("conditional_keep", DEFAULT_CONDITIONAL_KEEP),
         mutually_exclusive=_pairs(
@@ -636,6 +657,10 @@ REASON_METAL_SUPPRESSED_BY_ROCK = "METAL_SUPPRESSED_BY_ROCK"
 REASON_ROCK_NOT_ALLOWED_BY_NU_METAL = "ROCK_NOT_ALLOWED_BY_NU_METAL_EXCEPTION"
 REASON_EXCLUSIVE_CONFLICT = "EXCLUSIVE_CONFLICT"
 REASON_MANUAL_OVERRIDE_LIMIT = "MANUAL_GENRE_KEPT"
+#: Only ONE provider claimed this genre. A lone MusicBrainz release tag (or a
+#: lone Discogs broad category) is exactly the weak evidence the corroboration
+#: gate exists to reject — see ``SelectionSettings.min_independent_sources``.
+REASON_SINGLE_SOURCE = "SINGLE_SOURCE"
 
 
 FAMILY_METAL = "metal"
@@ -958,6 +983,199 @@ def remove_generic_parents(
     if not drop:
         return candidates, []
     return [c for c in candidates if c.genre_id not in drop], removed
+
+
+#: Genres that act as an UMBRELLA for their family: any more specific member of
+#: the same family replaces them, even when the ancestry graph does not say so.
+#:
+#: ⭐ WHY THIS EXISTS SEPARATELY FROM ANCESTRY.
+#:
+#: ``heavy_metal`` was once declared specificity 0 so that
+#: ``remove_generic_parents`` would absorb it into any narrower metal genre —
+#: the request "Heavy Metal is the Same as Metal too". But specificity 0 ALSO
+#: handed Hard Rock a 0.05 head start in the metal-vs-rock pair verdict and let
+#: the generic-parent rule delete Heavy Metal from metal albums, which is the
+#: reported Judas Priest case (every source says Heavy Metal; the result was
+#: "Hard Rock").
+#:
+#: Heavy Metal is now specificity 1 so it competes on evidence, and this set
+#: keeps the umbrella behaviour explicitly. It must be a NAMED SET rather than
+#: ancestry because Nu Metal and Alternative Metal descend from
+#: ``alternative_metal`` -> ``metal``, NOT from ``heavy_metal`` — the ancestry
+#: walk never reached them, which is why specificity 0 was doing that work.
+UMBRELLA_METAL_GENRES: frozenset[str] = frozenset({"heavy_metal"})
+
+
+def _absorb_umbrella_genres(
+    candidates: list[Candidate],
+    *,
+    reasons: list[dict[str, Any]] | None = None,
+) -> list[Candidate]:
+    """Drop an umbrella genre when a more specific genre of its family is present.
+
+    "Heavy Metal is the Same as Metal": beside Thrash/Death/Black/Power Metal,
+    or beside the alternative-metal branch (Nu Metal, Alternative Metal), the
+    narrower name is the answer and "Heavy Metal" adds nothing.
+
+    ⚠️ SAME FAMILY ONLY. This must not reach across to ``hard_rock``: that pair
+    is a genuine rock-vs-metal rivalry settled on evidence by
+    ``apply_metal_over_rock_policy``, and absorbing Heavy Metal there would
+    reinstate the exact Judas Priest bug this exists to prevent.
+    """
+    if not candidates:
+        return candidates
+
+    family_of = {c.genre_id: (c.family or c.genre_id) for c in candidates}
+
+    drop: set[str] = set()
+    for candidate in candidates:
+        if candidate.manual or candidate.genre_id not in UMBRELLA_METAL_GENRES:
+            continue
+        family = family_of.get(candidate.genre_id)
+        narrower = [
+            other
+            for other in candidates
+            if other.genre_id != candidate.genre_id
+            and other.specificity > candidate.specificity
+            and (other.family or other.genre_id) == family
+        ]
+        if not narrower:
+            continue
+        drop.add(candidate.genre_id)
+        if reasons is not None:
+            trigger = max(narrower, key=lambda c: (c.confidence, c.score)).display
+            reasons.append(
+                _removal(candidate, REASON_REDUNDANT_GENERIC_PARENT, trigger)
+            )
+    if not drop:
+        return candidates
+    return [c for c in candidates if c.genre_id not in drop]
+
+
+def require_source_corroboration(
+    candidates: list[Candidate],
+    *,
+    settings: SelectionSettings | None = None,
+    reasons: list[dict[str, Any]] | None = None,
+) -> list[Candidate]:
+    """Drop genres that only ONE independent source claims.
+
+    ⭐⭐ THE SINGLE-SOURCE GATE.
+
+    Every reported "clearly wrong" genre in the collection had the same shape:
+    one provider said it, and nothing else did.
+
+        Green Day     Rock; Jazz; Trance        <- MusicBrainz release tags
+        Lacuna Coil   Gothic Metal; Blues       <- MusicBrainz "blues, new age"
+        Arch Enemy    ...; Black Metal          <- a minor MusicBrainz tag
+        A7X           ...; Symphonic Metal      <- no source supports it
+
+    ``score_candidates`` already BONUSED agreement across sources but never
+    REQUIRED it, and a lone ``musicbrainz@album`` tag scores 0.70 — above the
+    0.60 first-slot floor. Requiring corroboration is what the collection asked
+    for: "requiring a genre to appear in at least two sources would remove most
+    of these."
+
+    MANUAL genres are never dropped: an explicit user correction outranks the
+    gate by definition.
+
+    ⚠️ RUNS AFTER family-outlier rejection and BEFORE ``trim_to_final``. Earlier
+    would let a rejected lone tag influence the family totals; later would let it
+    consume a slot a corroborated genre needs.
+    """
+    settings = settings or _settings_from_config(None)
+    minimum = max(1, int(settings.min_independent_sources or 1))
+    if minimum <= 1:
+        return candidates
+
+    # ⭐ SEASONAL MARKERS ARE EXEMPT.
+    #
+    # The holiday family is not a CLAIMED genre — it is a property of the album
+    # or track ("this is a Christmas record") and the playlist builder keys off
+    # it. One source naming Christmas is the normal case, and gating it removed
+    # the token entirely, which would drop every seasonal album out of its
+    # playlist. Same reasoning as MANUAL: it is not evidence to be corroborated.
+    try:
+        from services.enrichment.genre_aggregation_service import (
+            is_holiday_family_token,
+        )
+    except Exception:  # pragma: no cover - defensive
+        is_holiday_family_token = lambda _v: False  # noqa: E731
+
+    # ⭐ A GENRE IS ONLY "UNCORROBORATED" WHEN SOMETHING ELSE COULD HAVE AGREED.
+    #
+    # Corroboration needs a second voice. If only ONE provider supplied any
+    # genre at all, there is nothing to corroborate against and the gate must
+    # not fire — otherwise a track whose only evidence is Discogs (or only
+    # Last.fm) is blanked completely, which is strictly worse than the single
+    # tag it started with. Same reasoning as ``essentia_fallback`` and the
+    # ``navidrome`` exemption: a lone source is not a contradiction.
+    #
+    # ⚠️ THE GATE STILL FIRES WHEN SOURCES GENUINELY DISAGREE. Two providers
+    # that both speak, where only one names a genre, is exactly the reported
+    # case (MusicBrainz "Jazz" beside Discogs "Pop Punk").
+    provider_sources = {
+        source
+        for candidate in candidates
+        for source in candidate.sources
+        if source not in ("navidrome", "essentia", "manual", "context", "library")
+    }
+    if len(provider_sources) < 2:
+        return candidates
+
+    kept: list[Candidate] = []
+    for candidate in candidates:
+        if candidate.manual:
+            kept.append(candidate)
+            continue
+        if is_holiday_family_token(candidate.genre_id) or is_holiday_family_token(
+            candidate.display
+        ):
+            kept.append(candidate)
+            continue
+        if len(candidate.sources) >= minimum:
+            kept.append(candidate)
+            continue
+        if reasons is not None:
+            lone = ", ".join(sorted(candidate.sources)) or "no source"
+            reasons.append(
+                _removal(
+                    candidate,
+                    REASON_SINGLE_SOURCE,
+                    f"only {lone} (needs {minimum})",
+                )
+            )
+
+    # ⭐ A GATE THAT EMPTIES THE SET IS WORSE THAN THE BUG IT FIXES — but ONLY
+    # WHEN THE SOURCES GENUINELY DISAGREED.
+    #
+    # Green Day's Demolicious is that case: MusicBrainz supplied "Rock; Jazz;
+    # Trance" and Discogs "Pop Punk; Punk", and EVERY one of those is
+    # single-source — MusicBrainz never said Pop Punk, Discogs never said Rock.
+    # Strictly applied, the gate blanks the album and loses the CORRECT genre
+    # with the wrong ones, which is worse than what it started with.
+    #
+    # ⚠️ THIS DOES NOT RESCUE A LONE-SOURCE TRACK. ``provider_sources`` above
+    # returns early when fewer than two providers spoke, so this branch is only
+    # reachable when at least two providers were heard and every candidate was
+    # uncorroborated — a genuine disagreement, not one tag on its own.
+    #
+    # The ONE kept candidate is the MOST SPECIFIC, not the highest-scoring.
+    # MusicBrainz's generic "Rock" outscores Discogs' "Pop Punk", but "Pop Punk"
+    # is what the album actually is (the report's own answer) and a generic
+    # parent says less. Score breaks the tie inside a specificity band.
+    if not kept and candidates:
+        best = max(
+            candidates,
+            key=lambda c: (c.specificity, c.confidence, c.score),
+        )
+        kept.append(best)
+        if reasons is not None:
+            for entry in list(reasons):
+                if entry.get("genre") == best.display:
+                    reasons.remove(entry)
+
+    return kept
 
 
 def trim_to_final(
@@ -1601,10 +1819,22 @@ def select_album_or_track_genres(
     pool, generic_removed = remove_generic_parents(pool, settings=settings)
     removed.extend(generic_removed)
 
+    # ⭐ Heavy Metal is absorbed by any narrower metal genre — the
+    # "Heavy Metal is the Same as Metal" rule, kept separate from the
+    # specificity-0 mechanism that used to implement it (see
+    # ``UMBRELLA_METAL_GENRES``).
+    pool = _absorb_umbrella_genres(pool, reasons=removed)
+
     pool = remove_redundant_ancestors(
         pool, vocab=vocab, settings=settings, reasons=removed
     )
     pool = enforce_family_diversity(pool, settings=settings)
+
+    # ── 4b. Corroboration ────────────────────────────────────────────────
+    # ⭐ After the family/ancestry work (so a lone tag cannot skew a family
+    # total) and BEFORE the final cardinality (so a rejected lone tag does not
+    # hold a slot a corroborated genre could take).
+    pool = require_source_corroboration(pool, settings=settings, reasons=removed)
 
     # ── 5. Final cardinality ─────────────────────────────────────────────
     selected, trim_removed = trim_to_final(pool, settings=settings)

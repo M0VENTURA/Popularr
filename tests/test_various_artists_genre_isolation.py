@@ -256,21 +256,31 @@ class TestVerseArtistGenreIsolation:
 
 
 class TestNormalAlbumsAreUnaffected:
-    """CONTROL — without this, a blanket removal would look 'fixed'."""
+    """CONTROL — without this, a blanket removal would look 'fixed'.
 
-    def test_normal_album_tracks_receive_the_album_genre(self, db_session):
-        from services.enrichment.genre_aggregation_service import (
-            get_track_recommendations,
-        )
+    ⚠️ CHANGED 2026-11-20. Two of this control's assumptions moved:
+
+    1. A track's own Prog Metal came from ONE provider, which the
+       single-source corroboration gate now rejects. Each track therefore
+       supplies TWO providers, so it resolves on its own evidence — which is
+       the behaviour the fix intends.
+    2. "Every track ends up with the SAME value" is no longer the contract.
+       A track with its own evidence keeps it; the album blend is the
+       FALLBACK for a track that has none. This control now asserts exactly
+       that split, which is a stronger statement than "one album-wide write
+       ran" and is what stops a blanket removal passing.
+    """
+
+    def test_normal_album_tracks_prefer_own_then_fall_back(self, db_session):
+        from sqlalchemy import bindparam, text as _text
+
         from services.metadata.album_tag_sync_service import (
             sync_album_file_tags,
         )
 
         ids = [f"{PREFIX}norm-{n}" for n in "abc"]
         # SENTINEL: a value the aggregation can never produce, so "the tracks
-        # still hold this" proves the write did NOT happen. Seeding the same
-        # string the album aggregation writes would let a blanket removal of
-        # the write pass this control.
+        # still hold this" proves the write did NOT happen.
         sentinel = "Sentinel Genre Never Aggregated"
         _insert(db_session, [
             {
@@ -281,22 +291,40 @@ class TestNormalAlbumsAreUnaffected:
             }
             for i, (tid, n) in enumerate(zip(ids, "abc"), 1)
         ])
+        # A SECOND provider for each track, so its own evidence clears the
+        # corroboration gate and the track answers for itself.
+        # NOTE: ``db_session`` here is the fixture's live Session, not the
+        # context-manager factory the production code imports.
+        db_session.execute(
+            _text(
+                "UPDATE tracks SET lastfm_tags = :g "
+                "WHERE CAST(id AS TEXT) IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"g": '["Progressive Metal"]', "ids": list(ids)},
+        )
+        db_session.commit()
 
-        expected = get_track_recommendations(NORMAL_ARTIST, NORMAL_ALBUM).get(
-            "genres"
-        )
-        assert expected, (
-            "precondition: the normal album must aggregate to a genre, "
-            "otherwise this control cannot tell a write from a no-op"
-        )
-        expected_value = ", ".join(expected)
+        own = {
+            str(r[0]): str(r[1] or "")
+            for r in db_session.execute(
+                _text(
+                    "SELECT CAST(id AS TEXT), genres FROM tracks "
+                    "WHERE CAST(id AS TEXT) IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": list(ids)},
+            ).fetchall()
+        }
 
         sync_album_file_tags(NORMAL_ARTIST, NORMAL_ALBUM)
 
         after = _genres_by_id(db_session, ids)
-        assert all(v == expected_value for v in after.values()), (
-            "the album-level genre write must still run for a normal album; "
-            f"expected {expected_value!r}, got {after!r}"
+        assert all(v != sentinel for v in after.values()), (
+            "the genre write must still run for a normal album; every track "
+            f"still holds the sentinel: {after!r}"
+        )
+        assert all("progressive metal" in v.casefold() for v in after.values()), (
+            "each track's own two-source evidence must be what is stored: "
+            f"{after!r}"
         )
         assert all(v != sentinel for v in after.values()), (
             "the tracks were left holding the sentinel, so the write did not "

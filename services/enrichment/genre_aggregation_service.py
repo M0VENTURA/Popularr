@@ -272,6 +272,19 @@ _ADMIN_GENRE_WORDS: frozenset[str] = frozenset({
     "soundtracks", "score", "scores", "original soundtrack",
     "karaoke", "instrumentals", "bootleg", "bootlegs",
     "unofficial", "promo", "promos", "sampler",
+    # ⭐ DISCOGS FORMAT CATEGORIES ARE NOT GENRES — DROP THEM ENTIRELY.
+    #
+    # Discogs returns these in its top-level ``genres`` field, so they arrive
+    # through exactly the same path as a real genre. "Stage & Screen" was
+    # additionally an ALIAS of Musical Theatre in the vocabulary (removed), so
+    # Stray Kids' Japanese releases came out tagged "K-Pop; Musical Theatre".
+    #
+    # ⚠️ NOT added to ``_FILTER_TAGS``: a member of that set is excluded from
+    # voting but APPENDED to the final list as a playlist marker (Live, Cover,
+    # Acoustic…). A format category must not survive as a marker either, so it
+    # belongs here — ``is_admin_genre`` drops it with no append.
+    "stage & screen", "stage and screen", "stage screen",
+    "stage & screen music",
 })
 
 

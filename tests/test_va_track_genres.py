@@ -223,17 +223,34 @@ class TestWhatIsWritten:
             {"musicbrainz": ["rock"]}, max_genres=2, nav_genres=None
         ) == ["rock"]
 
-    def test_a_lone_track_tag_is_accepted_by_the_canonical_engine(self):
-        """CONTROL for the change above, and the reason it is safe.
+    def test_a_lone_tag_survives_only_when_the_only_voice(self):
+        """⚠️ CHANGED 2026-11-20 — the corroboration rule, stated precisely.
 
-        The canonical engine weights a track's OWN Last.fm tag at 0.70, so it
-        clears the first-position floor. The protection that mattered is kept by
-        a different route: ARTIST-level evidence is weighted at 0.35 and
-        penalised, so it still cannot define a track on its own.
+        Corroboration needs a SECOND VOICE to exist:
+
+            ONE provider speaking             -> the tag stands
+                (nothing to corroborate against; gating it would blank the
+                 genre field of every track whose providers only partly cover it)
+            TWO providers, one naming it      -> the tag is rejected
+                (a genuine disagreement)
+
+        The ARTIST-level protection is unchanged and still asserted last.
         """
+        # One voice: stands.
         assert gas.aggregate_genres(
             {"lastfm": ["rock"]}, max_genres=2, nav_genres=None
         ) == ["Rock"]
+        # Two voices, one naming it: rejected.
+        assert gas.aggregate_genres(
+            {"lastfm": ["rock"], "musicbrainz": ["pop"]}, max_genres=2,
+            nav_genres=None,
+        ) == ["Pop"]
+        # Two voices, both agreeing: accepted.
+        assert gas.aggregate_genres(
+            {"lastfm": ["rock"], "musicbrainz": ["rock"]},
+            max_genres=2, nav_genres=None,
+        ) == ["Rock"]
+        # Artist-level evidence still cannot define a track on its own.
         assert gas.aggregate_genres(
             {"lastfm@artist": ["rock"]}, max_genres=2, nav_genres=None
         ) == []
@@ -288,8 +305,32 @@ class TestTheScanCallsIt:
             "at whatever Navidrome imported"
         )
 
-    def test_the_non_va_branch_keeps_its_album_wide_write(self):
-        """CONTROL — a single-artist album still shares one genre list."""
+    def test_the_non_va_branch_prefers_PER_TRACK_genres(self):
+        """⚠️ CHANGED 2026-11-20 — this used to be a CONTROL pinning the exact
+        opposite ("a single-artist album still shares one genre list").
+
+        Sharing one list is precisely the reported bug: "genres are being
+        assigned per album, so every track on an album gets that album's tags".
+        One odd tag on one release became the genre of the whole album —
+        Green Day's Demolicious reading "Rock; Jazz; Trance", Lacuna Coil's
+        In a Reverie "Gothic Metal; Blues", and Evanescence's piano ballad
+        "My Immortal" inheriting Nu Metal.
+
+        The album blend is now a FALLBACK. A track whose own provider columns
+        resolve keeps that answer; only a track that resolves NOTHING inherits
+        the album list.
+        """
         source = TAG_SYNC.read_text(encoding="utf-8")
-        assert "get_track_recommendations" in source
-        assert "UPDATE tracks SET genres = :g WHERE" in source
+        assert "get_track_recommendations" in source, (
+            "the album blend is still needed as the FALLBACK"
+        )
+        assert "_select_track_own_genres" in source, (
+            "each track must be asked for its OWN genres before the album blend"
+        )
+        # The album list is still written, but no longer unconditionally to
+        # every id: it is one of several per-value UPDATE groups.
+        assert "UPDATE tracks SET genres = :g" in source
+        assert "_final_genres_for" in source, (
+            "the stored value must be computed per track (own evidence, else "
+            "the album blend), not once for the album"
+        )

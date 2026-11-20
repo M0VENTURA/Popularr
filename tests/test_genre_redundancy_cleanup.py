@@ -92,18 +92,44 @@ class TestTheReportedViolationsAreGone:
         )
 
     def test_heavy_metal_is_treated_as_the_metal_umbrella(self) -> None:
-        """The request, verbatim: "Heavy Metal is the Same as Metal too"."""
-        vocab = get_vocabulary()
-        entry = vocab.genres["heavy_metal"]
-        assert entry.specificity == 0, (
-            "Heavy Metal must be a generic root or the generic-parent rule skips it"
-        )
-        # And in practice: any concrete metal genre removes it.
+        """The original request, verbatim: "Heavy Metal is the Same as Metal too".
+
+        ⚠️ THE BEHAVIOUR IS UNCHANGED; THE MECHANISM MOVED (2026-11-20).
+
+        This used to pin ``entry.specificity == 0``, because the generic-parent
+        rule keys on specificity and that was the only way to make a concrete
+        metal genre absorb "Heavy Metal". But specificity 0 ALSO made Heavy Metal
+        lose to Hard Rock: it gave Hard Rock a 0.05 specificity head start in the
+        metal-vs-rock arbitration (``_pair_verdict``), and it let
+        ``remove_generic_parents`` delete it from any metal album. That is the
+        reported Judas Priest case — Killing Machine and Stained Class resolving
+        to "Hard Rock" when every source said Heavy Metal.
+
+        Heavy Metal is now specificity 1, so the two things are separate again:
+
+            Heavy Metal + Thrash/Death/Black/Power Metal -> the narrower genre
+                (via the ancestry rule, which needs no specificity 0)
+            Heavy Metal + Hard Rock                      -> Heavy Metal
+                (via the pair verdict, on evidence)
+
+        The assertions below pin the BEHAVIOUR on both sides rather than the
+        integer, so a future specificity change cannot silently break either.
+        """
+        # Any concrete metal genre still removes it — the original request.
         for child in ("thrash metal", "death metal", "black metal", "power metal"):
             result = select(_pair_evidence("heavy metal", child))
             assert "heavy metal" not in [g.casefold() for g in result], (
                 f"Heavy Metal survived beside {child}: {result}"
             )
+            assert child in [g.casefold() for g in result], (
+                f"the narrower genre must be what remains: {result}"
+            )
+
+        # And it no longer loses to Hard Rock — the Judas Priest fix.
+        result = select(_pair_evidence("heavy metal", "hard rock"))
+        assert "heavy metal" in [g.casefold() for g in result], (
+            "a core metal band must not be reduced to Hard Rock: " + str(result)
+        )
 
 
 class TestTheVocabularyDeclaresTheRealAncestry:

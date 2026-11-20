@@ -174,8 +174,17 @@ class TestAlbumBlendNeverSpreadsTrackAffiliation:
 
     def test_one_tracks_cover_source_does_not_stamp_the_album(self):
         # musicbrainz column carries "cover" on ONE row of the album.
+        #
+        # ⚠️ "rock" now comes from TWO sources. The single-source corroboration
+        # gate (genre_selection.min_independent_sources = 2) rejects a genre only
+        # one provider claims, so a lone musicbrainz "rock" would be dropped and
+        # this test would fail for the WRONG reason — it is about affiliation
+        # tags not spreading, not about whether "rock" survives.
         out = _album_recommendations_from_row(
-            [["[]", '["rock", "cover"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"]]
+            [
+                ["[]", '["rock", "cover"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"],
+                ['["rock"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"],
+            ]
         )
         lowered = {g.lower() for g in out}
         assert "cover" not in lowered, (
@@ -185,8 +194,12 @@ class TestAlbumBlendNeverSpreadsTrackAffiliation:
         assert "rock" in lowered
 
     def test_one_tracks_acoustic_source_does_not_stamp_the_album(self):
+        # Two sources for "rock" — see the note above.
         out = _album_recommendations_from_row(
-            [["[]", '["rock", "acoustic"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"]]
+            [
+                ["[]", '["rock", "acoustic"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"],
+                ['["rock"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"],
+            ]
         )
         lowered = {g.lower() for g in out}
         assert "acoustic" not in lowered
@@ -206,9 +219,21 @@ class TestAlbumBlendNeverSpreadsTrackAffiliation:
         The album here has 1 of 1 tracks tagged, i.e. every track — so it IS a
         seasonal album by the majority rule and the token survives. See
         ``test_holiday_album_propagation.py`` for the case that does NOT.
+
+        ⚠️ "rock" needs TWO INDEPENDENT sources. Column indices map as
+        lastfm 0, musicbrainz 1, discogs 2, listenbrainz 3, spotify 4,
+        essentia 5, manual 6, audiodb 7, wikidata 8 — so index 8 is wikidata.
+        (Index 9 is navidrome, which the album blend deliberately does NOT
+        pool: it holds the tags this pipeline wrote, so it cannot vote on a
+        result it produced.)
+
+        ⚠️ Both live on the SAME track, not two rows: a second row makes this
+        1-of-2 holiday votes, and ``album_is_holiday_album`` requires a strict
+        majority — the token would then be dropped for the majority rule, which
+        is NOT what this test is about.
         """
         out = _album_recommendations_from_row(
-            [["[]", '["rock", "christmas"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"]]
+            [['["rock", "christmas"]', "[]", "[]", "[]", "[]", "[]", "[]", "[]", '["rock"]', "[]"]]
         )
         assert "Holiday" in out, (
             "a seasonal album IS an album property; the genre-playlist "
@@ -235,8 +260,15 @@ class TestAlbumTopGenresInheritanceStripsAffiliation:
 
     def test_one_tracks_cover_does_not_inherit_to_siblings(self, monkeypatch):
         helper = self._helper(monkeypatch)
+        # "nu metal" from TWO columns on the same track, so it clears the
+        # single-source corroboration gate. The property under test is that the
+        # COVER affiliation does not travel, not that a lone tag survives.
         out = helper(
-            [{"title": "A", "musicbrainz_genres": '["cover", "nu metal"]'}],
+            [{
+                "title": "A",
+                "musicbrainz_genres": '["cover", "nu metal"]',
+                "lastfm_tags": '["nu metal"]',
+            }],
             max_genres=3,
         )
         lowered = {g.lower() for g in out}
@@ -250,7 +282,11 @@ class TestAlbumTopGenresInheritanceStripsAffiliation:
         """Pinned contract: 'cover'/'live' never appear in album top genres."""
         helper = self._helper(monkeypatch)
         out = helper(
-            [{"title": "A", "musicbrainz_genres": '["cover", "live", "nu metal"]'}],
+            [{
+                "title": "A",
+                "musicbrainz_genres": '["cover", "live", "nu metal"]',
+                "lastfm_tags": '["nu metal"]',
+            }],
             max_genres=3,
         )
         lowered = {g.lower() for g in out}

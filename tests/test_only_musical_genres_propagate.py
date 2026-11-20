@@ -142,7 +142,16 @@ class TestTheInheritanceListOnlyHoldsMusicalGenres:
         config_helpers.get_config = lambda: {"genres": {"min_weight": 0.01}}
         try:
             out = track_stage._album_top_genres(
-                [{"title": "A", "musicbrainz_genres": '["cover", "christmas", "nu metal"]'}],
+                [{
+                    "title": "A",
+                    # ⚠️ "nu metal" comes from TWO provider columns. The
+                    # single-source corroboration gate rejects a genre only one
+                    # provider claims, so a lone musicbrainz entry would be
+                    # dropped — and this test is about which KINDS of tag may
+                    # propagate, not about whether a lone tag survives.
+                    "musicbrainz_genres": '["cover", "christmas", "nu metal"]',
+                    "lastfm_tags": '["nu metal"]',
+                }],
                 max_genres=3,
             )
         finally:

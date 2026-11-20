@@ -31,7 +31,13 @@ class TestTrackGenreAggregationIncludesNavidrome:
         assert len(result) >= 1
 
     def test_online_sources_win_when_they_produce_a_genre(self, monkeypatch):
-        """Navidrome must not change an answer the online sources made."""
+        """Navidrome must not change an answer the online sources made.
+
+        ⚠️ "nu metal" is claimed by TWO providers. With the single-source
+        corroboration gate (``min_independent_sources`` = 2) a lone MusicBrainz
+        tag would be dropped, and this test would fail for a reason it is not
+        about — it pins NAVIDROME'S role, not whether one provider suffices.
+        """
         import helpers.config_helpers as ch
         monkeypatch.setattr(ch, "get_config", lambda: {"genres": {"min_weight": 0.0}})
 
@@ -40,6 +46,7 @@ class TestTrackGenreAggregationIncludesNavidrome:
         result = aggregate_genres(
             {
                 "musicbrainz": ["nu metal"],
+                "lastfm": ["nu metal"],
                 "navidrome": ["Electronic", "Industrial"],
             },
             max_genres=5,
