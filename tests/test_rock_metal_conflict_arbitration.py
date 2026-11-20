@@ -170,11 +170,16 @@ class TestRockWinsOnStrongerEvidence:
     def test_a_lone_weak_metal_tag_does_not_delete_a_rock_cluster(self) -> None:
         """The report's own boundary: "an isolated, weak metal tag".
 
-        ⚠️ The assertion is that ROCK SURVIVES — not that metal is deleted. When
-        the metal genre is the better-supported side it legitimately wins; what
-        the report forbids is a weak tag wiping out a strong rock body.
+        ⚠️ The assertion is that the ROCK side SURVIVES — not that metal is
+        deleted. When the metal genre is the better-supported side it
+        legitimately wins; what the report forbids is a weak tag wiping out a
+        strong rock body.
+
+        ⚠️ ``punk rock`` and ``punk`` are now ONE genre (the spelling is an
+        alias) whose display is ``Punk``, so the surviving cluster is named Punk
+        rather than Punk Rock — the umbrella ``Rock`` is still absorbed.
         """
         result = select("punk rock", "punk", "rock", "death metal")
-        assert any(g.casefold() in ROCK_FAMILY for g in result), (
-            f"the rock cluster was wiped out by one metal tag: {result}"
-        )
+        assert any(
+            g.casefold() in ROCK_FAMILY or g.casefold() == "punk" for g in result
+        ), (f"the rock cluster was wiped out by one metal tag: {result}")

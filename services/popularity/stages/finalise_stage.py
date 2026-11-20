@@ -5493,6 +5493,36 @@ def _create_genre_top_track_playlists(
         rows = _fetch_genre_playlist_rows(min_stars)
     else:
         rows = _fetch_genre_playlist_rows(min_stars, genres=only_genres)
+
+    # ⭐ THE STAR FLOOR IS RE-ASSERTED HERE, NOT ONLY IN THE SQL.
+    #
+    # Reported: "Tracks rated only 3 star are showing in top genre playlists".
+    # The query has always filtered ``COALESCE(stars, star_rating) >=
+    # min_stars``, but that predicate was the ONLY gate — so any route that did
+    # not go through it admitted a lower tier:
+    #
+    #   * ``rows_override`` (the genre/playlist resync PREVIEW) substitutes an
+    #     arbitrary row set and never touches the query;
+    #   * ``_GENRE_ROWS_CACHE`` serves rows for 120 s keyed on ``min_stars``
+    #     alone, so a rating DEMOTED to 3★ between the fetch and the rebuild was
+    #     still pooled at its old tier;
+    #   * ``COALESCE(stars, star_rating)`` lets a stale second rating column
+    #     satisfy the threshold while the displayed ``stars`` reads 3.
+    #
+    # ``stars`` on the row IS what the query selected as authoritative, so
+    # filtering on it here makes every path agree with the configuration. The
+    # Essential Collection already does exactly this (see ``rows = [row for row
+    # in rows if int(row.get("stars") or 0) >= 4]``); the genre family was the
+    # only builder whose floor lived in one place.
+    if min_stars:
+        _before_floor = len(rows)
+        rows = [r for r in rows if int(r.get("stars") or 0) >= int(min_stars)]
+        if len(rows) != _before_floor:
+            logger.info(
+                "Genre playlists: dropped below-floor track(s)",
+                min_stars=int(min_stars),
+                tracks_dropped=_before_floor - len(rows),
+            )
     if not rows:
         return 0
 
@@ -5867,6 +5897,7 @@ def _create_genre_top_track_playlists(
                     eligible_pool_size=qualifying_count,
                     capped_pool_size=len(_capped_pool),
                     pool=_capped_pool,
+                    min_stars=min_stars,
                 ),
             )
         except Exception as _verify_exc:
@@ -7685,6 +7716,7 @@ def _verify_genre_playlist(
     eligible_pool_size: int,
     capped_pool_size: int | None = None,
     pool: list[dict[str, Any]] | None = None,
+    min_stars: int = 0,
 ) -> list[str]:
     """Self-check a finished playlist against the contract it promises.
 
@@ -7757,6 +7789,24 @@ def _verify_genre_playlist(
         if bool(row.get("exclude_from_stats")):
             problems.append(f"EXCLUDED_TRACK: {row.get('title')!r}")
             break
+
+    # ⭐ A TRACK BELOW THE CONFIGURED STAR FLOOR IS A FAULT, NOT A PREFERENCE.
+    #
+    # Reported: "Tracks rated only 3 star are showing in top genre playlists".
+    # Nothing used to check membership against the floor — ``LOWER_STAR_USED``
+    # compares tiers WITHIN the already-filtered pool, so a 3★ track admitted by
+    # any route (a stale row cache, ``rows_override``, or a ``star_rating``
+    # fallback) produced no log line at all. The builder now drops those rows;
+    # this names any that still reach a playlist, so a regression is visible
+    # instead of silent.
+    if min_stars and min_stars > 1:
+        for row in winners:
+            if int(row.get("stars") or 0) < int(min_stars):
+                problems.append(
+                    f"BELOW_STAR_FLOOR: {row.get('title')!r} is "
+                    f"{int(row.get('stars') or 0)}★, floor is {int(min_stars)}★"
+                )
+                break
 
     # ⭐ EVERY TRACK MUST CARRY THE PLAYLIST'S GENRE — checked against the
     # genres the POOL row recorded, not against a key it does not have.

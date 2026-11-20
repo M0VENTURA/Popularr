@@ -306,9 +306,13 @@ class TestSeveralGenresAreWritten:
         ⚠️ Three UNRELATED genres are used on purpose. "Punk Rock" and "Rock"
         are parent/child in the vocabulary and get condensed into one, so a
         nested fixture would measure condensation rather than the limit.
+
+        ⚠️ "Punk Rock" and "Hardcore" are no longer safe to pair either: Punk
+        Rock is an ALIAS of Punk and Hardcore descends from it, so the fixture
+        legitimately condenses to two. Death Metal sits in a different family.
         """
         result = gas().aggregate_genres(
-            {"musicbrainz@track": ["Punk Rock", "Ska", "Hardcore"]},
+            {"musicbrainz@track": ["Punk Rock", "Ska", "Death Metal"]},
             max_genres=3,
             context_title="Song",
         )

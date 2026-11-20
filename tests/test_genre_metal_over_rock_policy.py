@@ -275,10 +275,15 @@ class TestCrossoversSurvive:
         assert "Alternative Metal" in result, result
         assert "Pop Punk" in result, result
 
-    def test_hardcore_punk_is_not_suppressed_by_metal(self) -> None:
+    def test_hardcore_is_not_suppressed_by_metal(self) -> None:
+        """Hardcore is punk-family. The plan names it explicitly.
+
+        ⚠️ The genre is now spelled ``Hardcore``: "hardcore punk" is an ALIAS of
+        one canonical genre, so a track can no longer carry two spellings of it.
+        """
         result = select(_pair("death metal", "hardcore punk"))
         assert "Death Metal" in result, result
-        assert "Hardcore Punk" in result, result
+        assert "Hardcore" in result, result
 
 
 # ---------------------------------------------------------------------------

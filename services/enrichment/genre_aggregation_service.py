@@ -71,6 +71,13 @@ _BUILTIN_SYNONYMS: dict[str, str] = {
     "folk": "folk rock",
     "traditional folk": "folk rock",
     "folk music": "folk rock",
+    # Punk Rock and Punk are ONE genre, and so are Hardcore Punk and Hardcore.
+    # The vocabulary maps both spellings to a single canonical id, so the legacy
+    # engine must agree or it produces two spellings of one genre.
+    "punk rock": "punk",
+    "punk-rock": "punk",
+    "hardcore punk": "hardcore",
+    "hardcore-punk": "hardcore",
 }
 
 _CHRISTMAS_KEYWORDS = [
@@ -83,7 +90,7 @@ _SPECIFIC_TO_GENERIC: dict[str, list[str]] = {
     "metalcore": ["metal", "heavy metal", "hardcore"],
     "deathcore": ["metal", "heavy metal", "hardcore", "death metal"],
     "post-punk": ["punk", "rock"],
-    "hardcore punk": ["punk"],
+    "hardcore": ["punk"],
     "electronic rock": ["electronic", "rock"],
     "indie rock": ["rock", "alternative"],
     "alternative rock": ["rock", "alternative"],
@@ -97,7 +104,7 @@ _GENERIC_ROOTS: dict[str, frozenset[str]] = {
     "metal": frozenset({"metal", "heavy metal"}),
     "folk": frozenset({"folk", "traditional folk", "folk music"}),
     "rock": frozenset({"rock", "rock music", "rock & roll"}),
-    "punk": frozenset({"punk", "punk rock"}),
+    "punk": frozenset({"punk"}),
     "goth": frozenset({"goth"}),
     "gothic": frozenset({"gothic"}),
     "industrial": frozenset({"industrial", "industrial music"}),

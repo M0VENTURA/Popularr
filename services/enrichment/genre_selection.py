@@ -352,15 +352,26 @@ DEFAULT_KEEP_TOGETHER: frozenset[tuple[str, str]] = frozenset({
 #: unless the narrower one has independent track/album evidence.
 DEFAULT_CONDITIONAL_KEEP: frozenset[tuple[str, str]] = frozenset({
     ("hard_rock", "heavy_metal"),
-    ("metalcore", "hardcore_punk"),
 })
 
 #: Pairs where only ONE may appear on a track. ``alternative_metal`` descends
 #: from ``alternative_rock``, so the ancestor is dropped UNCONDITIONALLY: a
 #: track must not carry both "Alternative Rock" and "Alternative Metal" even
 #: when the rock tag has more sources (the reported regression).
+#:
+#: ``metalcore`` + ``hardcore`` are the same case: Metalcore descends from
+#: Hardcore, so a track must not carry Hardcore beside it. Both were reported as
+#: two separate genres rather than one identity.
+#:
+#: ``rock`` + ``punk`` is here because Punk Rock is now the SAME genre as Punk
+#: (one canonical id, "punk rock" an alias). The rock umbrella was previously
+#: absorbed by "Punk Rock" naming "Rock"; with one identity that name test no
+#: longer fires, so the pair is stated explicitly rather than left to a naming
+#: coincidence. Punk is the more specific identity, so the umbrella goes.
 DEFAULT_MUTUALLY_EXCLUSIVE: frozenset[tuple[str, str]] = frozenset({
     ("alternative_metal", "alternative_rock"),
+    ("metalcore", "hardcore"),
+    ("punk", "rock"),
 })
 
 
@@ -952,7 +963,7 @@ def remove_generic_parents(
 
         Metal; Death Metal          -> Death Metal
         Rock; Alternative Rock      -> Alternative Rock
-        Punk; Hardcore Punk         -> Hardcore Punk
+        Punk; Hardcore              -> Hardcore
         Electronic; House           -> House
 
     ⚠️ DELIBERATELY UNCONDITIONAL — the ratio does NOT apply here. The generic
@@ -1124,9 +1135,10 @@ def require_source_corroboration(
       lone tag DELETE a well-supported ancestor before being dropped itself:
 
           The Offspring - Want You Bad
-              Punk Rock (MusicBrainz + ListenBrainz) removed as Pop Punk's
-              ancestor; Pop Punk (MusicBrainz only) then gated out. Neither
-              survived, so the track kept only "Alternative Rock".
+              Punk (MusicBrainz + ListenBrainz, also tagged "punk rock")
+              removed as Pop Punk's ancestor; Pop Punk (MusicBrainz only) then
+              gated out. Neither survived, so the track kept only
+              "Alternative Rock".
 
     Validating the evidence first means an uncorroborated child can no longer
     take its corroborated parent down with it.
@@ -1329,7 +1341,7 @@ def _names_parent(
 
     Used only to decide whether a CROSS-FAMILY ancestor may be absorbed. The
     vocabulary files several rock-family genres under their own branch
-    (``punk_rock`` -> punk family, ``pop_rock`` -> rock family), so a family
+    (``pop_rock`` -> rock family, ``folk_rock`` -> folk family), so a family
     comparison alone cannot tell "Pop Rock restates Pop" from "Synthpop reaches
     Pop through a secondary parent but is a different sound".
 
@@ -1458,13 +1470,15 @@ def remove_redundant_ancestors(
             # delete Pop from a track whose pop evidence (3.05) outweighed it.
             # That is a different sound and must not collapse.
             #
-            # But ``Pop Rock``, ``Folk Rock`` and ``Punk Rock`` also cross
-            # families (rock-family children of pop/folk/rock) and DO need to
-            # absorb their parent — the reported "pop should be removed by pop
-            # rock", "folk should be removed by folk rock". The distinction that
-            # separates them is the one the request itself used: the child's NAME
-            # contains the parent's name. "Pop Rock" names Pop; "Synthpop"
-            # does not.
+            # But ``Pop Rock`` and ``Folk Rock`` also cross families (rock-family
+            # children of pop/folk) and DO need to absorb their parent — the
+            # reported "pop should be removed by pop rock", "folk should be
+            # removed by folk rock". The distinction that separates them is the
+            # one the request itself used: the child's NAME contains the parent's
+            # name. "Pop Rock" names Pop; "Synthpop" does not.
+            #
+            # (``Punk Rock`` used to be the third example here. It is now the
+            # same genre as ``Punk``, so there is no pair left to absorb.)
             _cross_family = (
                 (other.family or other.genre_id)
                 != (candidate.family or candidate.genre_id)
@@ -1843,7 +1857,7 @@ def select_album_or_track_genres(
     Reversing 1 and 4 would let an isolated bad metal tag delete a
     well-supported rock cluster. Reversing 2 and 5 lets an uncorroborated child
     delete its corroborated parent before being dropped itself, leaving neither
-    (The Offspring "Want You Bad": Punk Rock gone because of a MusicBrainz-only
+    (The Offspring "Want You Bad": Punk gone because of a MusicBrainz-only
     Pop Punk that the gate then removed). Reversing 5 and 6 would let the trim
     decide which genre "wins" a redundancy conflict, so a redundant parent could
     survive by outscoring its own child.

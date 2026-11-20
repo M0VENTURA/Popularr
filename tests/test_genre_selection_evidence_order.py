@@ -93,19 +93,23 @@ class TestGateRunsBeforeCondensation:
             ],
         })
         assert "Pop Punk" not in result, result
-        assert "Punk Rock" in result, (
-            f"the corroborated parent was deleted by its gated child: {result}"
+        assert "Punk" in result, (
+            f"the corroborated punk identity was deleted altogether: {result}"
         )
 
     def test_a_corroborated_ancestor_is_not_condensed_away_by_a_lone_tag(self) -> None:
         """Minimal shape of the same defect, so a broad pipeline change cannot
-        hide it: ``punk rock`` has two voices, ``pop punk`` one."""
+        hide it: ``punk rock`` has two voices, ``pop punk`` one.
+
+        ⚠️ ``punk rock`` and ``punk`` are now ONE genre (the spelling is an
+        alias), so the survivor is reported as ``Punk``.
+        """
         result = select({
             "musicbrainz@track": ["pop punk", "punk rock", "alternative rock"],
             "listenbrainz@track": ["punk rock", "alternative rock"],
         })
         assert "Pop Punk" not in result, result
-        assert "Punk Rock" in result, result
+        assert "Punk" in result, result
 
 
 class TestGateRescueSurvivesTheFloors:
