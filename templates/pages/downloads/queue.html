@@ -7,9 +7,22 @@
   <div class="mb-4 d-flex align-items-center justify-content-between gap-2 flex-wrap">
     {% include 'components/_downloads_header.html' %}
     <div class="d-flex gap-2 flex-shrink-0 ms-auto">
-      <button type="button" class="btn btn-sm btn-outline-success flex-shrink-0" onclick="jumpToUpcomingReleases()" title="Jump to the upcoming releases list">
+      {#
+        BUG FIXED: this called onclick="jumpToUpcomingReleases()", which exists
+        ONLY as an inline <script> inside monitor.html. It was copy-pasted here
+        with the header markup, but the function definition was not — and this
+        page has no #upcomingReleasesSection to scroll to in the first place
+        (that section is only on /downloads/monitor). Clicking it on
+        /downloads/queue threw ReferenceError and did nothing.
+
+        monitor.html's own version falls back to exactly this URL when the
+        section is absent, so a plain link reproduces its only reachable
+        behaviour here without needing a copy of the function. Matches the fix
+        already applied to the rebuilt tree.
+      #}
+      <a href="/downloads/discover/upcoming" class="btn btn-sm btn-outline-success flex-shrink-0" title="View upcoming releases">
         <i class="bi bi-arrow-down-circle"></i> <span class="d-none d-sm-inline">Upcoming Releases</span>
-      </button>
+      </a>
       <a href="/downloads/banned-words" class="btn btn-sm btn-outline-danger flex-shrink-0" title="Manage banned words">
         <i class="bi bi-slash-circle"></i> <span class="d-none d-sm-inline">Banned Words</span>
       </a>

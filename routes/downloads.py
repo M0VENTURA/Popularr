@@ -10,7 +10,6 @@ Handles:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from typing import Any
 
 import structlog
@@ -33,7 +32,6 @@ from helpers.metadata_reader import read_mp3_metadata
 from services.downloads import (
     apply_musicbrainz_match,
     auto_match_folder,
-    cancel_folder,
     check_folder_duplicates,
     discover_files,
     get_release_status,
