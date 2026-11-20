@@ -105,6 +105,26 @@ def _load_rows(artist: str | None, album: str | None) -> list[dict[str, Any]]:
 _PERSIST_CHUNK = 1000
 
 
+def _db_is_recovering() -> bool:
+    """True while the engine's crash-recovery breaker is open."""
+    try:
+        from db.engine import is_db_outage_active
+
+        return bool(is_db_outage_active())
+    except Exception:
+        return False
+
+
+def _wait_for_db_recovery(timeout_seconds: float = 120.0) -> bool:
+    """Block until PostgreSQL is accepting work again (no connection attempt)."""
+    try:
+        from db.engine import wait_for_db_available
+
+        return bool(wait_for_db_available(timeout_seconds=timeout_seconds))
+    except Exception:
+        return False
+
+
 def _persist(
     changes: list[tuple[str, str]],
     on_progress: Callable[[int, int], None] | None = None,
@@ -123,20 +143,52 @@ def _persist(
         except Exception as exc:
             logger.debug("Genre resync persist progress failed", error=str(exc))
 
+    def _run_batch(chunk: list[dict[str, Any]]) -> None:
+        with db_session() as session:
+            session.execute(stmt, chunk)
+
+    def _run_batch_through_restart(chunk: list[dict[str, Any]]) -> None:
+        """Execute one chunk, riding through a PostgreSQL crash/restart.
+
+        ⚠️ A backend crash kills the connection MID-TRANSACTION ("terminating
+        connection because of crash of another server process"). The breaker in
+        ``db.engine`` knows how to wait for recovery; this loop uses it instead
+        of treating the restart as a permanent failure (or grinding through the
+        remaining chunks while the server is down).
+        """
+        for attempt in range(3):
+            try:
+                _run_batch(chunk)
+                return
+            except Exception as exc:
+                if attempt < 2 and _db_is_recovering():
+                    logger.warning(
+                        "Database restarting during genre save — waiting",
+                        attempt=attempt + 1,
+                        error=str(exc)[:200],
+                    )
+                    if _wait_for_db_recovery(120.0):
+                        continue
+                raise
+
     for start in range(0, total, _PERSIST_CHUNK):
         chunk = batch[start:start + _PERSIST_CHUNK]
         try:
-            with db_session() as session:
-                session.execute(stmt, chunk)
+            _run_batch_through_restart(chunk)
         except Exception as batch_exc:
+            if _db_is_recovering():
+                # Still recovering after the wait: abort rather than firing
+                # thousands of per-row attempts at a database that is down.
+                raise RuntimeError(
+                    "the database is restarting — retry the resync when it is back"
+                ) from batch_exc
             logger.debug(
                 "Genre resync batch update failed, falling back to per-row",
                 error=str(batch_exc),
             )
             for param in chunk:
                 try:
-                    with db_session() as session:
-                        session.execute(stmt, param)
+                    _run_batch_through_restart([param])
                 except Exception as exc:
                     logger.warning(
                         "Genre resync row update failed",

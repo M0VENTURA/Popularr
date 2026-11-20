@@ -715,6 +715,36 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
     if not _claim_apply():
         return {"ok": False, "error": "a resync is already running"}
 
+    # ⭐ ONE HEAVY DB JOB AT A TIME.
+    #
+    # This pass rewrites every genre and rebuilds every genre playlist. Running
+    # it beside a full scan doubled the database load and coincided with a
+    # PostgreSQL backend crash ("terminating connection because of crash of
+    # another server process"). The scan routes already take this cross-process
+    # lock, so taking it here makes the two mutually exclusive.
+    _scan_lock_held = False
+    release_scan_start_lock = None
+    try:
+        from services.scanning.scan_start_lock import (
+            release_scan_start_lock,
+            try_acquire_scan_start_lock,
+        )
+
+        if not try_acquire_scan_start_lock():
+            _release_apply()
+            message = (
+                "A scan is running — wait for it to finish before applying "
+                "genre changes."
+            )
+            _write_progress(
+                running=False, percent=0.0, phase="Failed",
+                status="failed", error=message,
+            )
+            return {"ok": False, "error": message}
+        _scan_lock_held = True
+    except ImportError:  # pragma: no cover - the lock module ships with the app
+        pass
+
     started = time.monotonic()
     try:
         _write_progress(
@@ -791,6 +821,19 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
         # The genre playlists are derived data: after a library-wide genre
         # rewrite every one of them is potentially stale, so this rebuilds them
         # all rather than trying to guess an affected subset.
+        # The save may itself have ridden through a database restart; do not
+        # start the playlist rebuild against a server that is still recovering.
+        try:
+            from db.engine import is_db_outage_active, wait_for_db_available
+
+            if is_db_outage_active() and not wait_for_db_available(timeout_seconds=180):
+                raise RuntimeError(
+                    "the database is still recovering — retry the resync when "
+                    "it is back"
+                )
+        except ImportError:  # pragma: no cover - db.engine is always present
+            pass
+
         _write_progress(
             running=True, percent=55.0, phase=PHASE_PLAYLISTS,
             detail="Rebuilding genre playlists…", status="running",
@@ -876,4 +919,9 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
         )
         return {"ok": False, "error": str(exc)}
     finally:
+        if _scan_lock_held and release_scan_start_lock is not None:
+            try:
+                release_scan_start_lock()
+            except Exception as exc:
+                logger.debug("Resync scan-lock release failed", error=str(exc))
         _release_apply()

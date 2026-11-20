@@ -264,6 +264,56 @@ class TestApplyOrdering:
 # 4. The diff helper
 # ---------------------------------------------------------------------------
 
+class TestTheApplyDoesNotOverlapAScan:
+    """A genre rewrite beside a full scan crashed a PostgreSQL backend.
+
+    The scan routes already take a cross-process lock; the apply must take the
+    same one so the two heavy jobs cannot run at once.
+    """
+
+    def test_it_refuses_while_a_scan_holds_the_lock(self, monkeypatch):
+        from services.scanning import scan_start_lock
+
+        monkeypatch.setattr(
+            scan_start_lock, "try_acquire_scan_start_lock", lambda: False
+        )
+        frames: list[dict] = []
+        monkeypatch.setattr(svc, "_write_progress", lambda **kw: frames.append(kw))
+
+        result = svc.apply_genre_playlist_resync()
+
+        assert result.get("ok") is False, result
+        assert "scan is running" in str(result.get("error") or "")
+        assert frames and frames[-1]["status"] == "failed"
+        # The apply claim must not stay held by the refused start.
+        assert svc._claim_apply() is True
+        svc._release_apply()
+
+    def test_it_releases_the_lock_even_when_the_job_fails(self, monkeypatch):
+        from services.scanning import scan_start_lock
+
+        released: list[bool] = []
+        monkeypatch.setattr(
+            scan_start_lock, "try_acquire_scan_start_lock", lambda: True
+        )
+        monkeypatch.setattr(
+            scan_start_lock,
+            "release_scan_start_lock",
+            lambda: released.append(True),
+        )
+        monkeypatch.setattr(svc, "_write_progress", lambda **_kw: None)
+        monkeypatch.setattr(
+            svc,
+            "_genre_changes",
+            lambda **_kw: (_ for _ in ()).throw(RuntimeError("genre step failed")),
+        )
+
+        result = svc.apply_genre_playlist_resync()
+
+        assert result.get("ok") is False, result
+        assert released == [True], "the scan lock stayed closed after a failure"
+
+
 class TestTheDiff:
     def test_gains_and_losses(self) -> None:
         d = svc._diff(["a", "b", "c"], ["b", "x"])

@@ -331,6 +331,48 @@ class TestApplyProgressAndSpeed:
         assert result["changed"] == 1, result
 
 
+class TestTheSaveSurvivesADatabaseRestart:
+    """PostgreSQL crashed mid-save; the chunk must wait and retry, not abort."""
+
+    @staticmethod
+    @contextmanager
+    def _db_that_fails_once(counter):
+        class _S:
+            def execute(self, _statement, _params=None):
+                counter["attempts"] += 1
+                if counter["attempts"] == 1:
+                    raise RuntimeError(
+                        "terminating connection because of crash of another "
+                        "server process"
+                    )
+        yield _S()
+
+    def test_the_chunk_is_retried_after_recovery(self, monkeypatch):
+        counter = {"attempts": 0}
+        monkeypatch.setattr(
+            svc, "db_session", lambda: self._db_that_fails_once(counter)
+        )
+        monkeypatch.setattr(svc, "_db_is_recovering", lambda: True)
+        monkeypatch.setattr(svc, "_wait_for_db_recovery", lambda *_a, **_k: True)
+
+        svc._persist([("1", "Punk")])
+
+        assert counter["attempts"] == 2, "the chunk was not retried after the restart"
+
+    def test_it_aborts_with_a_clear_error_if_the_database_stays_down(self, monkeypatch):
+        counter = {"attempts": 0}
+        monkeypatch.setattr(
+            svc, "db_session", lambda: self._db_that_fails_once(counter)
+        )
+        monkeypatch.setattr(svc, "_db_is_recovering", lambda: True)
+        monkeypatch.setattr(svc, "_wait_for_db_recovery", lambda *_a, **_k: False)
+
+        with pytest.raises(RuntimeError) as caught:
+            svc._persist([("1", "Punk")])
+
+        assert "database is restarting" in str(caught.value)
+
+
 class TestStaleProgressRows:
     """A dead daemon thread must not block retries forever."""
 
