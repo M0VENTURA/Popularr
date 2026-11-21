@@ -1,4 +1,4 @@
-﻿"""File tag writes run in the background, off the scan path.
+"""File tag writes run in the background, off the scan path.
 
 REPORTED
 
