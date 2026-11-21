@@ -315,6 +315,124 @@ def _refresh_generated_playlists(artist: str | None = None) -> dict[str, Any]:
     return stats
 
 
+def _apply_velocity_adjustments(
+    groups: dict[tuple[str, str], list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Re-weight each row's score by age-adjusted velocity + collision damping.
+
+    ⭐ WHY THIS RUNS HERE, ON THE WHOLE CATALOGUE.
+
+    ``calculate_combined_popularity_score`` only ever sees ONE track's counts, so
+    it cannot answer either question: velocity is only meaningful relative to the
+    artist's fastest track, and a ListenBrainz collision is only visible by
+    comparing two DIFFERENT songs' ``(listens, score)`` pairs. Both need the
+    artist's entire catalogue, which is exactly what the resync has loaded.
+
+    ``effective_year`` is the EARLIEST year any non-compilation, non-holiday
+    album of that artist gives the song — so a greatest-hits reissue cannot make
+    a 1994 single look new and hand it a velocity its recording never earned.
+
+    Returns a small report so a preview can say what changed. A no-op when
+    ``popularity.velocity`` is off, which is the default: an existing
+    installation's ratings stay exactly as they were until it is switched on.
+    """
+    from services.popularity.popularity_config import get_velocity_scoring_config
+    from services.popularity.popularity_math import (
+        age_adjusted_velocity,
+        collision_damping,
+        find_collision_keys,
+        normalise_velocity,
+    )
+
+    cfg = get_velocity_scoring_config()
+    # ``enabled`` gates the whole pass; ``weight`` only decides how much of the
+    # score the velocity term carries. Collision dampening is useful on its own
+    # (weight 0), so it must not be switched off by a zero velocity weight.
+    if not cfg.get("enabled"):
+        return {"enabled": False, "artists": 0, "tracks": 0, "collisions": 0}
+
+    weight = float(cfg["weight"])
+    min_listens = int(cfg["collision_min_listens"])
+    damping = float(cfg["collision_damping"])
+    current_year = time.localtime().tm_year
+
+    # One pass to build each artist's catalogue, keyed the same way the rating
+    # path keys an artist (album_artist when present).
+    by_artist: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for (group_artist, _group_album), rows in groups.items():
+        for row in rows:
+            by_artist[group_artist].append(row)
+
+    tracks = 0
+    collisions = 0
+    for artist_rows in by_artist.values():
+        # ── effective year: the EARLIEST studio release of the song ──────────
+        earliest: dict[str, int] = {}
+        for row in artist_rows:
+            title_key = str(row.get("title") or "").strip().casefold()
+            if not title_key:
+                continue
+            try:
+                year = int(row.get("release_year") or row.get("year") or 0)
+            except (TypeError, ValueError):
+                year = 0
+            if year <= 0 or year > current_year + 1:
+                continue
+            # A compilation must not define the song's age.
+            if int(row.get("is_compilation") or 0):
+                continue
+            if title_key not in earliest or year < earliest[title_key]:
+                earliest[title_key] = year
+
+        # ── velocity, normalised against this artist's fastest track ─────────
+        velocities: dict[int, float] = {}
+        for index, row in enumerate(artist_rows):
+            title_key = str(row.get("title") or "").strip().casefold()
+            effective_year = earliest.get(title_key) or row.get("year")
+            velocities[index] = age_adjusted_velocity(
+                row.get("listenbrainz_listens"),
+                effective_year,
+                current_year=current_year,
+            )
+        max_velocity = max(velocities.values(), default=0.0)
+
+        # ── collision pairs shared by two DIFFERENT songs ────────────────────
+        collision_keys = find_collision_keys(artist_rows, min_listens=min_listens)
+
+        for index, row in enumerate(artist_rows):
+            base = float(
+                row.get("popularity_score") or row.get("final_score") or 0
+            )
+            if base <= 0:
+                continue
+            vel_norm = normalise_velocity(velocities[index], max_velocity)
+            adjusted = (1.0 - weight) * base + weight * vel_norm
+            multiplier = collision_damping(
+                row.get("listenbrainz_listens"),
+                row.get("listenbrainz_score"),
+                collision_keys,
+                damping=damping,
+            )
+            if multiplier < 1.0:
+                collisions += 1
+            adjusted *= multiplier
+            adjusted = max(0.0, adjusted)
+            # Both keys: the rating path reads ``popularity_score`` first and
+            # falls back to ``final_score``, and ``_load_album_groups`` fills
+            # them from the same stored columns.
+            row["popularity_score"] = adjusted
+            row["final_score"] = adjusted
+            tracks += 1
+
+    return {
+        "enabled": True,
+        "artists": len(by_artist),
+        "tracks": tracks,
+        "collisions": collisions,
+        "weight": weight,
+    }
+
+
 def resync_star_ratings(
     *,
     artist: str | None = None,
@@ -361,6 +479,11 @@ def resync_star_ratings(
 
     groups = _load_album_groups(artist=artist, album=album, limit_albums=limit_albums)
     total_albums = len(groups)
+
+    # ⭐ AGE-ADJUSTED VELOCITY + COLLISION DAMPENING, applied to the loaded rows
+    # BEFORE anything is rated. This is the only place the artist's whole
+    # catalogue is in memory at once, and both terms need that breadth.
+    velocity_report = _apply_velocity_adjustments(groups)
 
     # Artist catalogue scores — the album curve's catalogue cap and the
     # artist-eligibility gate both read this, so it must be the WHOLE artist
@@ -470,6 +593,7 @@ def resync_star_ratings(
         "write_file_tags": bool(write_file_tags),
         "sync_navidrome": bool(sync_navidrome),
         "playlists": playlists,
+        "velocity": velocity_report,
     }
 
 

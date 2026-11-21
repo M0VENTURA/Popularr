@@ -1056,8 +1056,18 @@ def calculate_combined_popularity_score(
     live_weight_penalty: float = 0.5,
     instrumental_weight_penalty: float = 0.8,
     age_score_cap: float = 0.0,
+    velocity_score: float = 0.0,
+    velocity_weight: float = 0.0,
+    collision_multiplier: float = 1.0,
 ) -> dict[str, float]:
-    """Blend Last.fm + ListenBrainz + age into one weighted popularity score."""
+    """Blend Last.fm + ListenBrainz + age into one weighted popularity score.
+
+    ``velocity_score`` / ``velocity_weight`` add an optional AGE-ADJUSTED term
+    (listens per year, normalised 0-100 against the artist's fastest track), and
+    ``collision_multiplier`` damps a track whose ListenBrainz pair is shared with
+    a different song. Both default to a no-op, so a caller that does not supply
+    them gets exactly the previous behaviour.
+    """
     lastfm_log = calculate_lastfm_popularity_score(lastfm_listeners, 0)
     lb_log = calculate_listenbrainz_popularity_score(listenbrainz_listens)
 
@@ -1182,6 +1192,19 @@ def calculate_combined_popularity_score(
         active_scores.append(age_score)
         active_weights.append(_live_age_w)
 
+    # ⭐ AGE-ADJUSTED VELOCITY (opt-in).
+    #
+    # A raw listen count rewards AGE: a 1994 single and a 2024 single with the
+    # same listeners are not equally popular today. ``velocity_score`` is
+    # listens-per-year normalised against the artist's fastest track, so adding
+    # it re-weights the blend toward what is being listened to NOW. The weight is
+    # withheld from the other components proportionally, so the result stays on
+    # the same 0-100 scale rather than being inflated by the extra term.
+    _vel_w = max(0.0, min(1.0, float(velocity_weight or 0.0)))
+    if _vel_w > 0 and float(velocity_score or 0) > 0:
+        active_scores.append(float(velocity_score))
+        active_weights.append(_vel_w)
+
     if active_scores and active_weights:
         total_weight = sum(active_weights)
         combined = sum(s * w for s, w in zip(active_scores, active_weights)) / total_weight
@@ -1213,6 +1236,15 @@ def calculate_combined_popularity_score(
 
     if has_metadata and 0.0 < combined < metadata_score_floor:
         combined = metadata_score_floor
+
+    # ⭐ COLLISION DAMPENING (opt-in, 1.0 by default).
+    #
+    # Applied AFTER the metadata floor: the floor exists so a track with metadata
+    # but no source evidence is not scored as unlistened, and it must not undo a
+    # damping that says "these two songs cannot both have these numbers".
+    _collision = float(collision_multiplier if collision_multiplier is not None else 1.0)
+    if combined > 0 and 0.0 < _collision < 1.0:
+        combined *= _collision
 
     if is_single and combined > 0:
         combined *= 1.0 + (single_boost - 1.0) * single_boost_fade(combined)
@@ -1254,6 +1286,141 @@ def is_source_mismatch(lastfm_listeners: int, lb_listens: int) -> bool:
 def is_lastfm_unreliable(lastfm_listeners: int, lb_listens: int) -> bool:
     """Flag Last.fm as unreliable when LF is very low but LB is strong."""
     return int(lastfm_listeners or 0) <= 20 and int(lb_listens or 0) >= 75
+
+
+# ---------------------------------------------------------------------------
+# Age-adjusted velocity + ListenBrainz collision dampening
+# ---------------------------------------------------------------------------
+#
+# Both answer a question the blend above cannot, because it only ever looks at
+# ONE track's counts:
+#
+# * a raw listen count rewards AGE. A 1994 single and a 2024 single with the
+#   same listeners are not equally popular today -- the older one accumulated
+#   its total over three more decades.
+# * two DIFFERENT songs sharing an identical (listens, score) pair above 50k is
+#   not a coincidence. ``listenbrainz_score`` is a pure function of the listen
+#   count, so an exact tie means the same recording was counted twice (a
+#   recording/MBID resolution miss). The reported examples were "Jealous"
+#   inheriting "Ironic"'s numbers and "Mama Said" tying "The Memory Remains",
+#   which let an unmatched duplicate outrank a genuine hit.
+
+#: A listen count below this cannot be a collision: small counts tie by luck.
+VELOCITY_COLLISION_MIN_LISTENS = 50_000
+
+#: Multiplier applied to a track whose (listens, score) pair is shared.
+VELOCITY_COLLISION_DAMPING = 0.88
+
+#: The age denominator is floored so a track released this year cannot divide by
+#: ~0 and manufacture an enormous "velocity" out of a modest play count.
+VELOCITY_MIN_AGE_YEARS = 1.5
+
+
+def age_adjusted_velocity(
+    listen_count: int | float | None,
+    effective_year: int | float | None,
+    *,
+    current_year: int,
+    min_age_years: float = VELOCITY_MIN_AGE_YEARS,
+) -> float:
+    """Listens per year of the track's life — the recency-neutral popularity.
+
+    ``effective_year`` is the EARLIEST release of this song (the studio original,
+    not a later compilation), so a greatest-hits reissue cannot claim to be new
+    and inherit a velocity its recording never earned.
+
+    Returns 0.0 when there is no listen count or no usable year — an unknown age
+    is not evidence of velocity.
+    """
+    try:
+        listens = float(listen_count or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if listens <= 0:
+        return 0.0
+    try:
+        year = int(effective_year or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if year <= 0 or int(current_year or 0) <= 0:
+        return 0.0
+    age = float(current_year) - float(year) + 1.0
+    return listens / max(float(min_age_years), age)
+
+
+def normalise_velocity(
+    velocity: float,
+    artist_max_velocity: float,
+) -> float:
+    """One track's velocity on a 0-100 scale, against the artist's fastest.
+
+    ⚠️ LOG-SCALED, because velocity is unbounded: a viral single can be three
+    orders of magnitude above the rest of its catalogue, and a linear ratio
+    would push every other track to ~0 and reproduce the "one hit, nothing else"
+    problem the blend already suffers from.
+    """
+    try:
+        v = float(velocity or 0)
+        top = float(artist_max_velocity or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v <= 0 or top <= 0:
+        return 0.0
+    return max(0.0, min(100.0, 100.0 * math.log1p(v) / math.log1p(top)))
+
+
+def find_collision_keys(
+    rows: list[dict[str, Any]],
+    *,
+    min_listens: int = VELOCITY_COLLISION_MIN_LISTENS,
+) -> set[tuple[float, float]]:
+    """The ``(listens, score)`` pairs shared by MORE THAN ONE song.
+
+    ``rows`` are one artist's tracks, each carrying ``listenbrainz_listens``,
+    ``listenbrainz_score`` and a title field (``title`` or ``norm_title``).
+    Distinct titles are what matters: the same song appearing on an album and a
+    compilation is NOT a collision, but two different songs on identical numbers
+    always are.
+    """
+    by_pair: dict[tuple[float, float], set[str]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            listens = float(row.get("listenbrainz_listens") or 0)
+            score = float(row.get("listenbrainz_score") or 0)
+        except (TypeError, ValueError):
+            continue
+        if listens < float(min_listens) or score <= 0:
+            continue
+        title = str(
+            row.get("norm_title") or row.get("title") or ""
+        ).strip().casefold()
+        if not title:
+            continue
+        by_pair.setdefault((listens, score), set()).add(title)
+    return {pair for pair, titles in by_pair.items() if len(titles) > 1}
+
+
+def collision_damping(
+    listen_count: int | float | None,
+    listenbrainz_score: int | float | None,
+    collision_keys: set[tuple[float, float]] | None,
+    *,
+    damping: float = VELOCITY_COLLISION_DAMPING,
+) -> float:
+    """The multiplier to apply for a shared ``(listens, score)`` pair.
+
+    Returns 1.0 when the track is not part of a collision, so a caller can
+    multiply unconditionally.
+    """
+    if not collision_keys:
+        return 1.0
+    try:
+        pair = (float(listen_count or 0), float(listenbrainz_score or 0))
+    except (TypeError, ValueError):
+        return 1.0
+    return float(damping) if pair in collision_keys else 1.0
 
 
 def adjust_weights(

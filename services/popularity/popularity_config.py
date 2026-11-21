@@ -107,6 +107,51 @@ def get_instrumental_weight_penalty(config: dict | None = None) -> float:
         return 0.8
 
 
+def get_velocity_scoring_config(config: dict | None = None) -> dict[str, float]:
+    """Age-adjusted velocity + ListenBrainz collision dampening.
+
+    Both default OFF so an existing installation's ratings are unchanged until
+    the operator turns them on; the scan's own preview is what validates the
+    numbers before enabling them.
+
+    Keys (all under ``popularity.velocity``):
+
+    * ``enabled`` — run the pass at all (velocity blend AND collision damping);
+    * ``weight`` — how much of the score the velocity term carries. ``0``
+      (the default) leaves the blended score alone while still applying the
+      collision damping, which is useful on its own;
+    * ``collision_damping`` — the multiplier applied to a track whose
+      ListenBrainz pair is shared with a different song (default 0.88);
+    * ``collision_min_listens`` — the count below which a tie is coincidence
+      rather than an MBID collision (default 50,000).
+    """
+    cfg = config if isinstance(config, dict) else get_config()
+    block = {}
+    if isinstance(cfg, dict):
+        popularity = cfg.get("popularity")
+        if isinstance(popularity, dict):
+            candidate = popularity.get("velocity")
+            if isinstance(candidate, dict):
+                block = candidate
+
+    def _num(key: str, default: float) -> float:
+        try:
+            return float(block.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    weight = max(0.0, min(1.0, _num("weight", 0.0)))
+    return {
+        # ⚠️ EXPLICIT, not implied by the weight. Setting a weight enables the
+        # pass, but a weight of 0 must NOT silently switch the collision damping
+        # off — the two terms are independently useful.
+        "enabled": bool(block.get("enabled", "weight" in block)),
+        "weight": weight,
+        "collision_damping": max(0.0, min(1.0, _num("collision_damping", 0.88))),
+        "collision_min_listens": max(0.0, _num("collision_min_listens", 50_000)),
+    }
+
+
 def get_exclude_from_median_below_seconds(config: dict | None = None) -> float:
     """Return the minimum track duration (seconds) to count in stats.
 

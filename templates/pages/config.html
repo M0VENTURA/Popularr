@@ -1856,6 +1856,40 @@
           <small class="form-text text-muted">Used by the popularity scan pipeline. Default: <strong>0.10</strong></small>
         </div>
       </div>
+      {% set vel = config.get('popularity', {}).get('velocity', {}) %}
+      <h6 class="mb-3 mt-4">Age-Adjusted Popularity (<code>popularity.velocity.*</code>)</h6>
+      <small class="text-muted d-block mb-3">
+        A raw listen count rewards <strong>age</strong>: a 1994 single and a 2024 single with the
+        same listeners are not equally popular today. These two terms answer that, plus the
+        ListenBrainz case where two different songs report an identical listen count and score
+        (a recording/MBID collision). Both are applied by the star resync, which is the only pass
+        that holds an artist's whole catalogue at once. <strong>Off by default</strong> — enabling
+        them re-rates the library, so preview the resync first.
+      </small>
+      <div class="row g-3">
+        <div class="col-12 col-md-3">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="pop_velocity_enabled" {% if vel.get('enabled', False) %}checked{% endif %}>
+            <label class="form-check-label" for="pop_velocity_enabled">Enable</label>
+            <small class="d-block text-muted">Turn on velocity scoring and collision dampening.</small>
+          </div>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label form-label-sm" for="pop_velocity_weight">Velocity Weight</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="pop_velocity_weight" placeholder="0.00" value="{{ vel.get('weight', 0.0) }}">
+          <small class="form-text text-muted">Share of the score the listens-per-year term carries. <strong>0</strong> leaves the blend alone while still applying collision dampening. Default: <strong>0.00</strong></small>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label form-label-sm" for="pop_velocity_collision_damping">Collision Damping</label>
+          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="pop_velocity_collision_damping" placeholder="0.88" value="{{ vel.get('collision_damping', 0.88) }}">
+          <small class="form-text text-muted">Multiplier for a track whose ListenBrainz (listens, score) pair is shared with a <em>different</em> song. Default: <strong>0.88</strong></small>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label form-label-sm" for="pop_velocity_collision_min_listens">Collision Floor</label>
+          <input type="number" step="1000" min="0" class="form-control form-control-sm" id="pop_velocity_collision_min_listens" placeholder="50000" value="{{ vel.get('collision_min_listens', 50000) }}">
+          <small class="form-text text-muted">Below this count a tie is coincidence, not a collision. Default: <strong>50000</strong></small>
+        </div>
+      </div>
       <h6 class="mb-3 mt-4">Scan Parallelism &amp; Timeouts (<code>popularity.*</code>)</h6>
       <div class="row g-3">
         <div class="col-12 col-sm-6 col-lg-4">

@@ -735,6 +735,18 @@ function buildConfigObject() {
           listenbrainz: parseFloat(getValue('pop_weight_listenbrainz', '0.35')) || 0.35,
           age: parseFloat(getValue('pop_weight_age', '0.10')) || 0.10
         },
+        velocity: {
+          enabled: getChecked('pop_velocity_enabled', false),
+          weight: parseFloat(getValue('pop_velocity_weight', '0')) || 0,
+          collision_damping: (() => {
+            const raw = parseFloat(getValue('pop_velocity_collision_damping', '0.88'));
+            return Number.isFinite(raw) ? raw : 0.88;
+          })(),
+          collision_min_listens: (() => {
+            const raw = parseInt(getValue('pop_velocity_collision_min_listens', '50000'), 10);
+            return Number.isFinite(raw) ? Math.max(0, raw) : 50000;
+          })()
+        },
         track_timeout_seconds: (() => {
           const raw = parseInt(getValue('pop_track_timeout_seconds', '30'), 10);
           return Number.isFinite(raw) ? Math.max(0, raw) : 30;
