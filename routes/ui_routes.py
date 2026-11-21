@@ -322,6 +322,7 @@ async def setup() -> Any:
         "min_bitrate": dl_quality.get("min_bitrate", 192),
         "allowed_formats": allowed_formats,
         "write_tags_to_file": tagging_cfg.get("write_tags_to_file", True),
+        "defer_file_writes": bool(tagging_cfg.get("defer_file_writes", True)),
         "ratings_only": bool(tag_opts.get("ratings_only", False)),
         "fill_missing_only": bool(tag_opts.get("fill_missing_only", False)),
         "sync_album_tags_on_scan": bool(tagging_cfg.get("sync_album_tags_on_scan", True)),

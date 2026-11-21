@@ -549,12 +549,22 @@ def _parse_genre_input(raw: Any) -> list[str]:
                 except Exception:
                     pass
 
-            # Split strings on delimiters and ruthlessly strip ALL brackets/quotes
-            parts = []
-            for g in re.split(r"[,;/\\]+", stripped):
-                clean_g = re.sub(r"[\[\]{}'\"“”]+", "", g).strip()
-                if clean_g and clean_g.lower() not in ("null", "none"):
-                    parts.append(clean_g)
+            # ⚠️ THE SPLIT GOES THROUGH ``genre_normalization.split_genre_values``.
+            #
+            # This used to split on ``[,;/\\]+`` only, so a pipe-delimited
+            # provider value ("Gothic Metal | Symphonic Metal | Power Metal")
+            # stayed ONE token and named a single compound playlist — one of the
+            # spelling variants the collection export called out. The shared
+            # splitter also knows that ``death/doom``, ``drum & bass`` and
+            # ``r&b`` are single genres, which a blind split destroyed.
+            from services.enrichment.genre_normalization import (
+                split_genre_values,
+            )
+
+            parts = [
+                g for g in split_genre_values(stripped)
+                if g and g.lower() not in ("null", "none")
+            ]
             return parts
 
         return []

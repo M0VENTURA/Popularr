@@ -1437,6 +1437,13 @@
         </div>
         <div class="col-12 col-md-4">
           <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="tagging_defer_writes" {% if tagging_cfg.get('defer_file_writes', True) %}checked{% endif %}>
+            <label class="form-check-label" for="tagging_defer_writes">Write File Tags in the Background</label>
+            <small class="d-block text-muted">Queue each album's file tag writes onto a small worker pool instead of blocking the scan on them. A tag write is a read-modify-write of the whole audio file (3-4 passes on a network mount), and doing it inline dominated the scan's wall clock. The database genres are written either way — the playlists read those — so the scan no longer waits for the disk. Turn off to write inline again. Default: <strong>on</strong>.</small>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" id="tagging_skip_unchanged" {% if tagging_cfg.get('skip_unchanged_ratings', True) %}checked{% endif %}>
             <label class="form-check-label" for="tagging_skip_unchanged">Skip Unchanged Ratings</label>
             <small class="d-block text-muted">When a scan assigns the same star rating a track already has, don't rewrite the audio file or re-sync that rating to Navidrome. This is the biggest disk-write source during scans — each rating save rewrites the entire file. Turn off to always rewrite (e.g. to repair tags after an external tagger). Default: <strong>on</strong>.</small>

@@ -153,6 +153,44 @@ def _no_real_navidrome_rescan(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _tag_writes_inline_by_default(request, monkeypatch):
+    """Unit tests exercise the INLINE file-tag path unless they opt in.
+
+    ``tagging.defer_file_writes`` defaults ON in production, which queues the
+    per-file writes onto a daemon thread. A test that asserts what reached the
+    files would then race that thread (and usually assert against nothing).
+
+    ⚠️ A test that requests the ``deferred_tag_writes`` fixture opts OUT: it
+    wants the queue, so this fixture must not overwrite its patch. (pytest
+    applies autouse fixtures before the test's own, so re-patching here would
+    silently win — hence the explicit request check.)
+    """
+    from services.metadata import tag_write_queue as _queue
+
+    _queue.reset_tag_write_state()
+
+    if "deferred_tag_writes" not in request.fixturenames:
+        from services.metadata import album_tag_sync_service as _svc
+
+        monkeypatch.setattr(_svc, "_defer_file_writes", lambda: False)
+
+    yield
+
+    _queue.wait_for_tag_writes(timeout=5.0)
+    _queue.reset_tag_write_state()
+
+
+@pytest.fixture
+def deferred_tag_writes():
+    """Marker fixture: this test wants the BACKGROUND tag-write path.
+
+    The consumer patches ``album_tag_sync_service._defer_file_writes`` itself;
+    requesting this name is what tells the autouse inline fixture to stand down.
+    """
+    return True
+
+
+@pytest.fixture(autouse=True)
 def _reset_host_timeout_cooldowns():
     """No host may still be "cooling down" from the previous test.
 

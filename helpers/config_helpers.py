@@ -1274,6 +1274,8 @@ def get_tagging_config() -> dict[str, Any]:
     ```yaml
     tagging:
       write_tags_to_file: true        # master toggle: touch audio files at all
+      defer_file_writes: true         # queue the per-file tag writes so a scan
+                                      # does not block on disk I/O
       skip_unchanged_ratings: true    # skip rating tag writes + Navidrome syncs
                                       # when the scan's star rating is unchanged
                                       # (biggest disk-write source in scans)
@@ -1283,6 +1285,11 @@ def get_tagging_config() -> dict[str, Any]:
         embed_lyrics: false           # write lyrics to USLT/SYLT frames
       preserve_file_timestamps: true  # restore mtime/atime after a write
     ```
+
+    ``defer_file_writes`` exists because a tag write is a read-modify-write of a
+    whole audio file (3-4 file passes on a network mount). Run inline, that disk
+    I/O dominated the scan's wall clock and made a scan slow enough to block
+    another scan from starting. Off restores the previous synchronous behaviour.
 
     Defaults preserve the legacy behaviour (writes enabled, timestamps
     preserved); the config page exposes all of them.
@@ -1300,6 +1307,7 @@ def get_tagging_config() -> dict[str, Any]:
         write_enabled = True
     return {
         "write_tags_to_file": write_enabled,
+        "defer_file_writes": bool(tagging.get("defer_file_writes", True)),
         "skip_unchanged_ratings": bool(tagging.get("skip_unchanged_ratings", True)),
         "sync_album_tags_on_scan": bool(tagging.get("sync_album_tags_on_scan", True)),
         "ratings_only": bool(opts.get("ratings_only", False)),

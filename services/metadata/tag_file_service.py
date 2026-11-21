@@ -92,11 +92,15 @@ except Exception:
 # SHARED HELPERS
 # =============================================================================
 
-#: Every genre separator the app uses: commas, semicolons, slashes AND
+#: Every genre separator the app uses: commas, semicolons, slashes, pipes AND
 #: backslashes (Navidrome / ID3v2.3 join genres with ``\\`` — e.g.
 #: ``metal\\nu metal\\rock``). One pattern for every writer so ID3, Vorbis and
 #: MP4 can never split the same value differently.
-_GENRE_SPLIT_RE = re.compile(r"[,;/\\]+")
+#:
+#: ⚠️ ``|`` was missing. A pipe-delimited provider value stayed ONE genre, which
+#: Navidrome then rendered as a single broken folder named after the whole
+#: string. ``genre_normalization`` splits on it, so the writers must agree.
+_GENRE_SPLIT_RE = re.compile(r"[,;|/\\]+")
 
 
 def _split_genres(value: Any) -> list[str]:

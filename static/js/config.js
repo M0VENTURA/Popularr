@@ -767,6 +767,7 @@ function buildConfigObject() {
       (window.pageConfig && window.pageConfig.tagging) || {},
       {
         write_tags_to_file: getChecked('tagging_write_enabled', true),
+        defer_file_writes: getChecked('tagging_defer_writes', true),
         skip_unchanged_ratings: getChecked('tagging_skip_unchanged', true),
         sync_album_tags_on_scan: getChecked('tagging_sync_album_scan', true),
         write_options: {

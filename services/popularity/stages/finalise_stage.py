@@ -4915,34 +4915,6 @@ def _resolve_playlist_genres(
     return [], False
 
 
-def _genre_playlist_track_genres(
-    row: dict[str, Any],
-    *,
-    max_genres: int = 3,
-) -> list[str]:
-    raw = row.get("genres")
-    if not raw:
-        return []
-
-    if isinstance(raw, list):
-        return [str(g).strip() for g in raw if str(g).strip()][:max_genres]
-
-    raw_str = str(raw).strip()
-    if not raw_str or raw_str.lower() in ("null", "none", "[]", "{}"):
-        return []
-
-    if raw_str.startswith("["):
-        try:
-            parsed = json.loads(raw_str)
-            if isinstance(parsed, list):
-                return [str(g).strip() for g in parsed if str(g).strip()][:max_genres]
-        except Exception:
-            pass
-
-    genres = [g.strip() for g in re.split(r"[,;/\\]+", raw_str) if g.strip()]
-    return genres[:max_genres]
-
-
 # ---------------------------------------------------------------------------
 # Genre-playlist source rows (full-library query, cached briefly)
 # ---------------------------------------------------------------------------

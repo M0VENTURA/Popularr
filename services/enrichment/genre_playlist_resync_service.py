@@ -715,35 +715,18 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
     if not _claim_apply():
         return {"ok": False, "error": "a resync is already running"}
 
-    # ⭐ ONE HEAVY DB JOB AT A TIME.
+    # ⭐ NO SCAN-START LOCK.
     #
-    # This pass rewrites every genre and rebuilds every genre playlist. Running
-    # it beside a full scan doubled the database load and coincided with a
-    # PostgreSQL backend crash ("terminating connection because of crash of
-    # another server process"). The scan routes already take this cross-process
-    # lock, so taking it here makes the two mutually exclusive.
-    _scan_lock_held = False
-    release_scan_start_lock = None
-    try:
-        from services.scanning.scan_start_lock import (
-            release_scan_start_lock,
-            try_acquire_scan_start_lock,
-        )
-
-        if not try_acquire_scan_start_lock():
-            _release_apply()
-            message = (
-                "A scan is running — wait for it to finish before applying "
-                "genre changes."
-            )
-            _write_progress(
-                running=False, percent=0.0, phase="Failed",
-                status="failed", error=message,
-            )
-            return {"ok": False, "error": message}
-        _scan_lock_held = True
-    except ImportError:  # pragma: no cover - the lock module ships with the app
-        pass
+    # This pass used to take ``try_acquire_scan_start_lock()`` for its whole run,
+    # which made it mutually exclusive with a scan: while genres were being
+    # rewritten every scan start was refused with "A scan is running" — the
+    # reported "writing genres to files is stopping another scan from running".
+    #
+    # The lock exists to stop two SCANS colliding cross-process. A genre resync
+    # is not a scan: its DB writes are chunked single-row UPDATEs and its file
+    # writes go through ``tag_file_service._path_lock``, so it is safe beside one.
+    # What must stay serialised is two APPLIES, and ``_claim_apply`` above owns
+    # that.
 
     started = time.monotonic()
     try:
@@ -919,9 +902,4 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
         )
         return {"ok": False, "error": str(exc)}
     finally:
-        if _scan_lock_held and release_scan_start_lock is not None:
-            try:
-                release_scan_start_lock()
-            except Exception as exc:
-                logger.debug("Resync scan-lock release failed", error=str(exc))
         _release_apply()

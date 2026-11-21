@@ -4530,7 +4530,20 @@ def run_scan(
                             ),
                             previous_genres=_previous_genres,
                         )
-                        if _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
+                        if _tag_sync and _tag_sync.get("deferred"):
+                            # ⭐ THE FILE WRITES WERE QUEUED. The DB genres are
+                            # already stored (the playlists read them), so the
+                            # scan does not wait on the per-file read-modify-
+                            # write — that is what made a scan slow enough to
+                            # block another scan from starting. The queue owns
+                            # the rescan.
+                            logger.debug(
+                                "[ALBUM_TAG_SYNC] file tag writes queued in the background",
+                                artist=artist,
+                                album=album,
+                                queued_tracks=_tag_sync.get("tracks", 0),
+                            )
+                        elif _tag_sync and (_tag_sync.get("files_updated") or _tag_sync.get("corrections_recorded")):
                             _album_report["metadata_corrections"] = int(_tag_sync.get("corrections_recorded") or 0)
                             try:
                                 if _scan_log and int(_tag_sync.get("files_updated") or 0) > 0:

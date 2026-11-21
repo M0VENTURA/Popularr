@@ -176,6 +176,25 @@ async def api_album_file_sync_drain() -> Any:
     return jsonify({"drained": drained, **get_album_file_sync_state()})
 
 
+@maintenance_bp.route("/api/maintenance/tag-write-queue", methods=["GET"])
+def api_tag_write_queue_status() -> Any:
+    """What background FILE tag writes are running, and what just finished.
+
+    The scan queues each album's file writes instead of blocking on them (see
+    ``services.metadata.tag_write_queue``), so a failure there is invisible on
+    the dashboard — the scan has already moved on and the row was committed.
+    This exposes the queue's ``recent`` tail so a rejected or failed write is
+    still discoverable.
+    """
+    from services.metadata.tag_write_queue import get_tag_write_state
+
+    try:
+        return jsonify(get_tag_write_state())
+    except Exception as exc:
+        logger.error("Tag write queue status failed", error=str(exc), exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
 # =============================================================================
 # GENRE VOCABULARY — the config-volume JSON the Config page edits
 # =============================================================================

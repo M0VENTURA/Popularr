@@ -265,43 +265,37 @@ class TestApplyOrdering:
 # ---------------------------------------------------------------------------
 
 class TestTheApplyDoesNotOverlapAScan:
-    """A genre rewrite beside a full scan crashed a PostgreSQL backend.
+    """The apply must NOT take the scan-start lock.
 
-    The scan routes already take a cross-process lock; the apply must take the
-    same one so the two heavy jobs cannot run at once.
+    It used to, for its whole run, which made every scan start during a genre
+    write fail with "A scan is running" — the reported "writing genres to files
+    is stopping another scan from running". The lock exists to stop two SCANS
+    colliding cross-process; a resync is not a scan (its DB writes are chunked
+    single-row UPDATEs and its file writes take ``tag_file_service._path_lock``).
+    What must stay serialised is two APPLIES, and ``_claim_apply`` owns that.
     """
 
-    def test_it_refuses_while_a_scan_holds_the_lock(self, monkeypatch):
-        from services.scanning import scan_start_lock
-
-        monkeypatch.setattr(
-            scan_start_lock, "try_acquire_scan_start_lock", lambda: False
+    def test_it_never_takes_the_scan_start_lock(self) -> None:
+        src = inspect.getsource(svc.apply_genre_playlist_resync)
+        # Strip comments so the docblock explaining the removal is not read as
+        # an actual acquisition.
+        code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+        assert "try_acquire_scan_start_lock" not in code, (
+            "the apply acquired the scan-start lock, which refuses every scan "
+            "start for the whole duration of a genre write"
         )
-        frames: list[dict] = []
-        monkeypatch.setattr(svc, "_write_progress", lambda **kw: frames.append(kw))
 
-        result = svc.apply_genre_playlist_resync()
-
-        assert result.get("ok") is False, result
-        assert "scan is running" in str(result.get("error") or "")
-        assert frames and frames[-1]["status"] == "failed"
-        # The apply claim must not stay held by the refused start.
+    def test_two_applies_are_still_serialised(self) -> None:
+        """The lock that MATTERS for this job is its own claim."""
         assert svc._claim_apply() is True
-        svc._release_apply()
+        try:
+            result = svc.apply_genre_playlist_resync()
+            assert result.get("ok") is False
+            assert "already running" in str(result.get("error") or "")
+        finally:
+            svc._release_apply()
 
-    def test_it_releases_the_lock_even_when_the_job_fails(self, monkeypatch):
-        from services.scanning import scan_start_lock
-
-        released: list[bool] = []
-        monkeypatch.setattr(
-            scan_start_lock, "try_acquire_scan_start_lock", lambda: True
-        )
-        monkeypatch.setattr(
-            scan_start_lock,
-            "release_scan_start_lock",
-            lambda: released.append(True),
-        )
-        monkeypatch.setattr(svc, "_write_progress", lambda **_kw: None)
+    def test_the_claim_is_released_when_the_job_fails(self, monkeypatch) -> None:
         monkeypatch.setattr(
             svc,
             "_genre_changes",
@@ -311,7 +305,8 @@ class TestTheApplyDoesNotOverlapAScan:
         result = svc.apply_genre_playlist_resync()
 
         assert result.get("ok") is False, result
-        assert released == [True], "the scan lock stayed closed after a failure"
+        assert svc._claim_apply() is True, "the claim stayed held after a failure"
+        svc._release_apply()
 
 
 class TestTheDiff:

@@ -1013,13 +1013,6 @@ def sync_album_file_tags(
     release_mbid, mb_index, mb_count = _resolve_mb_release(tracks)
     perfect = bool(release_mbid) and _is_perfect_match(tracks, mb_index, mb_count)
 
-    files_updated = 0
-    corrections_recorded = 0
-    _date_needs_correction = bool(
-        album_edition_year
-        and album_year
-        and _norm(album_edition_year) != _norm(album_year)
-    )
     # The scan reports corrected track ids under their DB ``id``; the freshly
     # loaded rows carry the same ids, but normalise anyway (ids are cast to
     # strings somewhere in the pipeline).
@@ -1064,6 +1057,205 @@ def sync_album_file_tags(
                 "tracks": 0,
             }
 
+    _context = {
+        "album_year": album_year,
+        "album_edition_year": album_edition_year,
+        "perfect": perfect,
+        "include_lyrics": include_lyrics,
+        "corrected_title_ids": sorted(_corrected_ids),
+    }
+
+    # ⭐ THE FILE WRITES ARE THE SLOW HALF, SO THEY CAN RUN IN THE BACKGROUND.
+    #
+    # Reported: "When writing genres to files, this is taking a long time and also
+    # stopping another scan from running at the same time." The DB half above has
+    # already been committed (the playlists are built from the `genres` column),
+    # so the remaining cost is purely the per-file read-modify-write. Queueing it
+    # lets the scan continue to the next album instead of waiting on disk I/O.
+    if _defer_file_writes():
+        try:
+            from services.metadata.tag_write_queue import enqueue_tag_tracks
+
+            queued = enqueue_tag_tracks(
+                artist=artist,
+                album=album,
+                tracks=_file_tracks,
+                reason="scan",
+                extra=_context,
+            )
+            # ⚠️ A REFUSAL IS NOT A SUCCESS. ``enqueue_tag_tracks`` answers
+            # ``queued: False`` for an empty track list (nothing to do — fine)
+            # but also when the queue declined the job. Reporting "deferred"
+            # there would drop the album's tags silently, so anything other than
+            # an accepted job falls through to the inline write below.
+            if queued.get("queued"):
+                return {
+                    "artist": artist,
+                    "album": album,
+                    "perfect_match": perfect,
+                    "deferred": True,
+                    "files_updated": 0,
+                    "corrections_recorded": 0,
+                    "tracks": len(_file_tracks),
+                    "genre_only_tracks": _genre_changed,
+                    "queued": True,
+                }
+            logger.warning(
+                "Background file tag queue declined the job — writing inline",
+                artist=artist, album=album, tracks=len(_file_tracks),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            # Falling back to the inline write is always correct, just slower.
+            logger.warning(
+                "Could not queue background file tag writes — writing inline",
+                artist=artist, album=album, error=str(exc),
+            )
+
+    files_updated, corrections_recorded, _skipped = _write_album_track_file_tags(
+        artist=artist,
+        album=album,
+        file_tracks=_file_tracks,
+        context=_context,
+        artist_genres=artist_genres,
+    )
+
+    if files_updated or corrections_recorded:
+        logger.info(
+            "Album file tags synced",
+            artist=artist, album=album, files_updated=files_updated, corrections_recorded=corrections_recorded, perfect_match=perfect, album_year=album_year,
+        )
+    return {
+        "artist": artist,
+        "album": album,
+        "perfect_match": perfect,
+        "files_updated": files_updated,
+        "corrections_recorded": corrections_recorded,
+        # Tracks whose FILE was examined this pass (after the skip).
+        "tracks": len(_file_tracks),
+        # Kept only because the album genre blend changed their genres.
+        "genre_only_tracks": _genre_changed,
+        **({"skipped": _skipped} if _skipped else {}),
+    }
+
+
+def _defer_file_writes() -> bool:
+    """Should the file half of the tag sync be queued instead of run inline?
+
+    ``tagging.defer_file_writes`` defaults ON: the scan's own progress does not
+    depend on the tags being on disk (Navidrome re-reads them on its next
+    rescan), and running them inline is what made a scan slow enough to block
+    another scan from starting. ``tagging.write_tags_to_file`` remains the master
+    switch — with it off there is nothing to defer either.
+    """
+    try:
+        from helpers.config_helpers import get_tagging_config
+
+        tagging = get_tagging_config()
+        if not tagging.get("write_tags_to_file", True):
+            return False
+        return bool(tagging.get("defer_file_writes", True))
+    except Exception:
+        return True
+
+
+def run_deferred_tag_write(payload: dict[str, Any]) -> dict[str, Any]:
+    """Perform one queued album's file writes. Called from ``tag_write_queue``.
+
+    The payload is plain data captured at the end of the album's scan pass, so
+    nothing here needs the scan's session or its in-memory rows — the genre blend
+    is already in the DB and each track row carries the value to write.
+
+    ⚠️ THE RESCAN IS REQUESTED LAST, AND IT DRAINS THE FLAG THE WRITER SET.
+
+    ``tag_file_service`` calls ``mark_rescan_required`` on every successful
+    write, and the scan's boundary flushes that flag ONCE. When the writes are
+    deferred, that boundary has already passed by the time this job runs — the
+    files were not on disk yet — so the job has to drain it instead. Draining
+    (rather than ``request_rescan``) means an album that wrote nothing asks for
+    no scan, and the coalescer still collapses a burst of albums into at most
+    one running + one pending scan.
+    """
+    artist = str(payload.get("artist") or "")
+    album = str(payload.get("album") or "")
+    tracks = [t for t in (payload.get("tracks") or []) if isinstance(t, dict)]
+    if not tracks:
+        return {"files_updated": 0, "corrections_recorded": 0, "tracks": 0}
+
+    context = {
+        "album_year": str(payload.get("album_year") or ""),
+        "album_edition_year": str(payload.get("album_edition_year") or ""),
+        "perfect": bool(payload.get("perfect")),
+        "include_lyrics": bool(payload.get("include_lyrics")),
+        "corrected_title_ids": list(payload.get("corrected_title_ids") or []),
+    }
+
+    files_updated, corrections_recorded, skipped = _write_album_track_file_tags(
+        artist=artist,
+        album=album,
+        file_tracks=tracks,
+        context=context,
+        artist_genres=None,
+    )
+
+    try:
+        from services.scanning.navidrome_rescan_service import (
+            flush_rescan_if_required,
+        )
+
+        flush_rescan_if_required("background file tag write")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Background tag write: rescan request failed", error=str(exc))
+
+    if files_updated or corrections_recorded:
+        logger.info(
+            "Album file tags synced (background)",
+            artist=artist, album=album,
+            files_updated=files_updated,
+            corrections_recorded=corrections_recorded,
+        )
+    return {
+        "files_updated": files_updated,
+        "corrections_recorded": corrections_recorded,
+        "tracks": len(tracks),
+        **({"skipped": skipped} if skipped else {}),
+    }
+
+
+def _write_album_track_file_tags(
+    *,
+    artist: str,
+    album: str,
+    file_tracks: list[dict[str, Any]],
+    context: dict[str, Any],
+    artist_genres: dict[str, int] | None,
+) -> tuple[int, int, str]:
+    """Read each track's file, build the payload, write it.
+
+    Returns ``(files_updated, corrections_recorded, skipped_reason)``, where
+    ``skipped_reason`` is ``""`` unless the whole pass could not run (the tag
+    writer itself is unimportable). The reason is RETURNED rather than dropped so
+    a caller can still say "N tracks were skipped because the writer is
+    unavailable" instead of reporting a clean zero.
+
+    Extracted from ``sync_album_file_tags`` so the SAME loop serves both the
+    inline path and the background queue. Two copies of "what belongs in a file"
+    is how the backgrounded writes would start disagreeing with the inline ones.
+    """
+    album_year = str(context.get("album_year") or "")
+    album_edition_year = str(context.get("album_edition_year") or "")
+    perfect = bool(context.get("perfect"))
+    include_lyrics = bool(context.get("include_lyrics"))
+    _corrected_ids = {str(i) for i in (context.get("corrected_title_ids") or [])}
+    _date_needs_correction = bool(
+        album_edition_year
+        and album_year
+        and _norm(album_edition_year) != _norm(album_year)
+    )
+
+    files_updated = 0
+    corrections_recorded = 0
+    _synced_ids: list[str] = []
+
     try:
         from services.metadata.tag_file_service import (
             resolve_music_file_path,
@@ -1071,13 +1263,9 @@ def sync_album_file_tags(
         )
     except Exception as exc:
         logger.warning("Tag writer unavailable — file tag sync skipped", error=str(exc))
-        return {
-            "artist": artist, "album": album, "skipped": "writer_unavailable",
-            "files_updated": 0, "corrections_recorded": 0, "tracks": 0,
-        }
+        return 0, 0, "writer_unavailable"
 
-    _synced_ids: list[str] = []
-    for track in _file_tracks:
+    for track in file_tracks:
         stored_path = str(track.get("file_path") or "").strip()
         if not stored_path:
             continue
@@ -1187,22 +1375,7 @@ def sync_album_file_tags(
     if _synced_ids:
         _stamp_tag_sync(artist, album, _synced_ids)
 
-    if files_updated or corrections_recorded:
-        logger.info(
-            "Album file tags synced",
-            artist=artist, album=album, files_updated=files_updated, corrections_recorded=corrections_recorded, perfect_match=perfect, album_year=album_year,
-        )
-    return {
-        "artist": artist,
-        "album": album,
-        "perfect_match": perfect,
-        "files_updated": files_updated,
-        "corrections_recorded": corrections_recorded,
-        # Tracks whose FILE was examined this pass (after the skip).
-        "tracks": len(_file_tracks),
-        # Kept only because the album genre blend changed their genres.
-        "genre_only_tracks": _genre_changed,
-    }
+    return files_updated, corrections_recorded, ""
 
 
 def _stamp_tag_sync(artist: str, album: str, track_ids: list[str]) -> None:
