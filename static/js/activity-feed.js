@@ -66,6 +66,9 @@
     // dashboard would show the raw scan_type.
     genre_playlist_resync: 'Genre / Playlist Resync',
     genre_playlist_resync_preview: 'Genre / Playlist Preview',
+    // The Config page's Star Rating Resync. Background like the resyncs above,
+    // so it needs a label or the dashboard shows the raw scan_type.
+    star_resync: 'Star Rating Resync',
   };
 
   function scanDisplayName(type) {

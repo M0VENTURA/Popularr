@@ -2352,7 +2352,8 @@ async function runStarResync(dryRun) {
     'This rewrites star ratings in the database' +
     (document.getElementById('star_resync_write_file_tags')?.checked ? ', the music file tags' : '') +
     (document.getElementById('star_resync_sync_navidrome')?.checked ? ' and Navidrome' : '') +
-    '.\n\nRun Preview first if you have not.'
+    '.\n\nIt runs in the BACKGROUND — progress appears here and on the dashboard.\n\n' +
+    'Run Preview first if you have not.'
   )) {
     return;
   }
@@ -2362,13 +2363,41 @@ async function runStarResync(dryRun) {
     document.getElementById('star_resync_apply_btn')
   ].filter(Boolean);
   btns.forEach(b => { b.disabled = true; });
-  setOut(dryRun ? 'Calculating preview…' : 'Re-rating the library…');
+  setOut(dryRun ? 'Calculating preview…' : 'Starting re-rate…');
 
   try {
+    // ⚠️ APPLY IS A BACKGROUND JOB, PREVIEW IS INLINE.
+    //
+    // A full-library apply outlives the reverse proxy's ~100s origin timeout, so
+    // awaiting it here would end in the proxy's HTML error page and
+    // ``resp.json()`` throwing ``Unexpected token '<'``. Apply therefore POSTs to
+    // the fire-and-forget endpoint and polls for progress. Preview is read-only
+    // and usually quicker, so it keeps returning its before/after list inline.
+    if (!dryRun) {
+      const resp = await fetch('/api/ratings/resync/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.ok === false) {
+        // 409 = already running; that is not an error worth alarming about.
+        setOut('<span class="text-' + (resp.status === 409 ? 'warning' : 'danger') + '">'
+          + escapeHtml(data.error || ('HTTP ' + resp.status)) + '</span>');
+        btns.forEach(b => { b.disabled = false; });
+        return;
+      }
+      setOut('<div class="alert alert-success py-2 mb-0">'
+        + 'Re-rate started in the background — it also appears on the dashboard.</div>');
+      if (btns[0]) btns[0].disabled = false;   // Preview may be re-run
+      pollStarResync(false);
+      return;
+    }
+
     const resp = await fetch('/api/ratings/resync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dry_run: !!dryRun })
+      body: JSON.stringify({ dry_run: true })
     });
     const data = await resp.json();
     if (!resp.ok || data.error) {
@@ -2386,10 +2415,10 @@ async function runStarResync(dryRun) {
     }).join('');
 
     setOut(
-      '<div class="alert alert-' + (dryRun ? 'info' : 'success') + ' py-2 mb-2">'
-      + (dryRun ? '<strong>Preview only — nothing was written.</strong> ' : '<strong>Resync applied.</strong> ')
+      '<div class="alert alert-info py-2 mb-2">'
+      + '<strong>Preview only — nothing was written.</strong> '
       + data.albums + ' albums, ' + data.tracks + ' tracks, '
-      + '<strong>' + data.changed + '</strong> rating(s) ' + (dryRun ? 'would change' : 'changed')
+      + '<strong>' + data.changed + '</strong> rating(s) would change'
       + ' in ' + data.seconds + 's.'
       + (data.failed && data.failed.length
         ? ' <span class="text-danger">' + data.failed.length + ' album(s) failed.</span>'
@@ -2408,6 +2437,68 @@ async function runStarResync(dryRun) {
     setOut('<span class="text-danger">' + escapeHtml(String(err)) + '</span>');
   } finally {
     btns.forEach(b => { b.disabled = false; });
+  }
+}
+
+/**
+ * Poll the background star-resync progress row until it stops running.
+ *
+ * ``silent`` is used for the page-load check: a run that finished BEFORE this
+ * page was opened must not announce itself as though it just happened.
+ */
+async function pollStarResync(silent) {
+  const out = document.getElementById('star_resync_output');
+  const previewBtn = document.getElementById('star_resync_preview_btn');
+  const applyBtn = document.getElementById('star_resync_apply_btn');
+
+  try {
+    const resp = await fetch('/api/ratings/resync/status', { cache: 'no-store' });
+    const data = await resp.json();
+    if (!data || data.ok === false) return;
+
+    const pct = Math.round(Number(data.percent_complete || 0));
+    const phase = data.current_stage || '';
+    const item = data.current_item || '';
+
+    if (data.is_running) {
+      if (applyBtn) applyBtn.disabled = true;
+      if (out) {
+        out.innerHTML = '<div class="alert alert-info py-2 mb-0">'
+          + escapeHtml(phase) + (pct ? ' · ' + pct + '%' : '')
+          + (item ? ' — ' + escapeHtml(item) : '')
+          + '</div>';
+      }
+      setTimeout(function () { pollStarResync(false); }, 1500);
+      return;
+    }
+
+    if (silent) return;  // a stale finished row: leave the card untouched
+
+    if (previewBtn) previewBtn.disabled = false;
+    if (applyBtn) applyBtn.disabled = false;
+    const result = data.resync_result || null;
+    if (data.status === 'failed') {
+      if (out) {
+        out.innerHTML = '<div class="alert alert-danger py-2 mb-0">'
+          + escapeHtml(data.error || 'Resync failed — see the logs.') + '</div>';
+      }
+      return;
+    }
+    if (out && result) {
+      const vel = result.velocity || {};
+      out.innerHTML = '<div class="alert alert-success py-2 mb-0">'
+        + '<strong>Resync complete.</strong> '
+        + (result.changed || 0) + ' rating(s) changed across '
+        + (result.tracks || 0) + ' track(s) in ' + (result.albums || 0) + ' album(s)'
+        + (result.seconds ? ' (' + result.seconds + 's)' : '') + '.'
+        + (vel.enabled
+          ? ' Velocity applied to ' + (vel.tracks || 0) + ' track(s), '
+            + (vel.collisions || 0) + ' collision(s) damped.'
+          : '')
+        + '</div>';
+    }
+  } catch (_err) {
+    // A failed poll is not a failed job — stop quietly.
   }
 }
 
@@ -2837,6 +2928,12 @@ document.addEventListener('DOMContentLoaded', function() {
   if (resyncPreview) resyncPreview.addEventListener('click', () => runStarResync(true));
   const resyncApply = document.getElementById('star_resync_apply_btn');
   if (resyncApply) resyncApply.addEventListener('click', () => runStarResync(false));
+  // A re-rate started from another tab (or still running from before a reload)
+  // keeps reporting into this card: resume polling rather than showing an idle
+  // Apply button. ``silent`` keeps a finished row from announcing itself.
+  if (resyncApply && document.getElementById('star_resync_output')) {
+    pollStarResync(true);
+  }
   const genreResyncPreview = document.getElementById('genre_resync_preview_btn');
   if (genreResyncPreview) genreResyncPreview.addEventListener('click', () => runGenreResync(true));
   const genreResyncApply = document.getElementById('genre_resync_apply_btn');

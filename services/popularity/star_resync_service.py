@@ -50,7 +50,131 @@ logger = structlog.get_logger(__name__)
 __all__ = [
     "resync_star_ratings",
     "preview_star_ratings",
+    "start_star_resync",
+    "is_resync_running",
+    "SCAN_TYPE",
+    "PROGRESS_FILE",
 ]
+
+#: The ``scan_states`` row the BACKGROUND apply writes.
+#:
+#: Kept apart from real scan types so it can never be mistaken for a scan,
+#: resumed, or picked up by the scan scheduler. Listed in
+#: ``progress_service.SCAN_TYPES`` so the dashboard poller surfaces it — that is
+#: the whole point of publishing here rather than streaming from the response.
+SCAN_TYPE = "star_resync"
+PROGRESS_FILE = f"{SCAN_TYPE}_progress.json"
+
+#: Phrases rendered in the dashboard's one-line status bar.
+PHASE_RATING = "Re-rating tracks"
+PHASE_PLAYLISTS = "Rebuilding playlists"
+PHASE_DONE = "Complete"
+
+#: A progress row older than this is a DEAD job, not a running one.
+#:
+#: The apply runs on a daemon thread, so a restart (or a killed worker) leaves
+#: its last row saying ``is_running: true`` forever — and because that row is the
+#: only "is running" signal, every retry would answer 409 even though nothing was
+#: running. The live job republishes per album chunk, so a quarter of an hour of
+#: silence means the writer is gone.
+_PROGRESS_STALE_SECONDS = 15 * 60
+
+_APPLY_LOCK = __import__("threading").Lock()
+_APPLY_RUNNING = False
+
+
+# ---------------------------------------------------------------------------
+# Progress plumbing (mirrors genre_playlist_resync_service)
+# ---------------------------------------------------------------------------
+
+def _write_progress(
+    *,
+    running: bool,
+    percent: float,
+    phase: str,
+    processed: int = 0,
+    total: int = 0,
+    detail: str = "",
+    status: str | None = None,
+    result: dict[str, Any] | None = None,
+    error: str = "",
+) -> None:
+    """Publish one progress frame. Never fatal — a progress write must not
+    abort the job it is describing."""
+    try:
+        from services.scanning.scan_state import write_progress_with_current_artist
+
+        extra: dict[str, Any] = {
+            "status": status or ("running" if running else "complete"),
+            "mode": "star_resync",
+            "percent_complete": max(0.0, min(100.0, float(percent))),
+            "processed_items": int(processed),
+            "total_items": int(total),
+            "processed_artists": int(processed),
+            "total_artists": int(total),
+            "current_stage": phase,
+            "current_item": detail,
+        }
+        if result is not None:
+            extra["resync_result"] = result
+        if error:
+            extra["error"] = error
+        write_progress_with_current_artist(
+            PROGRESS_FILE, SCAN_TYPE, running, extra=extra
+        )
+    except Exception as exc:
+        logger.debug("Star resync progress write failed", error=str(exc))
+
+
+def _progress_row_is_stale(
+    state: dict[str, Any], stale_after: float = _PROGRESS_STALE_SECONDS
+) -> bool:
+    """True when a row claims to be running but has not been touched recently."""
+    if not state.get("is_running"):
+        return False
+    raw = str(state.get("last_updated") or "").strip()
+    if not raw:
+        return False
+    try:
+        from datetime import datetime
+
+        updated = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return False
+    now = datetime.now(updated.tzinfo) if updated.tzinfo else datetime.now()
+    return (now - updated).total_seconds() > stale_after
+
+
+def is_resync_running() -> bool:
+    """True while the background apply holds the progress row.
+
+    A stale row (last frame longer ago than ``_PROGRESS_STALE_SECONDS``) is a
+    dead job, so the caller may start a new one instead of waiting forever.
+    """
+    if _APPLY_RUNNING:
+        return True
+    try:
+        from services.scanning.scan_state import read_progress_file
+
+        state = read_progress_file(PROGRESS_FILE) or {}
+        return bool(state.get("is_running")) and not _progress_row_is_stale(state)
+    except Exception:
+        return bool(_APPLY_RUNNING)
+
+
+def _claim_apply() -> bool:
+    global _APPLY_RUNNING
+    with _APPLY_LOCK:
+        if _APPLY_RUNNING:
+            return False
+        _APPLY_RUNNING = True
+        return True
+
+
+def _release_apply() -> None:
+    global _APPLY_RUNNING
+    with _APPLY_LOCK:
+        _APPLY_RUNNING = False
 
 #: Columns the rating path reads. Kept explicit so the query stays cheap and
 #: the mapping into the scan-shaped dict is obvious.
@@ -574,6 +698,12 @@ def resync_star_ratings(
     # and when nothing changed (a rebuild that cannot differ is pure cost).
     playlists: dict[str, Any] = {}
     if not dry_run and tracks_changed:
+        if progress is not None:
+            _write_progress(
+                running=True, percent=95.0, phase=PHASE_PLAYLISTS,
+                processed=albums_done, total=total_albums,
+                detail="Rebuilding playlists…", status="running",
+            )
         playlists = _refresh_generated_playlists(artist)
         logger.info(
             "Generated playlists refreshed after star resync",
@@ -607,3 +737,127 @@ def preview_star_ratings(
     return resync_star_ratings(
         artist=artist, album=album, limit_albums=limit_albums, dry_run=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Public: apply (background)
+# ---------------------------------------------------------------------------
+
+def start_star_resync(
+    *,
+    artist: str | None = None,
+    album: str | None = None,
+) -> dict[str, Any]:
+    """Start the library-wide re-rate on a BACKGROUND thread. Returns at once.
+
+    WHY THIS EXISTS
+    ---------------
+    The rating pass was a synchronous request: ``/api/ratings/resync`` awaited
+    ``resync_star_ratings`` to completion. On a real library that outlives the
+    reverse proxy's ~100s origin timeout — the proxy answers with its OWN HTML
+    error page and the card's ``resp.json()`` dies on ``Unexpected token '<'``,
+    the same failure the genre→playlist resync already fixed. The work completed;
+    only the response was lost, and there was no progress to show meanwhile.
+
+    So the apply moves to a daemon thread and publishes progress to the shared
+    ``scan_states`` row (``star_resync``), which the dashboard poller already
+    renders once the type is listed in ``progress_service.SCAN_TYPES``.
+
+    Returns ``{"ok": True, "started": bool}`` — ``started=False`` (not an error)
+    when a run is already in flight.
+    """
+    from helpers.config_helpers import get_star_resync_config
+
+    if not _claim_apply():
+        return {"ok": True, "started": False, "already_running": True}
+
+    cfg = get_star_resync_config()
+    if not cfg.get("enabled"):
+        _release_apply()
+        return {
+            "ok": False,
+            "error": "Star resync is disabled in configuration.",
+        }
+
+    # ``albums_per_batch`` is the PROGRESS-REPORT cadence, not a load chunk.
+    #
+    # ⚠️ The whole catalogue must be loaded for velocity: ``_apply_velocity_
+    # adjustments`` normalises each track against its artist's FASTEST track and
+    # detects ListenBrainz collisions across the catalogue, so splitting the load
+    # into batches would silently change the ratings. Batching the progress
+    # writes keeps `albums_per_batch` meaningful without touching that maths.
+    try:
+        batch = max(1, int(cfg.get("albums_per_batch") or 25))
+    except (TypeError, ValueError):
+        batch = 25
+
+    _write_progress(
+        running=True, percent=1.0, phase=PHASE_RATING,
+        detail="Loading scored tracks…", status="running",
+    )
+
+    def _run() -> None:
+        try:
+            def _on_progress(done: int, total: int, label: str) -> None:
+                # Throttled: one DB write per ``batch`` albums, plus the first
+                # and the last, so a 5,000-album library is not 5,000 writes.
+                if done != 1 and done % batch != 0 and done != total:
+                    return
+                frac = (done / total) if total else 0.0
+                _write_progress(
+                    running=True, percent=2.0 + 90.0 * min(1.0, frac),
+                    phase=PHASE_RATING, processed=done, total=total,
+                    detail=label, status="running",
+                )
+
+            result = resync_star_ratings(
+                artist=artist, album=album, progress=_on_progress,
+            )
+
+            if not result.get("ok"):
+                _write_progress(
+                    running=False, percent=0.0, phase="Failed", status="failed",
+                    error=(
+                        result.get("error")
+                        or f"{len(result.get('failed') or [])} album(s) failed"
+                    ),
+                    result={
+                        "albums": result.get("albums", 0),
+                        "tracks": result.get("tracks", 0),
+                        "changed": result.get("changed", 0),
+                        "seconds": result.get("seconds", 0),
+                        "velocity": result.get("velocity", {}),
+                    },
+                )
+                return
+
+            _write_progress(
+                running=False, percent=100.0, phase=PHASE_DONE,
+                processed=result.get("albums", 0), total=result.get("albums", 0),
+                detail=(
+                    f"{result.get('changed', 0)} rating(s) changed across "
+                    f"{result.get('tracks', 0)} track(s)"
+                ),
+                status="complete",
+                result={
+                    "albums": result.get("albums", 0),
+                    "tracks": result.get("tracks", 0),
+                    "changed": result.get("changed", 0),
+                    "seconds": result.get("seconds", 0),
+                    "velocity": result.get("velocity", {}),
+                    "playlists": result.get("playlists", {}),
+                },
+            )
+        except Exception as exc:
+            logger.error("Background star resync failed", error=str(exc), exc_info=True)
+            _write_progress(
+                running=False, percent=0.0, phase="Failed", status="failed",
+                error=str(exc),
+            )
+        finally:
+            _release_apply()
+
+    import threading
+
+    threading.Thread(target=_run, name="star-resync", daemon=True).start()
+    return {"ok": True, "started": True}

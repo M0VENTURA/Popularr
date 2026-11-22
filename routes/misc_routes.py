@@ -2193,6 +2193,71 @@ async def api_resync_star_ratings() -> Any:
     return jsonify(result), 200
 
 
+@misc_api_bp.route("/ratings/resync/apply", methods=["POST"])
+async def api_apply_star_ratings_resync() -> Any:
+    """Start a library-wide re-rate in the BACKGROUND and return immediately.
+
+    Same work as ``POST /api/ratings/resync`` with ``dry_run`` false, but it runs
+    on a daemon thread instead of holding the request: on a real library the
+    re-rate outlives the reverse proxy's ~100s origin timeout, which answers with
+    its own HTML error page (the reported ``Unexpected token '<'``). Progress is
+    published to the ``star_resync`` ``scan_states`` row, so the Config card and
+    the dashboard both render it while it runs.
+
+    ``202`` means ACCEPTED, not done — poll ``/api/ratings/resync/status`` or
+    ``/api/scan-progress``.
+    """
+    from services.popularity.star_resync_service import (
+        is_resync_running,
+        start_star_resync,
+    )
+
+    if is_resync_running():
+        return jsonify({
+            "ok": False,
+            "error": "A star resync is already running — wait for it to finish.",
+        }), 409
+
+    try:
+        payload = (await request.get_json(silent=True)) or {}
+    except Exception:
+        payload = {}
+
+    artist = str(payload.get("artist") or "").strip() or None
+    album = str(payload.get("album") or "").strip() or None
+
+    try:
+        result = await asyncio.to_thread(
+            start_star_resync, artist=artist, album=album,
+        )
+    except Exception as exc:
+        logger.error("Star resync failed to start", error=str(exc))
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    if not result.get("ok"):
+        return jsonify(result), 400
+    return jsonify({
+        **result,
+        "accepted": True,
+        "message": "Resync started — progress appears on the dashboard.",
+    }), 202
+
+
+@misc_api_bp.route("/ratings/resync/status", methods=["GET"])
+def api_star_ratings_resync_status() -> Any:
+    """The current star-resync progress row, for the Config card's poller."""
+    try:
+        from services.scanning.scan_state import read_progress_file
+        from services.popularity.star_resync_service import PROGRESS_FILE
+
+        state = read_progress_file(PROGRESS_FILE) or {}
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    if not state:
+        return jsonify({"ok": True, "is_running": False, "status": "idle"}), 200
+    return jsonify({"ok": True, **state}), 200
+
+
 # ===========================================================================
 # GENRE RE-EVALUATION
 # ===========================================================================

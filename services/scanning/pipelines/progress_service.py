@@ -50,6 +50,10 @@ SCAN_TYPES = [
     # outlives the proxy's request timeout), so it needs listing too.
     "genre_playlist_resync",
     "genre_playlist_resync_preview",
+    # The Config page's Star Rating Resync. Like the genre resync above it is
+    # not a scan, but it publishes to the same ``scan_states`` row, so the
+    # dashboard poller only surfaces it when the type is listed here.
+    "star_resync",
 ]
 
 
