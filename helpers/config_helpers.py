@@ -1531,12 +1531,12 @@ GENRE_TRACK_LIMIT_DEFAULT = 4
 
 
 def get_genre_track_limit() -> int:
-    """How many MUSICAL genres to write onto one track (default 3).
+    """How many MUSICAL genres to write onto one track (default 4).
 
     Config section: ``genres`` → ``max_genres_per_track``.
 
     Falls back to ``genres.selection.max_genres`` (the selection engine's own
-    position limit, also default 3) so an install that already tuned that value
+    position limit, also default 4) so an install that already tuned that value
     does not have to set two keys, then to :data:`GENRE_TRACK_LIMIT_DEFAULT`.
 
     ⚠️ Clamped to 1..10. A nonsense value must not silently narrow every track

@@ -108,6 +108,15 @@
         <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-playlists" type="button" role="tab">
           <i class="bi bi-music-note-beamed"></i> Playlists
         </button>
+
+        <hr class="my-2">
+        <label class="form-label form-label-sm mb-1" for="configSettingsSearch">Find a setting</label>
+        <div class="input-group input-group-sm mb-2">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="search" class="form-control" id="configSettingsSearch" placeholder="e.g. velocity, covers, threshold"
+                 autocomplete="off" aria-label="Find a setting on this page">
+        </div>
+        <div class="small text-muted mb-2 d-none" id="configSettingsSearchState"></div>
       </div>
     </div>
 
@@ -3217,7 +3226,15 @@
       <small class="text-muted">Control how genre sources are weighted and which synonyms to normalise</small>
     </div>
     <div class="card-body">
-      <h6 class="mb-3">Source Weights</h6>
+      <h6 class="mb-3">Source Weights <span class="badge bg-secondary">legacy engine only</span></h6>
+      <div class="alert alert-warning py-2 mb-3">
+        <small>
+          <i class="bi bi-exclamation-triangle"></i>
+          <strong>Only used when “Use the Canonical Engine” is off.</strong> The canonical engine scores
+          sources with its own <em>Provider Trust</em> weights further down — two panels with the same
+          provider names and different values, so you are not editing the same number twice.
+        </small>
+      </div>
       <small class="text-muted d-block mb-3">
         When the same track gets genres from several providers, these weights decide how much each
         provider's vote counts toward the aggregated genre list. Weights are normalised automatically,
@@ -3287,11 +3304,17 @@
           </small>
         </div>
       </div>
-      <h6 class="mb-3">Genre Synonyms</h6>
-      <p class="text-muted small mb-2">Map variant genre names to canonical forms (e.g. "hip hop" → "hip-hop"). One mapping per line as <code>variant: canonical</code>.</p>
+      <h6 class="mb-3">Genre Synonyms <span class="badge bg-secondary">legacy engine only</span></h6>
+      <p class="text-muted small mb-2">
+        One mapping per line as <code>variant: canonical</code>. Applied by the legacy vote-counting
+        engine only. The canonical engine already resolves spellings through the
+        <strong>Genre Vocabulary</strong> below — which maps <code>rnb</code>, <code>r and b</code> and
+        <code>rhythm and blues</code> to <code>R&amp;B</code> — so add a line here only if you are
+        running the legacy engine and need a spelling the vocabulary does not cover.
+      </p>
       <div class="row g-3">
         <div class="col-12">
-          <textarea class="form-control form-control-sm font-monospace" id="genre_synonyms" rows="4" placeholder="hip hop: hip-hop&#10;r&amp;b: rnb">{% set synonyms = config.get('genres', {}).get('synonyms', {}) %}{% for k, v in synonyms.items() %}{{ k }}: {{ v }}
+          <textarea class="form-control form-control-sm font-monospace" id="genre_synonyms" rows="4" placeholder="hip hop: hip-hop&#10;dnb: drum and bass">{% set synonyms = config.get('genres', {}).get('synonyms', {}) %}{% for k, v in synonyms.items() %}{{ k }}: {{ v }}
 {% endfor %}</textarea>
         </div>
       </div>
@@ -3433,21 +3456,21 @@
       </small>
       <div class="row g-3">
         {% set sel_weights = config.get('genres', {}).get('selection', {}).get('source_weights', {}) %}
-        {% for key, default, note in [
-          ('musicbrainz', 1.00, 'Proper genres — the strongest controlled signal'),
-          ('listenbrainz', 0.85, 'MB-tagged community data'),
-          ('wikidata', 0.80, 'Structured genre statements'),
-          ('discogs', 0.75, 'Release-level genres'),
-          ('lastfm', 0.70, 'Broad coverage, noisier vocabulary'),
-          ('musicbrainz_tags', 0.65, 'Free-form folksonomy — must pass classification'),
-          ('audiodb', 0.55, 'Artist-level genres'),
-          ('essentia', 0.45, 'Local audio analysis'),
-          ('spotify', 0.40, 'Deprecated source'),
-          ('navidrome', 0.30, 'Local file tags — a tie-breaker'),
-          ('manual', 1.25, 'Explicit user edits — outranks everything')
+        {% for key, label, default, note in [
+          ('musicbrainz', 'MusicBrainz', 1.00, 'Proper genres — the strongest controlled signal'),
+          ('listenbrainz', 'ListenBrainz', 0.85, 'MB-tagged community data'),
+          ('wikidata', 'Wikidata', 0.80, 'Structured genre statements'),
+          ('discogs', 'Discogs', 0.75, 'Release-level genres'),
+          ('lastfm', 'Last.fm', 0.70, 'Broad coverage, noisier vocabulary'),
+          ('musicbrainz_tags', 'MusicBrainz Tags', 0.65, 'Free-form folksonomy — must pass classification'),
+          ('audiodb', 'AudioDB', 0.55, 'Artist-level genres'),
+          ('essentia', 'Essentia', 0.45, 'Local audio analysis'),
+          ('spotify', 'Spotify', 0.40, 'Deprecated source'),
+          ('navidrome', 'Navidrome', 0.30, 'Local file tags — a tie-breaker'),
+          ('manual', 'Manual', 1.25, 'Explicit user edits — outranks everything')
         ] %}
         <div class="col-6 col-md-3">
-          <label class="form-label form-label-sm" for="genre_sel_weight_{{ key }}">{{ key|replace('_', ' ')|title }}</label>
+          <label class="form-label form-label-sm" for="genre_sel_weight_{{ key }}">{{ label }}</label>
           <input type="number" step="0.05" min="0" max="2" class="form-control form-control-sm" id="genre_sel_weight_{{ key }}" value="{{ sel_weights.get(key, default) }}">
           <small class="form-text text-muted">{{ note }}. Default: <strong>{{ default }}</strong></small>
         </div>
@@ -3492,7 +3515,45 @@
         <small class="text-muted" id="genre_vocab_status"></small>
       </div>
       <div class="form-text mb-2" id="genre_vocab_source"></div>
-      <textarea class="form-control form-control-sm font-monospace" id="genre_vocab_text" rows="14" spellcheck="false" placeholder="Loading…"></textarea>
+
+      {# Two views over the SAME textarea: a searchable table is the way in, the
+         raw JSON stays available because it is the actual storage format and
+         the only way to express things the table does not show. #}
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+        <div class="btn-group btn-group-sm" role="group" aria-label="Vocabulary view">
+          <button type="button" class="btn btn-outline-secondary active" id="genre_vocab_view_table">Table</button>
+          <button type="button" class="btn btn-outline-secondary" id="genre_vocab_view_json">JSON (advanced)</button>
+        </div>
+        <div class="input-group input-group-sm" style="max-width: 320px;">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="search" class="form-control" id="genre_vocab_search"
+                 placeholder="Filter id, display, parent or alias" aria-label="Filter the genre vocabulary">
+        </div>
+        <small class="text-muted" id="genre_vocab_table_count"></small>
+      </div>
+
+      <div id="genre_vocab_table_wrap">
+        <div class="table-responsive" style="max-height: 26rem; overflow-y: auto;">
+          <table class="table table-sm table-hover align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th scope="col">ID</th>
+                <th scope="col">Display</th>
+                <th scope="col">Parent</th>
+                <th scope="col">Level</th>
+                <th scope="col">Aliases</th>
+              </tr>
+            </thead>
+            <tbody id="genre_vocab_table_body">
+              <tr><td colspan="5" class="text-muted small">Load the vocabulary to browse it.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="genre_vocab_json_wrap" class="d-none">
+        <textarea class="form-control form-control-sm font-monospace" id="genre_vocab_text" rows="14" spellcheck="false" placeholder="Loading…"></textarea>
+      </div>
       <div id="genre_vocab_problems" class="mt-2"></div>
     </div>
   </div>
@@ -3531,64 +3592,156 @@
   <!-- Essential Playlists Section -->
   <div class="card shadow-sm mb-3" id="playlists">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-music-note-beamed"></i> Essential Playlists</h5>
-      <small class="text-muted">Auto-generated per-artist highlight playlists written into the Playlists folder during popularity scans</small>
+      <h5 class="mb-0"><i class="bi bi-music-note-beamed"></i> Playlists</h5>
+      <small class="text-muted">Every auto-generated playlist and the rules that build it. Each playlist keeps its toggle, name and limits together.</small>
     </div>
     <div class="card-body config-section">
 
-      <!-- 1. Feature toggles — each switch stays bound to its description -->
-      <div class="setting-card">
+      {#
+        HOW IT WORKS — collapsed by default at the TOP.
+
+        It used to sit at the very bottom of a ~70-field column, where it was
+        both cut off and read after the settings it explains. As a collapsible
+        info box at the top it is available before the settings, and costs no
+        height until opened (the Genre Selection Engine uses the same pattern).
+      #}
+      <div class="alert alert-secondary mb-3 py-2">
+        <details>
+          <summary class="fw-semibold" style="cursor:pointer;">How playlists are built</summary>
+          <small class="text-muted d-block mt-2">
+            After each popularity scan, every artist with at least
+            <strong>{{ 12 }} unique 4★/5★ tracks</strong> gets an <code>{name}.m3u</code> written to
+            <code>{MUSIC_FOLDER}/Playlists</code> — Navidrome picks it up on its next scan. Genre
+            playlists follow the Create/Delete thresholds (created at or above <code>Create Threshold</code>,
+            removed below <code>Delete Threshold</code>, left untouched in between). Tracks are
+            deduplicated by normalized title (the studio version wins over live / compilation duplicates),
+            and compilation, "Various Artists" and soundtrack buckets are skipped. Changing a name
+            template automatically cleans up stale files from older scans.
+          </small>
+        </details>
+      </div>
+
+      {# ═══ GLOBAL RULES ══════════════════════════════════════════════════ #}
+      <h6 class="mb-2"><i class="bi bi-sliders"></i> Global Rules</h6>
+      <small class="text-muted d-block mb-3">These apply to every generated playlist below.</small>
+      <div class="thresholds-grid mb-3">
+        <div class="input-card">
+          <label for="playlists_genre_min_stars">Minimum Stars</label>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="playlists_genre_min_stars" placeholder="4" value="{{ config.get('playlists', {}).get('genre_playlists_min_stars', 4) }}">
+          <span class="help-text">Only tracks rated at least this many stars qualify. Default: <strong>4</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_order_mode">Track Ordering</label>
+          <select class="form-select form-select-sm" id="playlists_order_mode">
+            <option value="final_score" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') == 'final_score' %}selected{% endif %}>Final score (recommended)</option>
+            <option value="popularity" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') in ('popularity', 'prominence') %}selected{% endif %}>Global popularity</option>
+            <option value="stored" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') == 'stored' %}selected{% endif %}>Stored score (album-relative)</option>
+          </select>
+          <span class="help-text"><strong>Final score</strong>: 5★ first, then 4★, ranked by the score shown on the track page. <strong>Global popularity</strong>: raw Last.fm/ListenBrainz counts. <strong>Stored score</strong>: relative to each track's own album. Default: <strong>Final score</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_max_per_artist">Max Tracks Per Artist</label>
+          <input type="number" step="1" min="0" max="500" class="form-control form-control-sm" id="playlists_max_per_artist" placeholder="4" value="{{ config.get('playlists', {}).get('genre_playlists_max_per_artist', 4) }}">
+          <span class="help-text">A <strong>hard quota</strong>: the strongest N tracks from each artist are kept and the rest dropped. Guest credits count against the lead artist. Set to <strong>0</strong> for no limit. Default: <strong>4</strong></span>
+        </div>
+        <div class="input-card">
+          <label for="playlists_interleave_artists">Spread Artists Through The List</label>
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_interleave_artists" {% if config.get('playlists', {}).get('playlist_interleave_artists', True) %}checked{% endif %}>
+          </div>
+          <span class="help-text">Avoids consecutive runs from the same artist. Changes the order only — never the membership. Default: <strong>on</strong></span>
+        </div>
+      </div>
+
+      {# Weekly shuffle: master, with the per-type switches NESTED under it. #}
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_essential_enabled">Create Essential Playlists During Scans</label>
-          <p class="setting-description">Auto-generated per-artist highlight playlists written into the Playlists folder during popularity scans.</p>
+          <label class="setting-title" for="playlists_weekly_shuffle">Shuffle The Order Weekly</label>
+          <p class="setting-description">Reorders each generated playlist <strong>once per ISO week</strong>, after ranking and the cap, so the SAME tracks are kept and only their order changes. This is the master switch.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_essential_enabled" {% if config.get('playlists', {}).get('essential_playlists_enabled', True) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_weekly_shuffle" {% if config.get('playlists', {}).get('weekly_shuffle_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+      <div class="setting-subgroup" data-playlists-depends-on="playlists_weekly_shuffle">
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_shuffle_genre">Shuffle Top Tracks Playlists</label>
+            <p class="setting-description">Genre charts rotate so a chart does not look stale when nothing about the music changed.</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_shuffle_genre" {% if config.get('playlists', {}).get('weekly_shuffle_genre_top_tracks', True) %}checked{% endif %}>
+            </div>
+          </div>
+        </div>
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_shuffle_new_music">Shuffle New Music</label>
+            <p class="setting-description">The New Music discovery feed rotates so recent arrivals do not always sit in the same sequence.</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_shuffle_new_music" {% if config.get('playlists', {}).get('weekly_shuffle_new_music', True) %}checked{% endif %}>
+            </div>
+          </div>
+        </div>
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_shuffle_essential">Shuffle Essential Artist Collections</label>
+            <p class="setting-description">An Essential collection is a ranked best-of for one artist, so shuffling throws that ranking away. Off by default.</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_shuffle_essential" {% if config.get('playlists', {}).get('weekly_shuffle_essential', False) %}checked{% endif %}>
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="setting-card">
+      {# Christmas: toggle, with the marker NESTED under it. #}
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_essential_include_featured">Include Featured Appearances</label>
-          <p class="setting-description">A 4★/5★ track like "Powerwolf feat. Unleash The Archers" also lands on Unleash The Archers' Essential Collection (in addition to Powerwolf's).</p>
+          <label class="setting-title" for="playlists_exclude_christmas">Exclude Christmas From Playlists</label>
+          <p class="setting-description">Keeps Christmas music out of every generated playlist <strong>except</strong> those whose name contains the marker below. A track counts as Christmas when its title, album or genres say so (<code>Holiday</code>, <code>Xmas</code>, <code>Noel</code>…).</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_essential_include_featured" {% if config.get('playlists', {}).get('essential_include_featured', True) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_exclude_christmas" {% if config.get('playlists', {}).get('exclude_christmas_from_playlists', True) %}checked{% endif %}>
           </div>
         </div>
       </div>
-
-      <div class="setting-card">
-        <div class="setting-info">
-          <label class="setting-title" for="playlists_essential_vocalists_enabled">Create Essential Vocalist Collections</label>
-          <p class="setting-description">Cross-project best-ofs for a vocalist: their own releases plus guest appearances on other artists' tracks (e.g. “Melissa Bonny - Essential Vocalist Collection”). Only built when the thresholds below are met.</p>
-        </div>
-        <div class="setting-control">
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_essential_vocalists_enabled" {% if config.get('playlists', {}).get('essential_vocalists_enabled', True) %}checked{% endif %}>
-          </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_exclude_christmas">
+        <div class="input-card">
+          <label for="playlists_christmas_marker">Christmas Playlist Marker</label>
+          <input type="text" class="form-control form-control-sm" id="playlists_christmas_marker" placeholder="christmas" value="{{ config.get('playlists', {}).get('christmas_playlist_marker', 'christmas') }}">
+          <span class="help-text">A playlist whose <em>name</em> contains this text may hold Christmas tracks. Default: <strong>christmas</strong></span>
         </div>
       </div>
 
-      <div class="setting-card">
-        <div class="setting-info">
-          <label class="setting-title" for="playlists_essential_vocalists_include_featured">Vocalist: Include Guest Appearances</label>
-          <p class="setting-description">Include 4★/5★ tracks where the vocalist is a featured guest on another artist's release.</p>
+      {# Excluded artists. #}
+      <div class="input-card mb-4">
+        <label class="setting-title" for="newExcludedArtistInput">Excluded Artists</label>
+        <div class="input-group input-group-sm mb-2">
+          <input type="text" class="form-control" id="newExcludedArtistInput" placeholder="Add artist to exclude..." onkeydown="if (event.key === 'Enter') { event.preventDefault(); addExcludedArtist(); }">
+          <button class="btn btn-outline-primary" type="button" onclick="addExcludedArtist()">
+            <i class="bi bi-plus-lg"></i> Add
+          </button>
         </div>
-        <div class="setting-control">
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_essential_vocalists_include_featured" {% if config.get('playlists', {}).get('essential_vocalists_include_featured', True) %}checked{% endif %}>
-          </div>
+        <div id="excludedArtistsList" class="d-flex flex-wrap gap-2">
+          <span class="text-muted small">No artists excluded.</span>
         </div>
+        <span class="help-text">Artists that never appear in auto-generated playlists. Matching is case-insensitive.</span>
       </div>
 
-      <div class="setting-card">
+      {# ═══ GENRE TOP TRACKS ═════════════════════════════════════════════ #}
+      <h6 class="mb-2 mt-4"><i class="bi bi-tags"></i> Genre Top Tracks</h6>
+      <div class="setting-card mb-2">
         <div class="setting-info">
           <label class="setting-title" for="playlists_genre_playlists_enabled">Create Genre Top-Tracks Playlists</label>
-          <p class="setting-description">Library-wide <code>{Genre} - Top Tracks.m3u</code> playlists generated once per scan (and refreshed per album when its tracks change): every track at or above the Minimum Stars is assigned its top weighted genres, each genre pool is ranked by <strong>global</strong> popularity (see Track Ordering below), a playlist is only created when the genre clears the Create Threshold, and every qualifying track is included up to <strong>Max Tracks Per Playlist</strong> (0 = no cap).</p>
+          <p class="setting-description">Library-wide <code>{Genre} - Top Tracks.m3u</code>, generated once per scan and refreshed per album when its tracks change.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -3596,11 +3749,166 @@
           </div>
         </div>
       </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_genre_playlists_enabled">
+        <div class="thresholds-grid mb-2">
+          <div class="input-card">
+            <label for="playlists_genre_create_threshold">Create Threshold</label>
+            <input type="number" step="1" min="1" max="5000" class="form-control form-control-sm" id="playlists_genre_create_threshold" placeholder="100" value="{{ config.get('playlists', {}).get('genre_playlists_create_threshold', 100) }}">
+            <span class="help-text">Create/refresh a genre playlist only when it has <strong>at least</strong> this many qualifying tracks. Default: <strong>100</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_genre_delete_threshold">Delete Threshold</label>
+            <input type="number" step="1" min="1" max="5000" class="form-control form-control-sm" id="playlists_genre_delete_threshold" placeholder="80" value="{{ config.get('playlists', {}).get('genre_playlists_delete_threshold', 80) }}">
+            <span class="help-text">Delete a genre playlist when it drops below this many qualifying tracks. Default: <strong>80</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_genre_max_tracks">Max Tracks Per Playlist</label>
+            <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="playlists_genre_max_tracks" placeholder="300" value="{{ config.get('playlists', {}).get('genre_playlists_max_tracks', 300) }}">
+            <span class="help-text">Cap after ordering. <strong>0</strong> = no cap. Default: <strong>300</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_genre_max_genres">Genres Per Track</label>
+            <input type="number" step="1" min="1" max="10" class="form-control form-control-sm" id="playlists_genre_max_genres" placeholder="3" value="{{ config.get('playlists', {}).get('genre_playlists_max_genres', 3) }}">
+            <span class="help-text">How many top weighted genres each track may appear in. Default: <strong>3</strong></span>
+          </div>
+        </div>
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_genre_delete_enabled">Delete Genre Playlists Below Threshold</label>
+            <p class="setting-description">Removes a genre playlist once its qualifying count drops below the Delete Threshold (and cleans stale files from name-template changes).</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_genre_delete_enabled" {% if config.get('playlists', {}).get('genre_playlists_delete_enabled', True) %}checked{% endif %}>
+            </div>
+          </div>
+        </div>
+        <div class="input-card">
+          <label for="playlists_genre_name_template">Genre Playlist Name Template</label>
+          <input type="text" class="form-control form-control-sm" id="playlists_genre_name_template" placeholder="{genre} - Top Tracks" value="{{ config.get('playlists', {}).get('genre_playlists_name_template', '{genre} - Top Tracks') }}">
+          <span class="help-text">Supports the <code>{genre}</code> placeholder. Default: <strong>{genre} - Top Tracks</strong></span>
+        </div>
+      </div>
 
-      <div class="setting-card">
+      {# ═══ ARTIST COLLECTIONS ═══════════════════════════════════════════ #}
+      <h6 class="mb-2 mt-4"><i class="bi bi-person-badge"></i> Artist Collections</h6>
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_new_music_enabled">Create New Music Playlist</label>
-          <p class="setting-description">Rolling library-wide <code>New Music.m3u</code>: the most recently added 4★/5★ tracks (added to Navidrome, not recently rated), newest first, capped at 100 — created once 100 tracks qualify, with newer additions pushing older ones out on each scan.</p>
+          <label class="setting-title" for="playlists_essential_enabled">Create Essential Playlists During Scans</label>
+          <p class="setting-description">Per-artist highlight playlists written into the Playlists folder during popularity scans.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_essential_enabled" {% if config.get('playlists', {}).get('essential_playlists_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_essential_enabled">
+        <div class="thresholds-grid mb-2">
+          <div class="input-card">
+            <label for="playlists_essential_max_tracks">Essential Playlist Max Tracks</label>
+            <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_max_tracks', 50) }}">
+            <span class="help-text">Cap on tracks in each artist's Essential Collection, applied after ordering. Default: <strong>50</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_essential_name_template">Essential Playlist Name Template</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_essential_name_template" placeholder="{artist} - Essential Collection" value="{{ config.get('playlists', {}).get('essential_name_template', '{artist} - Essential Collection') }}">
+            <span class="help-text">Supports the <code>{artist}</code> placeholder. Default: <strong>{artist} - Essential Collection</strong></span>
+          </div>
+        </div>
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_essential_include_featured">Include Featured Appearances</label>
+            <p class="setting-description">A 4★/5★ track like "Powerwolf feat. Unleash The Archers" also lands on Unleash The Archers' Essential Collection.</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_essential_include_featured" {% if config.get('playlists', {}).get('essential_include_featured', True) %}checked{% endif %}>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# Vocalist collections — nested under their own toggle. #}
+      <div class="setting-card mb-2">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_essential_vocalists_enabled">Create Essential Vocalist Collections</label>
+          <p class="setting-description">Cross-project best-ofs for a vocalist: their own releases plus guest appearances (e.g. "Melissa Bonny - Essential Vocalist Collection").</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_essential_vocalists_enabled" {% if config.get('playlists', {}).get('essential_vocalists_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_essential_vocalists_enabled">
+        <div class="thresholds-grid mb-2">
+          <div class="input-card">
+            <label for="playlists_essential_vocalists_max_tracks">Vocalist Playlist Max Tracks</label>
+            <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_vocalists_max_tracks', 50) }}">
+            <span class="help-text">Cap on tracks in each vocalist's collection, applied after ordering and spreading. Default: <strong>50</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_essential_vocalists_name_template">Vocalist Collection Name Template</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_essential_vocalists_name_template" placeholder="{artist} - Essential Vocalist Collection" value="{{ config.get('playlists', {}).get('essential_vocalists_name_template', '{artist} - Essential Vocalist Collection') }}">
+            <span class="help-text">Supports the <code>{artist}</code> placeholder. Default: <strong>{artist} - Essential Vocalist Collection</strong></span>
+          </div>
+        </div>
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_essential_vocalists_include_featured">Vocalist: Include Guest Appearances</label>
+            <p class="setting-description">Include 4★/5★ tracks where the vocalist is a featured guest on another artist's release.</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_essential_vocalists_include_featured" {% if config.get('playlists', {}).get('essential_vocalists_include_featured', True) %}checked{% endif %}>
+            </div>
+          </div>
+        </div>
+        {# The seven threshold rules are advanced: folded away by default. #}
+        <details class="input-card">
+          <summary class="fw-semibold" style="cursor:pointer;">Advanced vocalist thresholds</summary>
+          <div class="thresholds-grid mt-2">
+            <div class="input-card">
+              <label for="playlists_essential_vocalists_min_tracks">Min Qualifying Tracks</label>
+              <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_min_tracks" placeholder="15" value="{{ config.get('playlists', {}).get('essential_vocalists_min_tracks', 15) }}">
+            </div>
+            <div class="input-card">
+              <label for="playlists_essential_vocalists_min_release_groups">Min Release Groups</label>
+              <input type="number" step="1" min="1" max="100" class="form-control form-control-sm" id="playlists_essential_vocalists_min_release_groups" placeholder="4" value="{{ config.get('playlists', {}).get('essential_vocalists_min_release_groups', 4) }}">
+            </div>
+            <div class="input-card">
+              <label for="playlists_essential_vocalists_min_projects_with_five">Projects With N Tracks</label>
+              <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="playlists_essential_vocalists_min_projects_with_five" placeholder="2" value="{{ config.get('playlists', {}).get('essential_vocalists_min_projects_with_five', 2) }}">
+            </div>
+            <div class="input-card">
+              <label for="playlists_essential_vocalists_min_project_tracks">Tracks Per Project</label>
+              <input type="number" step="1" min="1" max="100" class="form-control form-control-sm" id="playlists_essential_vocalists_min_project_tracks" placeholder="5" value="{{ config.get('playlists', {}).get('essential_vocalists_min_project_tracks', 5) }}">
+            </div>
+            <div class="input-card">
+              <label for="playlists_essential_vocalists_min_projects">Min Projects (alternative)</label>
+              <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="playlists_essential_vocalists_min_projects" placeholder="3" value="{{ config.get('playlists', {}).get('essential_vocalists_min_projects', 3) }}">
+            </div>
+            <div class="input-card">
+              <label for="playlists_essential_vocalists_min_outside_dominant">Min Tracks Outside Dominant Project</label>
+              <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_min_outside_dominant" placeholder="5" value="{{ config.get('playlists', {}).get('essential_vocalists_min_outside_dominant', 5) }}">
+            </div>
+            <div class="input-card">
+              <label for="playlists_essential_vocalists_min_outside_ratio">Min Share Outside Dominant Project</label>
+              <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="playlists_essential_vocalists_min_outside_ratio" placeholder="0.25" value="{{ config.get('playlists', {}).get('essential_vocalists_min_outside_ratio', 0.25) }}">
+            </div>
+          </div>
+        </details>
+      </div>
+
+      {# ═══ LIBRARY PLAYLISTS ════════════════════════════════════════════ #}
+      <h6 class="mb-2 mt-4"><i class="bi bi-collection"></i> Library Playlists</h6>
+      <small class="text-muted d-block mb-3">Each row is one playlist: switch it on, name it, and set its size. Limits only apply while it is on.</small>
+
+      <div class="setting-card mb-2">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_new_music_enabled">New Music</label>
+          <p class="setting-description">The most recently added 4★/5★ tracks, newest first — a rolling discovery feed. Created once {{ 25 }} tracks qualify; fixed cap of 100.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -3609,46 +3917,10 @@
         </div>
       </div>
 
-      <div class="setting-card">
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_decade_enabled">Create Decade Top-Tracks Playlists</label>
-          <p class="setting-description">Auto-generated decade playlists (e.g. <code>1980s - Top Tracks</code>, <code>1990s - Top Tracks</code>) built from 4★/5★ tracks grouped by original release year, ranked by global popularity and interleaved across artists.</p>
-        </div>
-        <div class="setting-control">
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_decade_enabled" {% if config.get('playlists', {}).get('decade_playlists_enabled', True) %}checked{% endif %}>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-info">
-          <label class="setting-title" for="playlists_hit_singles_enabled">Create Hit Singles Playlist</label>
-          <p class="setting-description">Library-wide <code>Hit Singles</code> radio mix built from verified 4★/5★ singles across your collection, deduplicated to studio recordings and interleaved across artists.</p>
-        </div>
-        <div class="setting-control">
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_hit_singles_enabled" {% if config.get('playlists', {}).get('hit_singles_playlist_enabled', True) %}checked{% endif %}>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-info">
-          <label class="setting-title" for="playlists_hidden_gems_enabled">Create Hidden Gems &amp; Deep Cuts Playlist</label>
-          <p class="setting-description">Library-wide <code>Hidden Gems</code> playlist of 4★/5★ studio album tracks that were never released as singles — surfacing standout deep cuts across your library.</p>
-        </div>
-        <div class="setting-control">
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_hidden_gems_enabled" {% if config.get('playlists', {}).get('hidden_gems_playlist_enabled', False) %}checked{% endif %}>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-info">
-          <label class="setting-title" for="playlists_new_releases_enabled">Create New Releases Playlist</label>
-          <p class="setting-description">Library-wide <code>New Releases</code> playlist of 4★/5★ tracks released in the current or previous calendar year (distinct from <em>New Music</em>, which tracks recently imported files regardless of release era).</p>
+          <label class="setting-title" for="playlists_new_releases_enabled">New Releases</label>
+          <p class="setting-description">4★/5★ tracks released in the current or previous calendar year (distinct from New Music, which tracks recently imported files).</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -3656,56 +3928,105 @@
           </div>
         </div>
       </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_new_releases_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_new_releases_name">Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_new_releases_name" placeholder="New Releases" value="{{ config.get('playlists', {}).get('new_releases_playlist_name', 'New Releases') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_new_releases_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_new_releases_max_tracks" placeholder="100" value="{{ config.get('playlists', {}).get('new_releases_max_tracks', 100) }}">
+            <span class="help-text">Default: <strong>100</strong></span>
+          </div>
+        </div>
+      </div>
 
-      <div class="setting-card">
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_covers_enabled">Create Great Covers Playlist</label>
-          <p class="setting-description">Library-wide <code>Great Covers</code> playlist of 3★–5★ tracks identified by cover detection (<code>is_cover = 1</code>), ranked by global popularity.</p>
+          <label class="setting-title" for="playlists_hit_singles_enabled">Hit Singles</label>
+          <p class="setting-description">Verified 4★/5★ singles across the collection, deduplicated to studio recordings and spread across artists.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_covers_enabled" {% if config.get('playlists', {}).get('covers_playlist_enabled', False) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_hit_singles_enabled" {% if config.get('playlists', {}).get('hit_singles_playlist_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_hit_singles_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_hit_singles_name">Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_hit_singles_name" placeholder="Hit Singles" value="{{ config.get('playlists', {}).get('hit_singles_playlist_name', 'Hit Singles') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_hit_singles_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_hit_singles_max_tracks" placeholder="250" value="{{ config.get('playlists', {}).get('hit_singles_max_tracks', 250) }}">
+            <span class="help-text">Default: <strong>250</strong></span>
           </div>
         </div>
       </div>
 
-      <div class="setting-card">
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_covers_genre_enabled">Split Great Covers by Main Genre</label>
-          <p class="setting-description">Also create one playlist per <strong>main genre</strong> — Rock, Pop, Punk, Metal and the other root genres selected below. Subgenres are folded into their family, so <code>Nu Metal</code> lands in Metal and <code>Grunge</code> in Rock; no playlist is named after a subgenre. Off leaves only the library-wide <code>Great Covers</code> playlist.</p>
+          <label class="setting-title" for="playlists_hidden_gems_enabled">Hidden Gems &amp; Deep Cuts</label>
+          <p class="setting-description">4★/5★ studio album tracks that were never released as singles.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_covers_genre_enabled" {% if config.get('playlists', {}).get('covers_genre_playlists_enabled', False) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_hidden_gems_enabled" {% if config.get('playlists', {}).get('hidden_gems_playlist_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_hidden_gems_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_hidden_gems_name">Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_hidden_gems_name" placeholder="Hidden Gems" value="{{ config.get('playlists', {}).get('hidden_gems_playlist_name', 'Hidden Gems') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_hidden_gems_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_hidden_gems_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('hidden_gems_max_tracks', 200) }}">
+            <span class="help-text">Default: <strong>200</strong></span>
           </div>
         </div>
       </div>
 
-      <div class="setting-card">
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title">Main Genres for Great Covers</label>
-          <p class="setting-description">Which main genres get their own covers playlist when the split above is enabled. Only vocabulary root genres are offered, so a subgenre can never appear here. Default: Rock, Pop, Punk, Metal.</p>
+          <label class="setting-title" for="playlists_decade_enabled">Decades</label>
+          <p class="setting-description">Top tracks grouped by original release year (e.g. <code>1980s - Top Tracks</code>), spread across artists.</p>
         </div>
         <div class="setting-control">
-          {% set _cover_genre_selected = cover_main_genre_selected if cover_main_genre_selected is defined else ['rock', 'pop', 'punk', 'metal'] %}
-          {% set _genre_choices = cover_main_genres if cover_main_genres is defined else [] %}
-          <div class="d-flex flex-wrap gap-3" style="max-width: 420px;">
-            {% for genre in _genre_choices %}
-            <div class="form-check">
-              <input class="form-check-input playlist-cover-genre" type="checkbox"
-                     id="playlists_covers_genre_{{ genre.id }}" value="{{ genre.id }}"
-                     {% if genre.id in _cover_genre_selected %}checked{% endif %}>
-              <label class="form-check-label" for="playlists_covers_genre_{{ genre.id }}">{{ genre.display }}</label>
-            </div>
-            {% endfor %}
+          <div class="form-check form-switch m-0">
+            <input class="form-check-input" type="checkbox" id="playlists_decade_enabled" {% if config.get('playlists', {}).get('decade_playlists_enabled', True) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_decade_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_decade_name_template">Name Template</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_decade_name_template" placeholder="{decade}s - Top Tracks" value="{{ config.get('playlists', {}).get('decade_playlists_name_template', '{decade}s - Top Tracks') }}">
+            <span class="help-text">Supports <code>{decade}</code>. Default: <strong>{decade}s - Top Tracks</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_decade_min_tracks">Min Tracks</label>
+            <input type="number" step="1" min="5" max="1000" class="form-control form-control-sm" id="playlists_decade_min_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('decade_playlists_min_tracks', 50) }}">
+            <span class="help-text">Default: <strong>50</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_decade_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_decade_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('decade_playlists_max_tracks', 200) }}">
+            <span class="help-text">Default: <strong>200</strong></span>
           </div>
         </div>
       </div>
 
-      <div class="setting-card">
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_acoustic_enabled">Create Acoustic &amp; Unplugged Playlist</label>
-          <p class="setting-description">Library-wide <code>Acoustic Essentials</code> playlist of 4★/5★ acoustic, unplugged and stripped-back recordings.</p>
+          <label class="setting-title" for="playlists_acoustic_enabled">Acoustic &amp; Unplugged</label>
+          <p class="setting-description">4★/5★ acoustic, unplugged and stripped-back recordings.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -3713,11 +4034,24 @@
           </div>
         </div>
       </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_acoustic_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_acoustic_name">Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_acoustic_name" placeholder="Acoustic Essentials" value="{{ config.get('playlists', {}).get('acoustic_playlist_name', 'Acoustic Essentials') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_acoustic_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_acoustic_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('acoustic_max_tracks', 150) }}">
+            <span class="help-text">Default: <strong>150</strong></span>
+          </div>
+        </div>
+      </div>
 
-      <div class="setting-card">
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_high_energy_enabled">Create High Energy &amp; Upbeat Playlist</label>
-          <p class="setting-description">Library-wide <code>High Energy &amp; Upbeat</code> playlist of 4★/5★ tracks selected by high danceability &amp; BPM (<code>danceability &gt;= 0.65</code> and <code>bpm &gt;= 115</code>) or energetic/upbeat mood and genre tags.</p>
+          <label class="setting-title" for="playlists_high_energy_enabled">High Energy &amp; Upbeat</label>
+          <p class="setting-description">4★/5★ tracks selected by high danceability &amp; BPM (<code>danceability &gt;= 0.65</code> and <code>bpm &gt;= 115</code>; fixed thresholds) or energetic/upbeat mood and genre tags.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -3725,11 +4059,24 @@
           </div>
         </div>
       </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_high_energy_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_high_energy_name">Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_high_energy_name" placeholder="High Energy &amp; Upbeat" value="{{ config.get('playlists', {}).get('high_energy_playlist_name', 'High Energy & Upbeat') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_high_energy_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_high_energy_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('high_energy_max_tracks', 200) }}">
+            <span class="help-text">Default: <strong>200</strong></span>
+          </div>
+        </div>
+      </div>
 
-      <div class="setting-card">
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_mood_enabled">Create Mood Mix Playlists</label>
-          <p class="setting-description">Auto-generated <code>{Mood} - Mix</code> playlists built from 4★/5★ tracks grouped by their Essentia / mood tags whenever a mood reaches the minimum track count.</p>
+          <label class="setting-title" for="playlists_mood_enabled">Mood Mixes</label>
+          <p class="setting-description"><code>{Mood} - Mix</code> playlists grouped by Essentia / mood tags, built whenever a mood reaches the minimum track count.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
@@ -3737,368 +4084,182 @@
           </div>
         </div>
       </div>
-
-      <div class="setting-card">
-        <div class="setting-info">
-          <label class="setting-title" for="playlists_genre_delete_enabled">Delete Genre Playlists Below Threshold</label>
-          <p class="setting-description">Removes a genre playlist once its qualifying track count drops below the Delete Threshold (and cleans up stale files from name-template changes).</p>
-        </div>
-        <div class="setting-control">
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_genre_delete_enabled" {% if config.get('playlists', {}).get('genre_playlists_delete_enabled', True) %}checked{% endif %}>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_mood_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_mood_name_template">Name Template</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_mood_name_template" placeholder="{mood} - Mix" value="{{ config.get('playlists', {}).get('mood_playlists_name_template', '{mood} - Mix') }}">
+            <span class="help-text">Supports <code>{mood}</code>. Default: <strong>{mood} - Mix</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_mood_min_tracks">Min Tracks</label>
+            <input type="number" step="1" min="5" max="1000" class="form-control form-control-sm" id="playlists_mood_min_tracks" placeholder="40" value="{{ config.get('playlists', {}).get('mood_playlists_min_tracks', 40) }}">
+            <span class="help-text">Default: <strong>40</strong></span>
+          </div>
+          <div class="input-card">
+            <label for="playlists_mood_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_mood_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('mood_playlists_max_tracks', 150) }}">
+            <span class="help-text">Default: <strong>150</strong></span>
           </div>
         </div>
       </div>
 
-      <div class="setting-card">
+      {# ═══ COVERS ═══════════════════════════════════════════════════════ #}
+      <h6 class="mb-2 mt-4"><i class="bi bi-disc"></i> Covers</h6>
+      <div class="setting-card mb-2">
         <div class="setting-info">
-          <label class="setting-title" for="playlists_exclude_christmas">Exclude Christmas From Playlists</label>
-          <p class="setting-description">Keeps Christmas music out of every generated playlist (genre, Essential Collection, New Music) <strong>except</strong> those whose name contains the marker below. A track counts as Christmas when its title, album or genres say so — including tags like <code>Holiday</code>, <code>Xmas</code> and <code>Noel</code>. Turn this off to let seasonal tracks appear everywhere again.</p>
+          <label class="setting-title" for="playlists_covers_enabled">Create Great Covers Playlist</label>
+          <p class="setting-description">3★–5★ tracks identified by cover detection, ranked by global popularity.</p>
         </div>
         <div class="setting-control">
           <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_exclude_christmas" {% if config.get('playlists', {}).get('exclude_christmas_from_playlists', True) %}checked{% endif %}>
+            <input class="form-check-input" type="checkbox" id="playlists_covers_enabled" {% if config.get('playlists', {}).get('covers_playlist_enabled', False) %}checked{% endif %}>
+          </div>
+        </div>
+      </div>
+      <div class="setting-subgroup mb-2" data-playlists-depends-on="playlists_covers_enabled">
+        <div class="thresholds-grid mb-2">
+          <div class="input-card">
+            <label for="playlists_covers_name">Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_covers_name" placeholder="Great Covers" value="{{ config.get('playlists', {}).get('covers_playlist_name', 'Great Covers') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_covers_max_tracks">Max Tracks</label>
+            <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_covers_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('covers_max_tracks', 150) }}">
+            <span class="help-text">Default: <strong>150</strong></span>
+          </div>
+        </div>
+
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_covers_genre_enabled">Split Great Covers by Main Genre</label>
+            <p class="setting-description">One playlist per <strong>main genre</strong> (Rock, Pop, Punk, Metal…). Subgenres fold into their family, so <code>Nu Metal</code> lands in Metal.</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_covers_genre_enabled" {% if config.get('playlists', {}).get('covers_genre_playlists_enabled', False) %}checked{% endif %}>
+            </div>
+          </div>
+        </div>
+        <div class="setting-subgroup" data-playlists-depends-on="playlists_covers_genre_enabled">
+          <div class="thresholds-grid mb-2">
+            <div class="input-card">
+              <label for="playlists_covers_genre_name_template">Name Template</label>
+              <input type="text" class="form-control form-control-sm" id="playlists_covers_genre_name_template" placeholder="{genre} - Great Covers" value="{{ config.get('playlists', {}).get('covers_genre_playlists_name_template', '{genre} - Great Covers') }}">
+              <span class="help-text">Supports <code>{genre}</code>. Default: <strong>{genre} - Great Covers</strong></span>
+            </div>
+            <div class="input-card">
+              <label for="playlists_covers_genre_min_tracks">Min Tracks</label>
+              <input type="number" step="1" min="1" max="5000" class="form-control form-control-sm" id="playlists_covers_genre_min_tracks" placeholder="12" value="{{ config.get('playlists', {}).get('covers_genre_playlists_min_tracks', 12) }}">
+              <span class="help-text">Below this the genre playlist is removed. Default: <strong>12</strong></span>
+            </div>
+            <div class="input-card">
+              <label for="playlists_covers_genre_max_tracks">Max Tracks</label>
+              <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_covers_genre_max_tracks" placeholder="100" value="{{ config.get('playlists', {}).get('covers_genre_playlists_max_tracks', 100) }}">
+              <span class="help-text">Default: <strong>100</strong></span>
+            </div>
+          </div>
+          <div class="input-card">
+            <label class="setting-title">Main Genres</label>
+            {% set _cover_genre_selected = cover_main_genre_selected if cover_main_genre_selected is defined else ['rock', 'pop', 'punk', 'metal'] %}
+            {% set _genre_choices = cover_main_genres if cover_main_genres is defined else [] %}
+            <div class="d-flex flex-wrap gap-3">
+              {% for genre in _genre_choices %}
+              <div class="form-check">
+                <input class="form-check-input playlist-cover-genre" type="checkbox"
+                       id="playlists_covers_genre_{{ genre.id }}" value="{{ genre.id }}"
+                       {% if genre.id in _cover_genre_selected %}checked{% endif %}>
+                <label class="form-check-label" for="playlists_covers_genre_{{ genre.id }}">{{ genre.display }}</label>
+              </div>
+              {% endfor %}
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="input-card naming-card">
-        <label for="playlists_christmas_marker">Christmas Playlist Marker</label>
-        <input type="text" class="form-control" id="playlists_christmas_marker" placeholder="christmas" value="{{ config.get('playlists', {}).get('christmas_playlist_marker', 'christmas') }}">
-        <span class="help-text">A playlist whose <em>name</em> contains this text may hold Christmas tracks; every other playlist excludes them. Default: <strong>christmas</strong> (matches “Christmas - Top Tracks” and “Christmas Pop - Top Tracks”).</span>
-      </div>
-
-      <!-- 2. Thresholds & limits — auto-reflowing grid -->
-      <div class="thresholds-grid">
-        <div class="input-card">
-          <label for="playlists_genre_create_threshold">Create Threshold</label>
-          <input type="number" step="1" min="1" max="5000" class="form-control form-control-sm" id="playlists_genre_create_threshold" placeholder="100" value="{{ config.get('playlists', {}).get('genre_playlists_create_threshold', 100) }}">
-          <span class="help-text">Create/refresh a genre playlist only when it has more than this many qualifying tracks. Default: <strong>100</strong></span>
+      {# ═══ PER-USER FAVOURITES ══════════════════════════════════════════ #}
+      <h6 class="mb-2 mt-4"><i class="bi bi-star"></i> Per-User Favourites</h6>
+      <div class="setting-card mb-2">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_favourite_enabled">Favourite Playlists</label>
+          <p class="setting-description">Build a <strong>Favourite Artists</strong> and a <strong>Favourite Albums</strong> playlist for each Navidrome user, from that user's own stars.</p>
         </div>
-        <div class="input-card">
-          <label for="playlists_genre_delete_threshold">Delete Threshold</label>
-          <input type="number" step="1" min="1" max="5000" class="form-control form-control-sm" id="playlists_genre_delete_threshold" placeholder="80" value="{{ config.get('playlists', {}).get('genre_playlists_delete_threshold', 80) }}">
-          <span class="help-text">Delete a genre playlist when it drops below this many qualifying tracks. Default: <strong>80</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_genre_min_stars">Minimum Stars</label>
-          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="playlists_genre_min_stars" placeholder="4" value="{{ config.get('playlists', {}).get('genre_playlists_min_stars', 4) }}">
-          <span class="help-text">Only tracks rated at least this many stars qualify. Default: <strong>4</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_genre_max_genres">Genres Per Track</label>
-          <input type="number" step="1" min="1" max="10" class="form-control form-control-sm" id="playlists_genre_max_genres" placeholder="3" value="{{ config.get('playlists', {}).get('genre_playlists_max_genres', 3) }}">
-          <span class="help-text">How many top weighted genres each track may appear in. Default: <strong>3</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_genre_max_tracks">Max Tracks Per Playlist</label>
-          <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="playlists_genre_max_tracks" placeholder="300" value="{{ config.get('playlists', {}).get('genre_playlists_max_tracks', 300) }}">
-          <span class="help-text">Cap on tracks in each genre playlist after ordering. Set to <strong>0</strong> for no cap — every qualifying track is included. Default: <strong>300</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_essential_max_tracks">Essential Playlist Max Tracks</label>
-          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_max_tracks', 50) }}">
-          <label for="playlists_essential_vocalists_min_tracks" class="mt-2">Vocalist: Min Qualifying Tracks</label>
-          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_min_tracks" placeholder="15" value="{{ config.get('playlists', {}).get('essential_vocalists_min_tracks', 15) }}">
-          <label for="playlists_essential_vocalists_min_release_groups" class="mt-2">Vocalist: Min Release Groups</label>
-          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm" id="playlists_essential_vocalists_min_release_groups" placeholder="4" value="{{ config.get('playlists', {}).get('essential_vocalists_min_release_groups', 4) }}">
-          <label for="playlists_essential_vocalists_min_projects_with_five" class="mt-2">Vocalist: Projects With N Tracks</label>
-          <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="playlists_essential_vocalists_min_projects_with_five" placeholder="2" value="{{ config.get('playlists', {}).get('essential_vocalists_min_projects_with_five', 2) }}">
-          <label for="playlists_essential_vocalists_min_project_tracks" class="mt-2">Vocalist: Tracks Per Project</label>
-          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm" id="playlists_essential_vocalists_min_project_tracks" placeholder="5" value="{{ config.get('playlists', {}).get('essential_vocalists_min_project_tracks', 5) }}">
-          <label for="playlists_essential_vocalists_min_projects" class="mt-2">Vocalist: Min Projects (alternative)</label>
-          <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="playlists_essential_vocalists_min_projects" placeholder="3" value="{{ config.get('playlists', {}).get('essential_vocalists_min_projects', 3) }}">
-          <label for="playlists_essential_vocalists_min_outside_dominant" class="mt-2">Vocalist: Min Tracks Outside Dominant Project</label>
-          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_min_outside_dominant" placeholder="5" value="{{ config.get('playlists', {}).get('essential_vocalists_min_outside_dominant', 5) }}">
-          <label for="playlists_essential_vocalists_min_outside_ratio" class="mt-2">Vocalist: Min Share Outside Dominant Project</label>
-          <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="playlists_essential_vocalists_min_outside_ratio" placeholder="0.25" value="{{ config.get('playlists', {}).get('essential_vocalists_min_outside_ratio', 0.25) }}">
-          <label for="playlists_essential_vocalists_max_tracks" class="mt-2">Vocalist Playlist Max Tracks</label>
-          <input type="number" step="1" min="1" max="500" class="form-control form-control-sm" id="playlists_essential_vocalists_max_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('essential_vocalists_max_tracks', 50) }}">
-          <span class="help-text">Cap on tracks in each artist's Essential Collection, applied after the list is ordered and spread across artists. Default: <strong>50</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_favourite_enabled">Favourite Playlists</label>
-          <div class="form-check form-switch">
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
             <input class="form-check-input" type="checkbox" id="playlists_favourite_enabled" {% if config.get('playlists', {}).get('favourite_playlists_enabled', true) %}checked{% endif %}>
           </div>
-          <span class="help-text">Build a <strong>Favourite Artists</strong> and a <strong>Favourite Albums</strong> playlist for each Navidrome user, from that user's stars. Each playlist is saved to that user's own Navidrome account. Default: <strong>on</strong></span>
         </div>
-        <div class="input-card">
-          <label for="playlists_favourite_min_stars">Favourite Minimum Stars</label>
-          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="playlists_favourite_min_stars" placeholder="4" value="{{ config.get('playlists', {}).get('favourite_min_stars', 4) }}">
-          <span class="help-text">Only tracks rated at least this many stars are included. Default: <strong>4</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_favourite_artists_name">Favourite Artists Playlist Name</label>
-          <input type="text" class="form-control form-control-sm" id="playlists_favourite_artists_name" placeholder="Favourite Artists" value="{{ config.get('playlists', {}).get('favourite_artists_name', 'Favourite Artists') }}">
-          <span class="help-text">Name of the per-user playlist built from favourited artists. Default: <strong>Favourite Artists</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_favourite_albums_name">Favourite Albums Playlist Name</label>
-          <input type="text" class="form-control form-control-sm" id="playlists_favourite_albums_name" placeholder="Favourite Albums" value="{{ config.get('playlists', {}).get('favourite_albums_name', 'Favourite Albums') }}">
-          <span class="help-text">Name of the per-user playlist built from favourited albums. Default: <strong>Favourite Albums</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_favourite_sync">Sync Favourites At Scan End</label>
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="playlists_favourite_sync" {% if config.get('playlists', {}).get('sync_favourites_from_navidrome', false) %}checked{% endif %}>
+      </div>
+      <div class="setting-subgroup" data-playlists-depends-on="playlists_favourite_enabled">
+        <div class="thresholds-grid">
+          <div class="input-card">
+            <label for="playlists_favourite_min_stars">Minimum Stars</label>
+            <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="playlists_favourite_min_stars" placeholder="4" value="{{ config.get('playlists', {}).get('favourite_min_stars', 4) }}">
+            <span class="help-text">Default: <strong>4</strong></span>
           </div>
-          <span class="help-text">Pull every Navidrome user's stars from Navidrome before building the favourite playlists. Off = only stars already stored locally are used. Default: <strong>off</strong></span>
+          <div class="input-card">
+            <label for="playlists_favourite_artists_name">Artists Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_favourite_artists_name" placeholder="Favourite Artists" value="{{ config.get('playlists', {}).get('favourite_artists_name', 'Favourite Artists') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_favourite_albums_name">Albums Playlist Name</label>
+            <input type="text" class="form-control form-control-sm" id="playlists_favourite_albums_name" placeholder="Favourite Albums" value="{{ config.get('playlists', {}).get('favourite_albums_name', 'Favourite Albums') }}">
+          </div>
+          <div class="input-card">
+            <label for="playlists_favourite_sync">Sync Favourites At Scan End</label>
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="playlists_favourite_sync" {% if config.get('playlists', {}).get('sync_favourites_from_navidrome', false) %}checked{% endif %}>
+            </div>
+            <span class="help-text">Pull each user's stars from Navidrome before building. Off = use locally stored stars only. Default: <strong>off</strong></span>
+          </div>
         </div>
-        <div class="input-card">
-          <label for="playlists_genre_ai_cover_enabled">AI Genre Covers</label>
-          <div class="form-check form-switch">
+      </div>
+
+      {# ═══ ARTWORK ══════════════════════════════════════════════════════ #}
+      <h6 class="mb-2 mt-4"><i class="bi bi-image"></i> Artwork</h6>
+      <div class="setting-card mb-2">
+        <div class="setting-info">
+          <label class="setting-title" for="playlists_genre_ai_cover_enabled">AI Genre Covers</label>
+          <p class="setting-description">Generate AI cover artwork for each <strong>Top Genre</strong> playlist (needs the Gemini key on the Integrations tab). Artist / Essential playlists are unaffected.</p>
+        </div>
+        <div class="setting-control">
+          <div class="form-check form-switch m-0">
             <input class="form-check-input" type="checkbox" id="playlists_genre_ai_cover_enabled" {% if config.get('playlists', {}).get('genre_playlist_ai_cover_enabled', true) %}checked{% endif %}>
           </div>
-          <span class="help-text">Generate AI cover artwork for each <strong>Top Genre</strong> playlist (requires the Google Gemini key above). Artist / Essential playlists are unaffected. Default: <strong>on</strong> — nothing is generated until a Gemini key is configured.</span>
         </div>
-        <div class="input-card">
-          <label for="playlists_genre_ai_cover_regenerate">Regenerate AI Covers</label>
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="playlists_genre_ai_cover_regenerate" {% if config.get('playlists', {}).get('genre_playlist_ai_cover_regenerate', false) %}checked{% endif %}>
+      </div>
+      <div class="setting-subgroup" data-playlists-depends-on="playlists_genre_ai_cover_enabled">
+        <div class="setting-card mb-2">
+          <div class="setting-info">
+            <label class="setting-title" for="playlists_genre_ai_cover_regenerate">Regenerate AI Covers</label>
+            <p class="setting-description">Replace covers already generated with the same prompt. Leave off to generate each cover once.</p>
           </div>
-          <span class="help-text">Replace covers that were already generated with the same prompt. Leave off to generate each cover once. Default: <strong>off</strong></span>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_genre_ai_cover_regenerate" {% if config.get('playlists', {}).get('genre_playlist_ai_cover_regenerate', false) %}checked{% endif %}>
+            </div>
+          </div>
         </div>
         <div class="input-card">
           <label for="playlists_genre_ai_cover_prompt">AI Cover Prompt</label>
-          <input type="text" class="form-control form-control-sm" id="playlists_genre_ai_cover_prompt" placeholder="Leave blank for the built-in prompt" value="{{ config.get('playlists', {}).get('genre_playlist_ai_cover_prompt', '') }}">
+          <textarea class="form-control form-control-sm" id="playlists_genre_ai_cover_prompt" rows="3" placeholder="Leave blank for the built-in prompt">{{ config.get('playlists', {}).get('genre_playlist_ai_cover_prompt', '') }}</textarea>
           <span class="help-text">Prompt sent to the image model. <strong>{genre}</strong> is replaced with the genre name. Blank uses the built-in prompt.</span>
         </div>
       </div>
 
-      <!-- Playlist track ordering -->
-      <div class="thresholds-grid">
-        <div class="input-card">
-          <label for="playlists_order_mode">Track Ordering</label>
-          <select class="form-select form-select-sm" id="playlists_order_mode">
-            <option value="final_score" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') == 'final_score' %}selected{% endif %}>Final score (recommended)</option>
-            <option value="popularity" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') in ('popularity', 'prominence') %}selected{% endif %}>Global popularity</option>
-            <option value="stored" {% if config.get('playlists', {}).get('playlist_order_mode', 'final_score') == 'stored' %}selected{% endif %}>Stored score (album-relative)</option>
-          </select>
-          <span class="help-text">
-            <strong>Final score</strong> orders 5★ tracks first, then 4★, and ranks the tracks
-            inside each star section by their final score — the number shown on the track page.
-            <strong>Global popularity</strong> uses the raw Last.fm/ListenBrainz listener counts.
-            <strong>Stored score</strong> uses the score relative to each track's own album — so a
-            weak track on a quiet album can outrank a strong track on a busy one.
-            Default: <strong>Final score</strong>
-          </span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_max_per_artist">Max Tracks Per Artist</label>
-          <input type="number" step="1" min="0" max="500" class="form-control form-control-sm" id="playlists_max_per_artist" placeholder="4" value="{{ config.get('playlists', {}).get('genre_playlists_max_per_artist', 4) }}">
-          <span class="help-text">A <strong>hard quota</strong>: the strongest N tracks from each artist are kept and every other track by that artist is dropped from the playlist, so the limit still holds AFTER the list is spread across artists and capped. Guest credits ("X feat. Y") count against X — they do not buy a second allowance. Set to <strong>0</strong> for no limit. Default: <strong>4</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_interleave_artists">Spread Artists Through The List</label>
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_interleave_artists" {% if config.get('playlists', {}).get('playlist_interleave_artists', True) %}checked{% endif %}>
-          </div>
-          <span class="help-text">Avoids consecutive runs from the same artist, so a ranked list does not arrive album by album. Changes the order only — never which tracks are included. Default: <strong>on</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_weekly_shuffle">Shuffle The Order Weekly</label>
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_weekly_shuffle" {% if config.get('playlists', {}).get('weekly_shuffle_enabled', True) %}checked{% endif %}>
-          </div>
-          <span class="help-text">Reorders each generated playlist <strong>once per ISO week</strong> so it is not always the same sequence. The rotation is applied <em>after</em> the ranking and the track cap, so the SAME tracks are kept — only their order changes. Within a week the order is fixed, so an unchanged week costs no playlist rewrite. This is the master switch; which playlist types actually rotate is set below. Default: <strong>on</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_shuffle_genre">Shuffle Top Tracks Playlists</label>
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_shuffle_genre" {% if config.get('playlists', {}).get('weekly_shuffle_genre_top_tracks', True) %}checked{% endif %}>
-          </div>
-          <span class="help-text">The genre Top Tracks playlists are <em>charts</em> — a shopping list of what is hottest right now — so they rotate to stop a chart looking stale when nothing about the music changed. Needs the master switch above. Default: <strong>on</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_shuffle_new_music">Shuffle New Music</label>
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_shuffle_new_music" {% if config.get('playlists', {}).get('weekly_shuffle_new_music', True) %}checked{% endif %}>
-          </div>
-          <span class="help-text">The New Music playlist is a discovery feed, so it rotates to keep recent arrivals from always appearing in the same sequence. Needs the master switch above. Default: <strong>on</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_shuffle_essential">Shuffle Essential Artist Collections</label>
-          <div class="form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" id="playlists_shuffle_essential" {% if config.get('playlists', {}).get('weekly_shuffle_essential', False) %}checked{% endif %}>
-          </div>
-          <span class="help-text">An Essential collection is a <strong>ranked best-of for one artist</strong>: the first track is their strongest and the last their weakest. Shuffling it throws that ranking away, so it is <strong>off</strong> by default and the list stays in score order. Needs the master switch above. Default: <strong>off</strong></span>
-        </div>
-      </div>
-
-      <!-- Genre Exclusions were REMOVED. They judged a track from its SOURCE
-         columns rather than the cleaned Final Genres, so once Final Genres are
-         arbitrated per track they were redundant (a metal-final track cannot
-         pool into a rock playlist anyway) and harmful (a stale metal source tag
-         could pull a correctly-tagged rock track out of the rock playlist).
-         Playlists now pool purely from Final Genres. -->
-
-      <!-- Excluded Playlist Artists -->
-      <div class="card shadow-sm mb-3">
-        <div class="card-header">
-          <h5 class="mb-0"><i class="bi bi-person-slash"></i> Excluded Playlist Artists</h5>
-          <small class="text-muted">Artists that should never be added to auto-generated playlists</small>
-        </div>
-        <div class="card-body">
-          <div class="mb-3">
-            <label class="setting-title" for="newExcludedArtistInput">Excluded Artists</label>
-            <div class="input-group">
-              <input type="text" class="form-control" id="newExcludedArtistInput" placeholder="Add artist to exclude..." onkeydown="if (event.key === 'Enter') { event.preventDefault(); addExcludedArtist(); }">
-              <button class="btn btn-outline-primary" type="button" onclick="addExcludedArtist()">
-                <i class="bi bi-plus-lg"></i> Add
-              </button>
-            </div>
-            <span class="help-text">Press Enter or click Add. Matching is case-insensitive when checking for duplicates.</span>
-          </div>
-          <div id="excludedArtistsList" class="d-flex flex-wrap gap-2">
-            <span class="text-muted small">No artists excluded.</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 3. Naming templates — full-width input cards -->
-      <div class="thresholds-grid">
-        <div class="input-card">
-          <label for="playlists_decade_min_tracks">Decade Playlist Min Tracks</label>
-          <input type="number" step="1" min="5" max="1000" class="form-control form-control-sm" id="playlists_decade_min_tracks" placeholder="50" value="{{ config.get('playlists', {}).get('decade_playlists_min_tracks', 50) }}">
-          <span class="help-text">Minimum qualifying 4★/5★ tracks in a decade before creating its playlist. Default: <strong>50</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_decade_max_tracks">Decade Playlist Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_decade_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('decade_playlists_max_tracks', 200) }}">
-          <span class="help-text">Maximum tracks per decade playlist. Default: <strong>200</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_hit_singles_max_tracks">Hit Singles Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_hit_singles_max_tracks" placeholder="250" value="{{ config.get('playlists', {}).get('hit_singles_max_tracks', 250) }}">
-          <span class="help-text">Maximum tracks in the Hit Singles playlist. Default: <strong>250</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_hidden_gems_max_tracks">Hidden Gems Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_hidden_gems_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('hidden_gems_max_tracks', 200) }}">
-          <span class="help-text">Maximum tracks in the Hidden Gems playlist. Default: <strong>200</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_new_releases_max_tracks">New Releases Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_new_releases_max_tracks" placeholder="100" value="{{ config.get('playlists', {}).get('new_releases_max_tracks', 100) }}">
-          <span class="help-text">Maximum tracks in the New Releases playlist. Default: <strong>100</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_covers_max_tracks">Great Covers Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_covers_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('covers_max_tracks', 150) }}">
-          <span class="help-text">Maximum tracks in the Great Covers playlist. Default: <strong>150</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_covers_genre_min_tracks">Genre Covers Min Tracks</label>
-          <input type="number" step="1" min="1" max="5000" class="form-control form-control-sm" id="playlists_covers_genre_min_tracks" placeholder="12" value="{{ config.get('playlists', {}).get('covers_genre_playlists_min_tracks', 12) }}">
-          <span class="help-text">Minimum covers in a main genre before its playlist is created. A playlist whose pool falls below this is removed. Default: <strong>12</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_covers_genre_max_tracks">Genre Covers Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_covers_genre_max_tracks" placeholder="100" value="{{ config.get('playlists', {}).get('covers_genre_playlists_max_tracks', 100) }}">
-          <span class="help-text">Maximum tracks per main-genre covers playlist. Default: <strong>100</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_acoustic_max_tracks">Acoustic Playlist Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_acoustic_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('acoustic_max_tracks', 150) }}">
-          <span class="help-text">Maximum tracks in the Acoustic Essentials playlist. Default: <strong>150</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_high_energy_max_tracks">High Energy Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_high_energy_max_tracks" placeholder="200" value="{{ config.get('playlists', {}).get('high_energy_max_tracks', 200) }}">
-          <span class="help-text">Maximum tracks in the High Energy &amp; Upbeat playlist. Default: <strong>200</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_mood_min_tracks">Mood Mix Min Tracks</label>
-          <input type="number" step="1" min="5" max="1000" class="form-control form-control-sm" id="playlists_mood_min_tracks" placeholder="40" value="{{ config.get('playlists', {}).get('mood_playlists_min_tracks', 40) }}">
-          <span class="help-text">Minimum qualifying tracks in a mood before creating its mix playlist. Default: <strong>40</strong></span>
-        </div>
-        <div class="input-card">
-          <label for="playlists_mood_max_tracks">Mood Mix Max Tracks</label>
-          <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_mood_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('mood_playlists_max_tracks', 150) }}">
-          <span class="help-text">Maximum tracks per mood mix playlist. Default: <strong>150</strong></span>
-        </div>
-      </div>
-
-      <div class="input-card naming-card">
-        <label for="playlists_decade_name_template">Decade Playlist Name Template</label>
-        <input type="text" class="form-control" id="playlists_decade_name_template" placeholder="{decade}s - Top Tracks" value="{{ config.get('playlists', {}).get('decade_playlists_name_template', '{decade}s - Top Tracks') }}">
-        <span class="help-text">Supports the <code>{decade}</code> placeholder (e.g. 1980, 1990). Default: <strong>{decade}s - Top Tracks</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_mood_name_template">Mood Mix Playlist Name Template</label>
-        <input type="text" class="form-control" id="playlists_mood_name_template" placeholder="{mood} - Mix" value="{{ config.get('playlists', {}).get('mood_playlists_name_template', '{mood} - Mix') }}">
-        <span class="help-text">Supports the <code>{mood}</code> placeholder. Default: <strong>{mood} - Mix</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_hit_singles_name">Hit Singles Playlist Name</label>
-        <input type="text" class="form-control" id="playlists_hit_singles_name" placeholder="Hit Singles" value="{{ config.get('playlists', {}).get('hit_singles_playlist_name', 'Hit Singles') }}">
-        <span class="help-text">Default: <strong>Hit Singles</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_hidden_gems_name">Hidden Gems Playlist Name</label>
-        <input type="text" class="form-control" id="playlists_hidden_gems_name" placeholder="Hidden Gems" value="{{ config.get('playlists', {}).get('hidden_gems_playlist_name', 'Hidden Gems') }}">
-        <span class="help-text">Default: <strong>Hidden Gems</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_new_releases_name">New Releases Playlist Name</label>
-        <input type="text" class="form-control" id="playlists_new_releases_name" placeholder="New Releases" value="{{ config.get('playlists', {}).get('new_releases_playlist_name', 'New Releases') }}">
-        <span class="help-text">Default: <strong>New Releases</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_covers_name">Great Covers Playlist Name</label>
-        <input type="text" class="form-control" id="playlists_covers_name" placeholder="Great Covers" value="{{ config.get('playlists', {}).get('covers_playlist_name', 'Great Covers') }}">
-        <span class="help-text">Default: <strong>Great Covers</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_covers_genre_name_template">Genre Covers Playlist Name Template</label>
-        <input type="text" class="form-control" id="playlists_covers_genre_name_template" placeholder="{genre} - Great Covers" value="{{ config.get('playlists', {}).get('covers_genre_playlists_name_template', '{genre} - Great Covers') }}">
-        <span class="help-text">Supports the <code>{genre}</code> placeholder, which is replaced with the main genre. Default: <strong>{genre} - Great Covers</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_acoustic_name">Acoustic Playlist Name</label>
-        <input type="text" class="form-control" id="playlists_acoustic_name" placeholder="Acoustic Essentials" value="{{ config.get('playlists', {}).get('acoustic_playlist_name', 'Acoustic Essentials') }}">
-        <span class="help-text">Default: <strong>Acoustic Essentials</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_high_energy_name">High Energy Playlist Name</label>
-        <input type="text" class="form-control" id="playlists_high_energy_name" placeholder="High Energy &amp; Upbeat" value="{{ config.get('playlists', {}).get('high_energy_playlist_name', 'High Energy & Upbeat') }}">
-        <span class="help-text">Default: <strong>High Energy &amp; Upbeat</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_genre_name_template">Genre Playlist Name Template</label>
-        <input type="text" class="form-control" id="playlists_genre_name_template" placeholder="{genre} - Top Tracks" value="{{ config.get('playlists', {}).get('genre_playlists_name_template', '{genre} - Top Tracks') }}">
-        <span class="help-text">Supports the <code>{genre}</code> placeholder. Default: <strong>{genre} - Top Tracks</strong></span>
-      </div>
-      <div class="input-card naming-card">
-        <label for="playlists_essential_name_template">Essential Playlist Name Template</label>
-        <input type="text" class="form-control" id="playlists_essential_name_template" placeholder="{artist} - Essential Collection" value="{{ config.get('playlists', {}).get('essential_name_template', '{artist} - Essential Collection') }}">
-        <label for="playlists_essential_vocalists_name_template" class="mt-2">Essential Vocalist Name Template</label>
-        <input type="text" class="form-control" id="playlists_essential_vocalists_name_template" placeholder="{artist} - Essential Vocalist Collection" value="{{ config.get('playlists', {}).get('essential_vocalists_name_template', '{artist} - Essential Vocalist Collection') }}">
-        <span class="help-text">Supports the <code>{artist}</code> placeholder. Default: <strong>{artist} - Essential Collection</strong></span>
-      </div>
-
-      <!-- How it works -->
-      <div class="alert alert-secondary mb-0 py-2">
-        <small class="text-muted">
-          <strong>How it works:</strong> after each popularity scan, every artist with more than
-          <strong>12 unique 4★/5★ tracks</strong> gets an <code>{name}.m3u</code> written to
-          <code>{MUSIC_FOLDER}/Playlists</code> — Navidrome picks it up on its next scan. Genre
-          playlists follow the Create/Delete thresholds above (create above <code>Create Threshold</code>,
-          remove below <code>Delete Threshold</code>, leave untouched in between). Tracks are
-          deduplicated by normalized title (the studio version wins over live / compilation duplicates),
-          and compilation, "Various Artists" and soundtrack buckets are skipped. Featured appearances
-          are included in the featured artist's collection. Changing the name
-          template automatically cleans up stale files from older scans.
-        </small>
-      </div>
     </div>
   </div>
-
         </div><!-- /tab-playlists -->
       </div><!-- /tab-content -->
 
       <!-- Save Button (inside the form) — sticky bottom bar -->
+
+      <!-- Unsaved-changes bar: shares the sticky save bar so the state is always
+           attached to the action that resolves it. Hidden until something changes. -->
+      <div id="configUnsavedState" class="small text-warning d-none mb-2" role="status" aria-live="polite">
+        <i class="bi bi-exclamation-circle"></i>
+        <span id="configUnsavedText"></span>
+      </div>
       <div class="config-save-bar d-grid gap-2 d-md-flex justify-content-md-end mb-4 mt-3">
         <button type="button" class="btn btn-outline-secondary" id="cancelBtn">Cancel</button>
         <button type="button" class="btn btn-primary btn-lg" id="saveBtn" onclick="saveConfig()">

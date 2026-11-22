@@ -700,6 +700,27 @@ form .form-check-input[name="force"] + .form-check-label {
     .btn-group-sm .btn { min-height: 0; }
 }
 
+/* ── Desktop navbar active state ─────────────────────────────────────────────
+   base.html marks the current section's link `.active` (resolved server-side
+   from request.path). Bootstrap gives `.navbar-nav .nav-link` no resting /
+   hover / active colour of its own, so without this the class was silent and
+   the navbar looked identical on every page.
+   ------------------------------------------------------------------------- */
+.navbar-nav .nav-link {
+    border-radius: 0.375rem;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+.navbar-nav .nav-link:hover {
+    color: var(--text-primary);
+    background-color: var(--tertiary-bg);
+}
+.navbar-nav .nav-link.active,
+.navbar-nav .nav-link.active:hover,
+.navbar-nav .show > .nav-link {
+    color: var(--spotify-green);
+    background-color: color-mix(in srgb, var(--spotify-green) 12%, transparent);
+}
+
 @media (max-width: 991.98px) {
     .navbar-nav { flex-direction: column !important; width: 100%; }
     .navbar-nav .nav-link { padding: 0.875rem 1.25rem !important; min-height: 48px; }
@@ -1220,6 +1241,53 @@ form .form-check-input[name="force"] + .form-check-label {
     justify-content: space-between;
     gap: 0.5rem;
     margin-bottom: 0.5rem;
+}
+
+/* A dependent group: indented under the toggle it belongs to, with a rule down
+   the left so the parent/child relationship reads at a glance. `is-disabled`
+   is applied by config.js when the parent switch is off — the group stays
+   visible (so nothing appears to vanish) but cannot be edited. */
+.setting-subgroup {
+    margin-left: 0.85rem;
+    padding-left: 0.85rem;
+    border-left: 2px solid color-mix(in srgb, var(--accent-color) 28%, transparent);
+}
+
+.setting-subgroup.is-disabled {
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+.setting-subgroup.is-disabled::before {
+    content: "Requires the switch above";
+    display: block;
+    font-size: 0.75rem;
+    font-style: italic;
+    color: var(--text-secondary);
+    margin-bottom: 0.4rem;
+}
+
+/* A field whose value differs from the documented default. */
+.config-field-changed {
+    border-color: color-mix(in srgb, #f59e0b 55%, var(--border-color)) !important;
+}
+
+.config-field-changed>.config-field-reset {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.35rem;
+    line-height: 1;
+    color: #f59e0b;
+}
+
+.input-card.config-field-changed,
+.setting-card.config-field-changed {
+    position: relative;
+}
+
+/* "Find a setting" filtering: hidden cards collapse without leaving a gap. */
+.config-search-hidden {
+    display: none !important;
 }
 
 .threshold-stars {

@@ -66,9 +66,17 @@
       <a class="system-sheet-item" href="{{ url_for('ui.bookmarks') }}?filter=artist">
         <i class="bi bi-star-fill text-warning" aria-hidden="true"></i> Favourite Artists
       </a>
-      <a class="system-sheet-item" href="/playlists">
-        <i class="bi bi-collection-play" aria-hidden="true"></i> Playlists
-      </a>
+      {#
+        ⚠️ NO `Playlists` OR `Monitor` HERE.
+
+        Both are tabs in the bottom bar (`Playlists` → /playlists,
+        `Downloads` → /downloads/monitor) that sits under this very sheet, so
+        listing them again made the user choose between two names for one
+        place — the same duplication the brief asked to drop for `Dashboard`
+        and `All Artists`. Reachability is unchanged: the bar carries both, and
+        `tests/test_mobile_chrome_redesign.py` asserts every desktop-navbar
+        destination is reachable from the bar OR this sheet.
+      #}
 
       {# Discover & Upcoming & Missing share one job — "what am I not listening
          to yet?" — which is why the desktop navbar groups them. #}
@@ -93,13 +101,12 @@
       {% endif %}
 
       <p class="system-sheet-group">Downloads</p>
-      <a class="system-sheet-item" href="/downloads/monitor">
-        <i class="bi bi-download" aria-hidden="true"></i> Monitor
-      </a>
+      {# `Monitor` is the bottom bar's Downloads tab — not repeated here. The two
+         entries below are the ones that have no tab of their own. #}
       <a class="system-sheet-item" href="/downloads/monitor#unmatchedFoldersSection">
         <i class="bi bi-question-circle" aria-hidden="true"></i> Unmatched Folders
       </a>
-      <a class="system-sheet-item" href="/banned-words">
+      <a class="system-sheet-item" href="/downloads/banned-words">
         <i class="bi bi-slash-circle" aria-hidden="true"></i> Banned Search Words
       </a>
 
@@ -124,9 +131,6 @@
       </a>
       <a class="system-sheet-item" href="{{ url_for('ui.config_editor') }}">
         <i class="bi bi-gear" aria-hidden="true"></i> Config
-      </a>
-      <a class="system-sheet-item" href="/test-site">
-        <i class="bi bi-columns-gap" aria-hidden="true"></i> Rebuilt UI Preview
       </a>
 
       {% if session.get('username') %}

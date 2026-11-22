@@ -1220,6 +1220,16 @@ function saveConfig() {
         : 'Configuration saved (no sections changed)';
       showToast('Success', summary, 'success');
       window.pageConfig = config;
+      // The page now reflects what is stored, so re-baseline the snapshot and
+      // clear the unsaved-changes bar (it compares against the LOADED values,
+      // not the shipped defaults, so a recount alone would not clear it).
+      if (typeof snapshotConfigLoadedValues === 'function') {
+        document.querySelectorAll('#configForm [data-config-loaded]').forEach(function (el) {
+          delete el.dataset.configLoaded;
+        });
+        snapshotConfigLoadedValues();
+        refreshConfigDirtyState();
+      }
     } else {
       showToast('Error', result.data.error || 'Failed to save configuration', 'error');
     }
@@ -2873,7 +2883,337 @@ async function pollGenrePlaylistResync(silent) {
   }
 }
 
+  /* Nested playlist settings: a `.setting-subgroup` carries
+     `data-playlists-depends-on="<parent input id>"`. When that switch is off the
+     group is greyed out and cannot be edited, so a child cannot be configured
+     while the thing it configures is disabled. The group stays VISIBLE (nothing
+     appears to vanish); only interaction is blocked. */
+  function initPlaylistDependentGroups() {
+    document.querySelectorAll('[data-playlists-depends-on]').forEach(function (group) {
+      const parentId = group.getAttribute('data-playlists-depends-on');
+      const parent = document.getElementById(parentId);
+      if (!parent) return;
+      const apply = function () {
+        group.classList.toggle('is-disabled', !parent.checked);
+      };
+      parent.addEventListener('change', apply);
+      apply();
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Config page-wide polish.
+
+     Three behaviours, all additive — no existing id, class or payload key is
+     touched, so the collector contract is unchanged:
+
+     1. FIND A SETTING — filters the settings in the ACTIVE tab by label,
+        description/help text and placeholder. Cards with no match are hidden;
+        section headings that lose every card are hidden too. Escape clears.
+
+     2. CHANGED FROM DEFAULT — any input whose value differs from the
+        `placeholder`, which is the documented default on this page, is marked
+        and gets a per-field reset arrow. A count appears in the save bar. This
+        is what makes an unexpected 200-vs-150 visible without opening every
+        card.
+
+     3. UNSAVED CHANGES — the sticky save bar announces how many fields differ
+        from what was loaded, so saving is never a guess. Reset on success.
+     ══════════════════════════════════════════════════════════════════════════ */
+  /* ══════════════════════════════════════════════════════════════════════════
+     Config page-wide polish. Additive: no existing id, class or payload key is
+     touched, so the collector contract is unchanged.
+
+     TWO SEPARATE BASELINES — do not conflate them:
+
+       SHIPPED DEFAULT (`placeholder` for number/text, `defaultChecked` for
+       switches, the `selected` option for selects)  → `.config-field-changed`,
+       an amber outline plus a per-field "reset to default" arrow. This is what
+       makes a Great-Covers-Max of 200-vs-150 visible without opening the card.
+
+       LOADED SNAPSHOT (whatever the page rendered, i.e. config.yaml) →
+       `.config-field-dirty`, counted by the sticky save bar so saving is never
+       a guess. A customised install is therefore NOT permanently "unsaved".
+
+     Plus "Find a setting": filters the settings in the ACTIVE tab by label,
+     help text and placeholder; section headings that lose every card hide too.
+     ══════════════════════════════════════════════════════════════════════════ */
+  const CFG_DEFAULT_ATTR = 'data-config-default';
+  const CFG_LOADED_ATTR = 'data-config-loaded';
+
+  function configFieldCurrent(el) {
+    if (el.type === 'checkbox') return el.checked ? '1' : '0';
+    return el.value;
+  }
+
+  function configShippedDefault(el) {
+    let def = '';
+    if (el.tagName === 'SELECT') {
+      const opt = el.querySelector('option[selected]') || el.options[0];
+      def = opt ? opt.value : '';
+    } else if (el.type === 'checkbox') {
+      def = el.defaultChecked ? '1' : '0';
+    } else {
+      def = el.getAttribute('placeholder') || '';
+    }
+    if (el.dataset) el.dataset[CFG_DEFAULT_ATTR] = def;
+    return def;
+  }
+
+  function configNumbersEqual(a, b) {
+    const na = parseFloat(a);
+    const nb = parseFloat(b);
+    if (!Number.isNaN(na) && !Number.isNaN(nb) && String(a).trim() !== '' && String(b).trim() !== '') {
+      return na === nb;
+    }
+    return String(a) === String(b);
+  }
+
+  /* Snapshot what the page rendered. Called once, before any interaction, so
+     "dirty" means "I changed this", not "my config differs from the default". */
+  function snapshotConfigLoadedValues() {
+    document.querySelectorAll('#configForm input[id], #configForm select[id], #configForm textarea[id]')
+      .forEach(function (el) {
+        if (!el.dataset) return;
+        if (el.dataset[CFG_LOADED_ATTR] === undefined) {
+          el.dataset[CFG_LOADED_ATTR] = configFieldCurrent(el);
+        }
+      });
+  }
+
+  function markConfigField(el) {
+    // The nearest card/row gives us a box to outline and hang the reset arrow on.
+    const field = el.closest('.input-card, .setting-card, .mb-3') || el.parentElement;
+    if (!field) return;
+
+    const shipped = configShippedDefault(el);
+    const hasDefault = shipped !== '' || el.type === 'checkbox';
+    const current = configFieldCurrent(el);
+
+    const differs = hasDefault && !configNumbersEqual(current, shipped);
+    field.classList.toggle('config-field-changed', differs);
+
+    let reset = field.querySelector('.config-field-reset');
+    if (differs && !reset) {
+      reset = document.createElement('button');
+      reset.type = 'button';
+      reset.className = 'btn btn-link btn-sm config-field-reset p-0';
+      reset.title = 'Reset to the shipped default';
+      reset.setAttribute('aria-label', 'Reset this field to the shipped default');
+      reset.innerHTML = '<i class="bi bi-arrow-counterclockwise"></i>';
+      reset.addEventListener('click', function () {
+        if (el.type === 'checkbox') {
+          el.checked = shipped === '1';
+        } else {
+          el.value = shipped;
+        }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      field.appendChild(reset);
+    } else if (!differs && reset) {
+      reset.remove();
+    }
+
+    const loaded = el.dataset ? el.dataset[CFG_LOADED_ATTR] : undefined;
+    const isDirty = loaded !== undefined && !configNumbersEqual(current, loaded);
+    field.classList.toggle('config-field-dirty', isDirty);
+  }
+
+  function refreshConfigDirtyState() {
+    document.querySelectorAll('#configForm input[id], #configForm select[id], #configForm textarea[id]')
+      .forEach(markConfigField);
+    // Count from the DOM: markConfigField CLEARS a marker it no longer warrants.
+    const dirty = document.querySelectorAll('#configForm .config-field-dirty').length;
+
+    const bar = document.getElementById('configUnsavedState');
+    const text = document.getElementById('configUnsavedText');
+    if (bar && text) {
+      bar.classList.toggle('d-none', dirty === 0);
+      text.textContent = dirty === 0
+        ? ''
+        : dirty + (dirty === 1 ? ' unsaved change' : ' unsaved changes') + ' — save to apply.';
+    }
+    return dirty;
+  }
+
+  function initConfigDirtyTracking() {
+    const form = document.getElementById('configForm');
+    if (!form) return;
+    snapshotConfigLoadedValues();
+    const update = function (ev) {
+      if (ev && ev.target && ev.target.id) markConfigField(ev.target);
+      refreshConfigDirtyState();
+    };
+    form.addEventListener('change', update);
+    form.addEventListener('input', update);
+    refreshConfigDirtyState();
+  }
+
+  /* ── Find a setting ─────────────────────────────────────────────────────── */
+  function initConfigSettingsSearch() {
+    const box = document.getElementById('configSettingsSearch');
+    if (!box) return;
+    const state = document.getElementById('configSettingsSearchState');
+
+    const apply = function () {
+      const q = box.value.trim().toLowerCase();
+      const pane = document.querySelector('#configTabsContent .tab-pane.active');
+      if (!pane) return;
+
+      if (!q) {
+        pane.querySelectorAll('.config-search-hidden').forEach(function (c) {
+          c.classList.remove('config-search-hidden');
+        });
+        if (state) { state.classList.add('d-none'); state.textContent = ''; }
+        return;
+      }
+
+      let shown = 0;
+      pane.querySelectorAll('.setting-card, .input-card').forEach(function (row) {
+        const hit = (row.textContent || '').toLowerCase().indexOf(q) !== -1;
+        row.classList.toggle('config-search-hidden', !hit);
+        if (hit) shown += 1;
+      });
+      // Hide a section heading whose cards all vanished.
+      pane.querySelectorAll('h6').forEach(function (h) {
+        let n = h.nextElementSibling;
+        let any = false;
+        while (n && n.tagName !== 'H6') {
+          if (n.matches('.setting-card, .input-card, .thresholds-grid')) {
+            const hidden = n.classList.contains('config-search-hidden');
+            const kidsHidden = n.querySelectorAll('.config-search-hidden').length;
+            if (!hidden && kidsHidden === 0) { any = true; break; }
+          }
+          n = n.nextElementSibling;
+        }
+        h.classList.toggle('config-search-hidden', !any);
+      });
+      if (state) {
+        state.classList.remove('d-none');
+        state.textContent = shown === 0
+          ? 'No settings match in this tab.'
+          : shown + (shown === 1 ? ' setting shown' : ' settings shown');
+      }
+    };
+
+    box.addEventListener('input', apply);
+    box.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { box.value = ''; apply(); }
+    });
+    apply();
+  }
+
+  /* ── Genre Vocabulary table view ──────────────────────────────────────────
+     The textarea stays the storage format; this renders the SAME text into a
+     searchable table so 224 entries can be browsed by id/display/parent/alias
+     instead of scrolled. Parsing is defensive: while the user types invalid
+     JSON the table keeps the last good render rather than blanking. */
+  function genreVocabularyEntries() {
+    const text = (document.getElementById('genre_vocab_text') || {}).value || '';
+    if (!text.trim()) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      return null;
+    }
+    if (Array.isArray(parsed)) return parsed;
+    for (const key of ['genres', 'entries', 'items']) {
+      if (parsed && Array.isArray(parsed[key])) return parsed[key];
+    }
+    return null;
+  }
+
+  function renderGenreVocabularyTable() {
+    const body = document.getElementById('genre_vocab_table_body');
+    const count = document.getElementById('genre_vocab_table_count');
+    if (!body) return;
+
+    const entries = genreVocabularyEntries();
+    if (entries === null) {
+      if (!body.dataset.rendered) {
+        body.innerHTML = '<tr><td colspan="5" class="text-muted small">Load the vocabulary to browse it.</td></tr>';
+      }
+      if (count) count.textContent = '';
+      return;
+    }
+
+    const q = ((document.getElementById('genre_vocab_search') || {}).value || '').trim().toLowerCase();
+    const rows = entries.filter(function (entry) {
+      if (!q) return true;
+      const hay = [
+        entry.id, entry.display, entry.parent,
+        (entry.aliases || []).join(' '),
+      ].join(' ').toLowerCase();
+      return hay.indexOf(q) !== -1;
+    });
+
+    if (count) {
+      count.textContent = q
+        ? `${rows.length} of ${entries.length} entries`
+        : `${entries.length} entries`;
+    }
+
+    if (rows.length === 0) {
+      body.innerHTML = '<tr><td colspan="5" class="text-muted small">Nothing matches that filter.</td></tr>';
+      body.dataset.rendered = '1';
+      return;
+    }
+
+    const esc = function (v) {
+      return String(v === null || v === undefined ? '' : v)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    };
+    body.innerHTML = rows.map(function (entry) {
+      const aliases = (entry.aliases || []).map(esc).join(', ');
+      return '<tr>'
+        + `<td class="font-monospace small">${esc(entry.id)}</td>`
+        + `<td>${esc(entry.display)}</td>`
+        + `<td class="small">${entry.parent ? esc(entry.parent) : '<span class="text-muted">— root —</span>'}</td>`
+        + `<td class="small text-center">${esc(entry.specificity)}</td>`
+        + `<td class="small text-muted">${aliases || '—'}</td>`
+        + '</tr>';
+    }).join('');
+    body.dataset.rendered = '1';
+  }
+
+  function initGenreVocabularyViews() {
+    const tableBtn = document.getElementById('genre_vocab_view_table');
+    const jsonBtn = document.getElementById('genre_vocab_view_json');
+    const tableWrap = document.getElementById('genre_vocab_table_wrap');
+    const jsonWrap = document.getElementById('genre_vocab_json_wrap');
+    if (!tableBtn || !jsonBtn || !tableWrap || !jsonWrap) return;
+
+    const show = function (which) {
+      const table = which === 'table';
+      tableWrap.classList.toggle('d-none', !table);
+      jsonWrap.classList.toggle('d-none', table);
+      tableBtn.classList.toggle('active', table);
+      jsonBtn.classList.toggle('active', !table);
+      if (table) renderGenreVocabularyTable();
+    };
+    tableBtn.addEventListener('click', function () { show('table'); });
+    jsonBtn.addEventListener('click', function () { show('json'); });
+
+    const search = document.getElementById('genre_vocab_search');
+    if (search) search.addEventListener('input', renderGenreVocabularyTable);
+
+    const text = document.getElementById('genre_vocab_text');
+    if (text) text.addEventListener('input', function () {
+      if (!jsonWrap.classList.contains('d-none')) return;
+      renderGenreVocabularyTable();
+    });
+  }
+
+  function initConfigPagePolish() {
+    initConfigDirtyTracking();
+    initConfigSettingsSearch();
+    initGenreVocabularyViews();
+  }
+
 document.addEventListener('DOMContentLoaded', function() {
+  initPlaylistDependentGroups();
+  initConfigPagePolish();
   const gpPreview = document.getElementById('genre_playlist_resync_preview_btn');
   if (gpPreview) gpPreview.addEventListener('click', runGenrePlaylistPreview);
   const gpApply = document.getElementById('genre_playlist_resync_apply_btn');

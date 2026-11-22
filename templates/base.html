@@ -33,6 +33,25 @@
 </head>
 <body>
 
+  {#
+    Desktop nav active state, resolved SERVER-SIDE from request.path (no JS), so
+    the shell is correct on first paint. Matches the served tree's `_nav_is`
+    macro: `/` is matched EXACTLY (every path starts with `/`, so a prefix test
+    would light Dashboard everywhere), other entries match by prefix so
+    `/artist/<id>` lights Artists and `/playlist/<id>` lights Playlists.
+  #}
+  {% set _nav_path = request.path %}
+  {% macro _nav_is(prefixes) -%}
+    {%- set match = namespace(hit=false) -%}
+    {%- for p in prefixes -%}
+      {%- if p == '/' -%}
+        {%- if _nav_path == '/' -%}{% set match.hit = true %}{%- endif -%}
+      {%- elif _nav_path.startswith(p) -%}
+        {%- set match.hit = true -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {{- ' active' if match.hit else '' -}}
+  {%- endmacro %}
   <nav class="navbar navbar-expand-lg navbar-dark fixed-top shadow-sm" style="background-color: var(--primary-bg);">
     <div class="container-fluid flex-wrap flex-lg-nowrap align-items-center">
 
@@ -65,17 +84,29 @@
         </div>
       </div>
 
+      {#
+        ⚠️ EVERY LINK BELOW CARRIES `title` + `aria-label`.
+
+        Between lg and xl the <span> label is `display:none`, and Bootstrap
+        renders no tooltip of its own — so before this the middle items were an
+        unlabelled icon to the eye AND to assistive tech (CSS-hidden text is out
+        of the accessibility tree). The `title` gives a sighted user the name on
+        hover; the `aria-label` gives it to a screen reader at every width. Both
+        use the SAME wording as the visible label.
+      #}
       <!-- Navigation Links -->
       <div class="collapse navbar-collapse nav-links-wrapper" id="navbarNav">
         <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-lg-center" style="gap: 0.15rem;">
           <li class="nav-item">
-            <a class="nav-link" href="{{ url_for('ui.dashboard') }}">
-              <i class="bi bi-speedometer2"></i> <span class="d-lg-none d-xl-inline">Dashboard</span>
+            <a class="nav-link{{ _nav_is(['/', '/dashboard']) }}" href="{{ url_for('ui.dashboard') }}"
+               title="Dashboard" aria-label="Dashboard">
+              <i class="bi bi-speedometer2" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">Dashboard</span>
             </a>
           </li>
           <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="artistsDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              <i class="bi bi-people"></i> <span class="d-lg-none d-xl-inline">Artists</span>
+            <a class="nav-link dropdown-toggle{{ _nav_is(['/artists', '/artist/', '/correcting']) }}" href="#" id="artistsDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false"
+               title="Artists" aria-label="Artists">
+              <i class="bi bi-people" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">Artists</span>
             </a>
             <ul class="dropdown-menu dropdown-menu-dark">
               <li><a class="dropdown-item" href="{{ url_for('ui.artists') }}"><i class="bi bi-people me-2"></i> All Artists</a></li>
@@ -84,23 +115,25 @@
               <li><a class="dropdown-item" href="{{ url_for('ui.correcting') }}"><i class="bi bi-tools me-2"></i> Tag Corrections</a></li>
             </ul>
           </li>
-          <li class="nav-item"><a class="nav-link" href="/downloads/monitor#unmatchedFoldersSection"><i class="bi bi-download"></i> <span class="d-lg-none d-xl-inline">Downloads</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/playlists"><i class="bi bi-collection-play"></i> <span class="d-lg-none d-xl-inline">Playlists</span></a></li>
+          <li class="nav-item"><a class="nav-link{{ _nav_is(['/downloads']) }}" href="/downloads/monitor#unmatchedFoldersSection" title="Downloads" aria-label="Downloads"><i class="bi bi-download" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">Downloads</span></a></li>
+          <li class="nav-item"><a class="nav-link{{ _nav_is(['/playlists', '/playlist/']) }}" href="/playlists" title="Playlists" aria-label="Playlists"><i class="bi bi-collection-play" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">Playlists</span></a></li>
           <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="discoverDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              <i class="bi bi-compass"></i> <span class="d-lg-none d-xl-inline">Discover</span>
+            <a class="nav-link dropdown-toggle{{ _nav_is(['/discover']) }}" href="#" id="discoverDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false"
+               title="Discover" aria-label="Discover">
+              <i class="bi bi-compass" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">Discover</span>
             </a>
             <ul class="dropdown-menu dropdown-menu-dark">
               <li><a class="dropdown-item" href="/discover"><i class="bi bi-compass me-2"></i> Discover</a></li>
               <li><a class="dropdown-item" href="/downloads/discover/upcoming"><i class="bi bi-calendar-event me-2"></i> Upcoming Releases</a></li>
             </ul>
           </li>
-          <li class="nav-item"><a class="nav-link" href="/missing"><i class="bi bi-exclamation-circle text-warning"></i> <span class="d-lg-none d-xl-inline">Missing</span></a></li>
+          <li class="nav-item"><a class="nav-link{{ _nav_is(['/missing']) }}" href="/missing" title="Missing Releases" aria-label="Missing Releases"><i class="bi bi-exclamation-circle text-warning" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">Missing</span></a></li>
 
           {% if custom_bookmark_links and custom_bookmark_links|length > 0 %}
           <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="bookmarksDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              <i class="bi bi-bookmark-star"></i> <span class="d-lg-none d-xl-inline">Bookmarks</span>
+            <a class="nav-link dropdown-toggle{{ _nav_is(['/bookmarks']) }}" href="#" id="bookmarksDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false"
+               title="Bookmarks" aria-label="Bookmarks">
+              <i class="bi bi-bookmark-star" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">Bookmarks</span>
             </a>
             <ul class="dropdown-menu dropdown-menu-dark">
               {% for link in custom_bookmark_links %}
@@ -110,14 +143,15 @@
           </li>
           {% endif %}
 
-          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.logs') }}" title="Logs"><i class="bi bi-file-text"></i></a></li>
-          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.help_page') }}" title="Help"><i class="bi bi-question-circle"></i></a></li>
-          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.config_editor') }}" title="Config"><i class="bi bi-gear"></i></a></li>
+          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.logs') }}" title="Logs" aria-label="Logs"><i class="bi bi-file-text" aria-hidden="true"></i></a></li>
+          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.help_page') }}" title="Help" aria-label="Help"><i class="bi bi-question-circle" aria-hidden="true"></i></a></li>
+          <li class="nav-item d-none d-lg-block"><a class="nav-link px-2" href="{{ url_for('ui.config_editor') }}" title="Config" aria-label="Config"><i class="bi bi-gear" aria-hidden="true"></i></a></li>
 
           {% if session.get('username') %}
           <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              <i class="bi bi-person-circle"></i> <span class="d-lg-none d-xl-inline">{{ session.get('username') }}</span>
+            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false"
+               title="Account: {{ session.get('username') }}" aria-label="Account: {{ session.get('username') }}">
+              <i class="bi bi-person-circle" aria-hidden="true"></i> <span class="d-lg-none d-xl-inline">{{ session.get('username') }}</span>
             </a>
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
               <li class="d-lg-none"><a class="dropdown-item" href="{{ url_for('ui.logs') }}"><i class="bi bi-file-text me-2"></i> Logs</a></li>

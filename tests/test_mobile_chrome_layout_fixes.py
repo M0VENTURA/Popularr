@@ -487,9 +487,23 @@ class TestTheMenuDeduplication:
         for endpoint in ("ui.bookmarks", "ui.logs", "ui.correcting",
                          "ui.help_page", "ui.config_editor", "ui.logout"):
             assert f"url_for('{endpoint}')" in sheet, f"{endpoint} was lost too"
+        # `Playlists` and `Monitor` are no longer listed in the sheet: both are
+        # bottom-bar tabs that sit under it, so repeating them made the user
+        # choose between two names for one place (the same duplication already
+        # dropped for Dashboard/Artists). They stay REACHABLE via the bar, which
+        # `TestTheSystemSheet::test_every_displaced_destination_is_reachable`
+        # proves; here we only assert the sheet keeps the destinations that have
+        # no tab of their own.
         for literal in ("/discover", "/downloads/discover/upcoming", "/missing",
-                        "/playlists", "/banned-words", "/test-site"):
+                        "/downloads/monitor#unmatchedFoldersSection",
+                        "/downloads/banned-words"):
             assert f'href="{literal}"' in sheet, f"{literal} was lost too"
+        assert 'href="/banned-words"' not in sheet, (
+            "the 404 /banned-words link is back"
+        )
+        assert 'href="/test-site"' not in sheet, (
+            "the dead /test-site preview link is back (preview_bp is unregistered)"
+        )
 
 
 # ---------------------------------------------------------------------------
