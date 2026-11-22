@@ -189,8 +189,13 @@ class TestPopularityMarkingBump:
     def test_marked_medium_single_upgraded_to_high(self):
         [t] = self._bump([self._track(marked=True)])
         assert t["single_confidence"] == "high"
-        parsed = json.loads(t["single_sources"])
-        assert any(s.get("source") == "popularity_marked" and s.get("matched") for s in parsed)
+        # ``single_sources`` is carried as a LIST in memory (the persist step
+        # JSON-encodes it), so assert on the list directly — no json.loads.
+        assert isinstance(t["single_sources"], list)
+        assert any(
+            s.get("source") == "popularity_marked" and s.get("matched")
+            for s in t["single_sources"]
+        )
 
     def test_unmarked_medium_single_unchanged(self):
         [t] = self._bump([self._track(marked=False)])
@@ -207,10 +212,13 @@ class TestPopularityMarkingBump:
         assert t["single_confidence"] == "high"
 
     def test_appends_source_without_duplicating(self):
+        # Input may be a JSON string OR a list; output is always a list.
         sources = '[{"source": "popularity_marked", "matched": true, "confidence": 0.5}]'
         [t] = self._bump([self._track(marked=True, sources=sources)])
-        parsed = json.loads(t["single_sources"])
-        assert sum(1 for s in parsed if s.get("source") == "popularity_marked") == 1
+        assert isinstance(t["single_sources"], list)
+        assert sum(
+            1 for s in t["single_sources"] if s.get("source") == "popularity_marked"
+        ) == 1
 
 
 class TestAlbumRelativeNormalization:

@@ -237,10 +237,14 @@ class TestArtistGateSourceContract:
 
         source = inspect.getsource(track_stage._resolve_track_mb_metadata)
         # ONE definition of "trustworthy batch artist" derived from the SAME
-        # flag the title promotion consumes — never a second independent check.
+        # flags the title promotion consumes — never a second independent check.
+        # Both surfaces read ``_title_differs`` (``not titles_match_for_review``,
+        # which folds case, curly quotes, dashes and whitespace) and
+        # ``_title_match_confirmed``.
         assert "_batch_artist_untrustworthy" in source
         assert "_title_match_confirmed" in source
-        assert "release_title.casefold() != _local_title.casefold()" in source
+        assert "_title_differs = not titles_match_for_review(" in source
+        assert "and _title_differs" in source
 
     def test_the_recording_mbid_write_is_not_gated(self):
         import inspect

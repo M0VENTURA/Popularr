@@ -116,6 +116,22 @@ def _recreate_test_schema():
     # DISPOSES the shared in-memory engine on OperationalError, wiping every
     # table — so the NEXT test's teardown died with "no such table: tracks".
     # Recreated here for the same reason ``tracks`` itself is.
+    #
+    # ``scan_history`` is in TABLES_TO_ENSURE but its Postgres DDL uses
+    # ``BIGSERIAL PRIMARY KEY``, which SQLite parses as an ordinary column type
+    # and therefore never autoincrements. ``record_scan`` updates a row BY ID,
+    # so a NULL id would make the started→completed UPDATE match nothing. The
+    # SQLite override keeps ids meaningful for the tests that exercise it.
+    _sqlite_ddl_overrides = {
+        "scan_history": """
+            CREATE TABLE IF NOT EXISTS scan_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, scan_type TEXT, artist TEXT,
+                album TEXT, status TEXT, message TEXT,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP, duration_seconds DOUBLE PRECISION
+            )
+        """,
+    }
     with engine.begin() as conn:
         for _name in ("album_art", "missing_releases", "artist_aliases",
                       # The playlist index (migration 025). In this list rather
@@ -126,8 +142,11 @@ def _recreate_test_schema():
                       # in-memory engine), which means a test for the artist
                       # page's playlist section would assert an empty result and
                       # PASS while proving nothing.
-                      "playlists", "playlist_entries", "playlist_song_rejections"):
-            _ddl = TABLES_TO_ENSURE.get(_name)
+                      "playlists", "playlist_entries", "playlist_song_rejections",
+                      # The dashboard scan-history panel. ``record_scan`` is
+                      # exercised by tests/test_scan_history_completion.py.
+                      "scan_history"):
+            _ddl = _sqlite_ddl_overrides.get(_name) or TABLES_TO_ENSURE.get(_name)
             if _ddl:
                 conn.execute(_text(_ddl))
     yield

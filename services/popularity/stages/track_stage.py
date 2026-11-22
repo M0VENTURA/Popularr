@@ -1690,7 +1690,6 @@ def _resolve_track_mb_metadata(
             _mb_artist = _as_str(mb_data.get("artist") or "").strip()
             if _mb_artist:
                 from helpers.normalization_service import (
-                    is_track_artist_placeholder,
                     normalize_artist,
                     strip_featured_artist,
                 )

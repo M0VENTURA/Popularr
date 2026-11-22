@@ -85,6 +85,34 @@ class _RecordingSession:
         pass
 
 
+def _star_update_params(session) -> list[dict]:
+    """Per-track params of every recorded star UPDATE.
+
+    The persist is ONE batched ``session.execute(stmt, [param, ...])`` with a
+    per-row savepoint fallback, so the recorded argument is normally a LIST of
+    dicts and occasionally a single dict. Flatten both to per-track dicts.
+    """
+    rows: list[dict] = []
+    for sql, params in session.executed:
+        if "UPDATE tracks SET stars" not in str(sql):
+            continue
+        if isinstance(params, list):
+            rows.extend(params)
+        elif isinstance(params, dict):
+            rows.append(params)
+    return rows
+
+
+def _ok_sync(_tid, _stars, clients=None):
+    """Navidrome sync stub matching the real contract: a status STRING.
+
+    ``post_album_star_ratings`` counts a track as synced only on ``== "ok"``
+    (``not_found``/``deferred``/``failed`` are counted separately), so a bare
+    ``True`` stub silently reads as 0 synced.
+    """
+    return "ok"
+
+
 @contextmanager
 def _fake_db_session(session):
     yield session
@@ -193,15 +221,16 @@ class TestAlbumZBandStars:
     def test_zero_score_is_one_star(self):
         assert self._stars(0.0, self._album()) == 1
 
-    def test_high_confidence_single_gets_five_regardless_of_band(self):
-        # Spec rule 5: a high-confidence single is 5★ even at the bottom of a
-        # strong album — singles are exempt from the album-z-band base (as
-        # long as the ORGANIC popularity floor is met: score >= 45 or >= 1000
-        # Last.fm listeners).
+    def test_high_confidence_single_stays_on_the_album_band(self):
+        # There is NO unconditional "high-confidence single ⇒ 5★" rule. A
+        # confirmed single is only an input that can lift a track OFF the band
+        # via the organic floor + dedicated-single/era floors; it does not by
+        # itself override the album-z band. At the bottom of the album (z ≈
+        # -1.01) this track keeps its 2★ band rating.
         assert self._stars(
             10.0, self._album(), is_single=True, single_confidence="high",
             lastfm_listeners=2000,
-        ) == 5
+        ) == 2
 
     def test_high_confidence_single_below_organic_floor_stays_on_band(self):
         # A metadata-tagged single with almost no organic audience (e.g.
@@ -238,13 +267,17 @@ class TestAlbumZBandStars:
         album = [1, 10, 19, 28, 37, 46, 55, 64, 73, 82, 91, 100]
         assert self._stars(100.0, album, popularity_marked=True) == 5
 
-    def test_popularity_marked_alone_gets_five_without_single_source(self):
-        # Spec rule 2: a track in the artist's top 10% is "popular" — the
-        # marking alone grants 5★ even though it is NOT a high-confidence
-        # single and does NOT clear the album/artist standout thresholds.
+    def test_popularity_marked_alone_is_not_enough_on_a_mid_pack_track(self):
+        # The artist top-10% marking is NECESSARY BUT NOT SUFFICIENT. It is one
+        # conjunct of ``is_standout`` (alongside album z ≥ 1.0 and artist z ≥
+        # 1.2), so a marking on a merely mid-pack track (z ≈ -0.11) keeps its
+        # album-band 3★ instead of being promoted. This supersedes the old
+        # "marking alone grants 5★" spec rule — see
+        # ``TestZStandoutSourceReVerification`` for the ratio gate that applies
+        # on top.
         album = [1, 10, 19, 28, 37, 46, 55, 64, 73, 82, 91, 100]
         assert self._stars(46.0, album, popularity_marked=True, is_single=False,
-                           single_confidence="low") == 5
+                           single_confidence="low") == 3
 
     def test_z_standout_source_counts_as_popularity_proof(self):
         # The popularity_z_standout detection signal is an alternative proof for
@@ -362,16 +395,30 @@ class TestZStandoutSourceReVerification:
         # The artist top-10% marking is a CATALOGUE-level signal; it says
         # nothing about whether the album itself contains a standout. A hit
         # sitting on an album of uniformly-played tracks is not a standout.
+        #
+        # The album RATIO gate is CONTEXT-SCOPED — it runs only for an album
+        # older than two years that is a MINOR release for its artist. Supply
+        # that context (year + minor album model), or the gate is bypassed.
+        old_minor = {
+            "has_benchmark": True, "era": "minor", "catalog_cutoff": 80.0,
+            "album_top_n": 12, "max_5star_slots": 2,
+        }
         lf_flat = [10000, 9000, 8000, 7000, 6000, 5000]
         lb_flat = [20000, 18000, 16000, 14000, 12000, 10000]
 
-        flat = self._track(90.0, 10000, 20000, popularity_marked=True)
-        assert fs._assign_stars(flat, self._album(), self._artist(), lf_flat, lb_flat) == 4
+        flat = self._track(90.0, 10000, 20000, popularity_marked=True, year=2005)
+        assert fs._assign_stars(
+            flat, self._album(), self._artist(), lf_flat, lb_flat,
+            album_model=old_minor,
+        ) == 4
 
         # ...whereas a real standout shape does grant 5*.
         lf_real = [50000, 500, 400, 300, 200, 100]
-        real = self._track(90.0, 50000, 20000, popularity_marked=True)
-        assert fs._assign_stars(real, self._album(), self._artist(), lf_real, lb_flat) == 5
+        real = self._track(90.0, 50000, 20000, popularity_marked=True, year=2005)
+        assert fs._assign_stars(
+            real, self._album(), self._artist(), lf_real, lb_flat,
+            album_model=old_minor,
+        ) == 5
 
 
 class TestAlbumRatioStandout:
@@ -410,14 +457,31 @@ class TestAlbumRatioStandout:
     #: ratio test must be what decides, not a z-score failure.
     _SCORES = [1, 10, 19, 28, 37, 46, 55, 64, 73, 82, 91, 100]
 
-    def test_anticheat_reference_album_is_not_a_five_star(self):
+    #: The ratio gate is CONTEXT-SCOPED: it only runs for an album older than
+    #: two years that is a MINOR release for its artist (see the
+    #: "Context-Aware Shape Gating" in _assign_stars). Recent releases and
+    #: artist-strong albums bypass it, so these tests must supply the context
+    #: the gate is defined for — an old (``year``) minor-era album model.
+    _OLD_MINOR_MODEL = {
+        "has_benchmark": True,
+        "era": "minor",
+        "catalog_cutoff": 80.0,
+        "album_top_n": 12,
+        "max_5star_slots": 2,
+    }
+
+    def _stars(self, track, lf_listeners):
         from services.popularity.stages import finalise_stage as fs
 
-        track = self._track(100.0, 14, 0)
-        stars = fs._assign_stars(
+        return fs._assign_stars(
             track, self._SCORES, self._SCORES,
-            [float(v) for v in self.ANTIFLAG], [0.0] * len(self.ANTIFLAG),
+            [float(v) for v in lf_listeners], [0.0] * len(lf_listeners),
+            album_model=self._OLD_MINOR_MODEL,
         )
+
+    def test_anticheat_reference_album_is_not_a_five_star(self):
+        track = self._track(100.0, 14, 0, year=2005)
+        stars = self._stars(track, self.ANTIFLAG)
         assert stars < 5, (
             "the Anti-Flag reference album (14/13/13/11/11/10/9/8) has no "
             "standout — top is only 1.08x the runner-up and 1.27x the median"
@@ -425,13 +489,8 @@ class TestAlbumRatioStandout:
         assert "ratio_flat" in str(track.get("_ratio_5star_reason") or "")
 
     def test_real_standout_album_still_reaches_five_stars(self):
-        from services.popularity.stages import finalise_stage as fs
-
-        track = self._track(100.0, 500000, 0)
-        stars = fs._assign_stars(
-            track, self._SCORES, self._SCORES,
-            [float(v) for v in self.REAL_STANDOUT], [0.0] * len(self.REAL_STANDOUT),
-        )
+        track = self._track(100.0, 500000, 0, year=2005)
+        stars = self._stars(track, self.REAL_STANDOUT)
         assert stars == 5, (
             "a hit at 500k against a 10k floor (50x) on a wide-spread album "
             "is exactly the shape the rule should accept"
@@ -442,22 +501,20 @@ class TestAlbumRatioStandout:
 
         # Only two listener counts -> no distribution to judge. The gate must
         # be permissive here, or short albums could never score 5★.
-        track = self._track(100.0, 14, 0)
-        stars = fs._assign_stars(track, self._SCORES, self._SCORES, [14.0, 13.0], [0.0, 0.0])
+        track = self._track(100.0, 14, 0, year=2005)
+        stars = fs._assign_stars(
+            track, self._SCORES, self._SCORES, [14.0, 13.0], [0.0, 0.0],
+            album_model=self._OLD_MINOR_MODEL,
+        )
         assert stars == 5
         assert "inconclusive" in str(track.get("_ratio_5star_reason") or "")
 
     def test_non_top_track_is_ineligible(self):
-        from services.popularity.stages import finalise_stage as fs
-
         # The multipliers describe the distance between #1 and the rest, so a
         # track that is not the album's top can never satisfy them — this is
         # what stops a standout album from minting several 5★ tracks.
-        track = self._track(100.0, 40000, 0)
-        stars = fs._assign_stars(
-            track, self._SCORES, self._SCORES,
-            [float(v) for v in self.REAL_STANDOUT], [0.0] * len(self.REAL_STANDOUT),
-        )
+        track = self._track(100.0, 40000, 0, year=2005)
+        stars = self._stars(track, self.REAL_STANDOUT)
         assert stars < 5
         assert "not_album_top" in str(track.get("_ratio_5star_reason") or "")
 
@@ -538,7 +595,7 @@ class TestPostAlbumStarRatings:
             fs, "_assign_stars",
             lambda track, *args, **kwargs: 4 if track["title"] == "Apocalypse Please" else 5
         )
-        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", lambda track_id, stars, clients=None: True)
+        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", _ok_sync)
         logged = []
         monkeypatch.setattr(fs, "log_unified", lambda msg: logged.append(msg))
 
@@ -555,9 +612,9 @@ class TestPostAlbumStarRatings:
         assert [t["stars"] for t in results] == [4, 5]
 
         # Each rated track persisted its star rating.
-        star_updates = [e for e in session.executed if "UPDATE tracks SET stars" in str(e[0])]
+        star_updates = _star_update_params(session)
         assert len(star_updates) == 2
-        assert any(e[1].get("tid") == "t2" and e[1].get("stars") == 5 for e in star_updates)
+        assert any(p.get("tid") == "t2" and p.get("stars") == 5 for p in star_updates)
 
         # Per-album tabular summary was emitted (new format).
         assert any("📊 SCAN RESULTS: Muse — Absolution" in m for m in logged)
@@ -623,15 +680,19 @@ class TestAssignStarsPopularityOnly:
         assert fs._assign_stars(track, self._album_scores(), self._artist_scores(), lf, lb,
                                 popularity_only=False) == 4
 
-    def test_popularity_marked_standout_gets_five_star(self):
+    def test_popularity_marked_standout_gets_five_star_in_full_scan_only(self):
         from services.popularity.stages import finalise_stage as fs
 
         lf, lb = self._listener_counts()
         # A genuine triple-standout (album z + artist z + artist top-10%
-        # marking) reaches 5★ in both popularity-only and full scans.
+        # marking) reaches 5★ in a FULL scan. In a POPULARITY-ONLY pass it is
+        # capped at 4★: the standout/5★ branch is gated on ``not popularity_only``
+        # (a pinned, documented contract — see the long comment above
+        # ``_assign_stars``'s lock branch), so a popularity-only scan rates
+        # regular albums with a 4★ ceiling.
         track = self._base_track(popularity_marked=True)
         assert fs._assign_stars(track, self._album_scores(), self._artist_scores(), lf, lb,
-                                popularity_only=True) == 5
+                                popularity_only=True) == 4
         assert fs._assign_stars(track, self._album_scores(), self._artist_scores(), lf, lb,
                                 popularity_only=False) == 5
 
@@ -640,9 +701,10 @@ class TestAssignStarsPopularityOnly:
 
         lf, lb = self._listener_counts()
         # A high-confidence single with only average popularity rates on its
-        # popularity alone (2★) in a popularity-only pass — single status is
-        # not a rating input because detection didn't run this pass. The full
-        # scan honours the confirmed single and grants 5★.
+        # popularity alone (2★) in EITHER pass — single status is not a rating
+        # input that manufactures a 5★. The track's album/artist z (≈
+        # -0.75 / -0.9) misses every standout bound, so it keeps the band
+        # rating; there is no unconditional single→5★ rule.
         track = self._base_track(
             title="Mid Single",
             popularity_score=54.0,
@@ -656,7 +718,7 @@ class TestAssignStarsPopularityOnly:
         assert fs._assign_stars(track, self._album_scores(), self._artist_scores(), lf, lb,
                                 popularity_only=True) == 2
         assert fs._assign_stars(track, self._album_scores(), self._artist_scores(), lf, lb,
-                                popularity_only=False) == 5
+                                popularity_only=False) == 2
 
     def test_live_track_caps_at_four_in_popularity_only(self):
         from services.popularity.stages import finalise_stage as fs
@@ -912,7 +974,7 @@ class TestSkipUnchangedRatingWrites:
             lambda track, *args, **kwargs: 4 if track["title"] == "Apocalypse Please" else 5
         )
         syncs = []
-        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", lambda tid, stars, clients=None: syncs.append((tid, stars)) or True)
+        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", lambda tid, stars, clients=None: syncs.append((tid, stars)) or "ok")
         writes = []
         monkeypatch.setattr(
             tag_file_service, "write_rating_to_file",
@@ -920,6 +982,13 @@ class TestSkipUnchangedRatingWrites:
         )
         logged = []
         monkeypatch.setattr(fs, "log_unified", lambda msg: logged.append(msg))
+        # The Navidrome summary is emitted via ``scan_log.log_event`` (the
+        # ``log_unified`` form is only the fallback when that import fails).
+        from helpers import scan_log as _scan_log
+        monkeypatch.setattr(
+            _scan_log, "log_event",
+            lambda event, message, level="info", **k: logged.append(message),
+        )
 
         results = _album_results()
         outcome = fs.post_album_star_ratings(
@@ -935,16 +1004,18 @@ class TestSkipUnchangedRatingWrites:
         assert syncs == [("t1", 4)]
         assert len(writes) == 1
         assert writes[0][1] == 4
-        assert "skipped 1 unchanged rating(s)" in " ".join(logged)
+        # The summary reports "1 unchanged" among its counters.
+        assert any("1 unchanged" in m for m in logged), logged
 
         # The batch rating/path load replaced the per-track file-path lookup.
-        # ⚠️ The needle is the CURRENT query text — it gained the
-        # ``COALESCE(stars, star_rating, 0)`` fallback with the star-rating
-        # column merge, so the old ``SELECT id, stars, file_path`` could never
-        # match again (a stale SQL needle fails with 0 == 1 forever).
+        # ⚠️ The needle tracks the CURRENT query text — it grew
+        # ``stars_reconciled`` and ``duration`` alongside the
+        # ``COALESCE(stars, star_rating, 0)`` fallback, so an older literal
+        # needle fails with 0 == 1 forever. Match the stable prefix instead.
         batch_loads = [
             e for e in session.executed
-            if "SELECT id, COALESCE(stars, star_rating, 0) AS stars, file_path" in str(e[0])
+            if "SELECT id, COALESCE(stars, star_rating, 0) AS stars, stars_reconciled"
+            in str(e[0])
         ]
         assert len(batch_loads) == 1
 
@@ -962,7 +1033,7 @@ class TestSkipUnchangedRatingWrites:
         # Both tracks get a DIFFERENT rating than stored (stored 5★).
         monkeypatch.setattr(fs, "_assign_stars", lambda track, *args, **kwargs: 3)
         syncs = []
-        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", lambda tid, stars, clients=None: syncs.append((tid, stars)) or True)
+        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", lambda tid, stars, clients=None: syncs.append((tid, stars)) or "ok")
         writes = []
         monkeypatch.setattr(
             tag_file_service, "write_rating_to_file",
@@ -998,7 +1069,7 @@ class TestPostAlbumStarRatingsResilience:
             return 4
 
         monkeypatch.setattr(fs, "_assign_stars", flaky_assign)
-        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", lambda *a, **k: True)
+        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", _ok_sync)
         logged = []
         monkeypatch.setattr(fs, "log_unified", lambda msg: logged.append(msg))
 
@@ -1020,7 +1091,7 @@ class TestPostAlbumStarRatingsResilience:
         assert outcome["star_ratings"] == 2
         assert results[0]["stars"] == 4
         assert results[1]["stars"] == 1
-        star_updates = [e for e in session.executed if "UPDATE tracks SET stars" in str(e[0])]
+        star_updates = _star_update_params(session)
         assert len(star_updates) == 2
         assert any("📊 SCAN RESULTS: Muse — Absolution" in m for m in logged)
 
@@ -1241,7 +1312,7 @@ class TestNavidromeClientReusePerAlbum:
         syncs = []
         monkeypatch.setattr(
             fs, "_sync_rating_to_navidrome",
-            lambda tid, stars, clients=None: syncs.append((tid, stars, clients)) or True,
+            lambda tid, stars, clients=None: syncs.append((tid, stars, clients)) or "ok",
         )
         logged = []
         monkeypatch.setattr(fs, "log_unified", lambda msg: logged.append(msg))
@@ -1281,7 +1352,7 @@ class TestNavidromeClientReusePerAlbum:
         )
         builds = []
         monkeypatch.setattr(fs, "_build_rating_sync_clients", lambda: builds.append(True) or [])
-        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", lambda *a, **k: True)
+        monkeypatch.setattr(fs, "_sync_rating_to_navidrome", _ok_sync)
         logged = []
         monkeypatch.setattr(fs, "log_unified", lambda msg: logged.append(msg))
 

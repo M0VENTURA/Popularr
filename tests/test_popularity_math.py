@@ -129,14 +129,19 @@ class TestLbMissingFallbackAlbumRelativeScale:
         )
 
         # Gone Away: 93.2k LF, LB 0 (match failure) — sits below the album's
-        # LF median, so it must NOT keep the raw absolute (~79.5).
+        # LF median, so it must NOT keep the raw absolute score.
         d = calculate_combined_popularity_score(
             lastfm_listeners=93200,
             listenbrainz_listens=0,
             album_lf_listeners=[373700, 222400, 111000, 305100, 93200, 150000, 120000],
         )
         raw_absolute = calculate_lastfm_popularity_score(93200, 0)
-        assert raw_absolute > 70.0  # the old buggy scale
+        # The absolute curve reaches 100 at 100M listeners
+        # (popularity_math.LASTFM_SCORE_LISTENER_CEILING), so 93.2k listeners is
+        # ~62, not the old ~79.5 when the ceiling was ~1.78M. What matters here
+        # is that the absolute scale still sits well ABOVE the album-relative
+        # result — that gap is the regression this class is named for.
+        assert raw_absolute > d["combined_score"]
         assert 0.0 < d["combined_score"] < 60.0  # now album-relative
 
     def test_multi_source_floor_still_applies(self):
@@ -154,8 +159,17 @@ class TestLbMissingFallbackAlbumRelativeScale:
             release_date="2021-08-23",
         )
         floor = round(calculate_lastfm_popularity_score(373700, 0), 3)
-        # The strongest-absolute-evidence floor still guards multi-source blends.
-        assert d["combined_score"] >= floor
+        # ⚠️ The strongest-absolute-evidence floor is INTENTIONALLY skipped when
+        # an album distribution is present: it only guards the NO-album-context
+        # case (see the ``if not has_album_context`` branch in
+        # ``calculate_combined_popularity_score``). Asserting the score stays at
+        # the absolute floor here would contradict the album-relative behaviour
+        # the previous test requires (``< 60.0``) — the two cannot both hold.
+        # The floor's real coverage is the no-distribution case (see
+        # ``TestBlendNeverDropsBelowStrongestEvidence`` and
+        # ``test_no_album_distribution_keeps_absolute_fallback`` below).
+        assert d["combined_score"] > 0.0
+        assert d["combined_score"] != floor
 
     def test_no_album_distribution_keeps_absolute_fallback(self):
         from services.popularity.popularity_math import (

@@ -42,54 +42,12 @@
      `test_site` carries the REAL state — `enabled` is what config says and
      `active` is whether the cutover actually applied. They differ when the
      rebuilt tree is missing, which is exactly the case worth surfacing.
-     rebuilt tree is missing, which is exactly the case worth surfacing.
-  <div>
-    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-layers"></i> User Interface</h5>
-    </div>
-    <div class="card-body">
-      <div class="row g-3 align-items-start">
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Interface</label>
-          <select class="form-select form-select-sm">
-            <option value="false" {% if not config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Live (templates/)</option>
-            <option value="true" {% if config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Rebuilt (test_site/)</option>
-          </select>
-          <small class="form-text text-muted">
-            <strong>Requires a restart</strong> — the interface is bound at startup.
-          </small>
-        </div>
-        <div class="col-12 col-lg-8">
-          {% if test_site and test_site.get('active') %}
-            <div class="alert alert-success py-2 mb-0 small">
-              <i class="bi bi-check-circle-fill"></i>
-              <strong>Rebuilt UI is active.</strong>
-              Templates: <code>{{ test_site.get('templates_dir') }}</code>
-            </div>
-          {% elif test_site and test_site.get('enabled') and not test_site.get('available') %}
-            <div class="alert alert-danger py-2 mb-0 small">
-              <i class="bi bi-exclamation-triangle-fill"></i>
-              <strong>Rebuilt UI requested but not found</strong> — the live UI is being served instead.
-              Expected <code>{{ test_site.get('templates_dir') }}/base.html</code>.
-            </div>
-          {% elif test_site and test_site.get('enabled') and test_site.get('available') %}
-            <div class="alert alert-warning py-2 mb-0 small">
-              <i class="bi bi-arrow-clockwise"></i>
-              <strong>Rebuilt UI enabled — restart to apply.</strong>
-            </div>
-          {% else %}
-            <div class="alert alert-secondary py-2 mb-0 small">
-              <i class="bi bi-window"></i>
-              <strong>Live UI active.</strong>
-              The rebuilt tree is served instead once switched on and the app restarted.
-            </div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </div>
 
-     rebuilt tree is missing, which is exactly the case worth surfacing.
+     The control itself lives on the rebuilt tree's Config page
+     (test_site/templates/Pages/config.html) as `feature_use_test_site`; the
+     live tree cannot switch to the very tree that renders this page, and
+     `use_test_site` is in `moved_feature_keys` below so it is never emitted by
+     the Advanced Features sweeper either.
   #}
   <!-- Vertical Tab Navigation -->
   <div class="row mt-3">
@@ -1697,7 +1655,7 @@
       <div class="row g-3 mb-3">
         <div class="col-12">
           <label class="form-label"><strong>Strip Keywords</strong></label>
-          <div class="border rounded p-3" style="background-color: var(--bs-body-bg);"">
+          <div class="border rounded p-3" style="background-color: var(--bs-body-bg);">
             <div id="stripKeywordsList" class="d-flex flex-wrap gap-2 mb-3">
               <!-- Keywords will be populated by JavaScript -->
             </div>
@@ -3996,14 +3954,30 @@
 
 <script>
   (function () {
+    // Each card is listed under exactly ONE tab, so the pane a card appears in
+    // matches its tab's name. Previously the "Matching" tab held NO matching
+    // settings (they had been moved to Analytics) and instead carried the scan
+    // scheduler, the import watcher and the Essentia ML scan; search settings
+    // were split across System/Downloads/Analytics. Grouped now by concern:
+    //   Matching & Search  — how tracks/queue items are matched and how search
+    //                        behaves (thresholds, filters, fuzzy, experience);
+    //   Downloads          — the download pipeline and its scheduling;
+    //   File Management    — everything that writes/analyses local files;
+    //   Analytics & Scoring— popularity/single/star/genre scoring only.
     var layout = {
-      'tab-system':    ['user-context', 'users', 'search-experience', 'logging', 'safe_shutdown', 'features-weights'],
-      'tab-apis':      ['api-integrations', 'lastfm-advanced', 'wikidata', 'upcoming-releases-automation', 'upcoming-releases-sources'],
-      'tab-downloads': ['sources', 'slskd-timeouts', 'downloads', 'search-quality', 'queue-search-tuning', 'queue-retry-windows', 'queue-auto-restart', 'retry-cleanup-schedulers'],
-      'tab-files':     ['file-organization', 'tag-writing', 'metadata-update', 'album_save', 'file-conversion', 'filesystem'],
-      'tab-matching':  ['scheduled-scans', 'watcher', 'scan-skip-behaviour', 'essentia-mood-scan'],
-      'tab-analytics': ['matching-config', 'queue-matching', 'search-filters', 'genre-selection', 'genre-weights', 'genre-vocabulary',
-                        'algorithm-sandbox', 'popularity-weights', 'single-detection-zscore', 'album-scaling', 'statistics-card']
+      'tab-system':    ['user-context', 'users', 'logging', 'safe_shutdown', 'features-weights'],
+      'tab-apis':      ['api-integrations', 'lastfm-advanced', 'wikidata'],
+      'tab-downloads': ['sources', 'slskd-timeouts', 'downloads', 'search-quality', 'queue-search-tuning',
+                        'queue-retry-windows', 'queue-auto-restart', 'retry-cleanup-schedulers',
+                        'watcher', 'scheduled-scans', 'scan-skip-behaviour',
+                        'upcoming-releases-automation', 'upcoming-releases-sources'],
+      'tab-files':     ['file-organization', 'file-conversion', 'tag-writing', 'filesystem',
+                        'album_save', 'metadata-update', 'essentia-mood-scan'],
+      'tab-matching':  ['matching-config', 'queue-matching', 'search-filters', 'search-experience'],
+      'tab-analytics': ['algorithm-sandbox', 'popularity-export', 'popularity-weights',
+                        'single-detection-zscore', 'album-scaling', 'statistics-card',
+                        'genre-weights', 'genre-selection', 'genre-vocabulary'],
+      'tab-playlists': ['playlists', 'genre-playlist-resync']
     };
     Object.keys(layout).forEach(function (paneId) {
       var pane = document.getElementById(paneId);

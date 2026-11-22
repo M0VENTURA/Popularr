@@ -687,6 +687,18 @@ function buildConfigObject() {
           write_file_tags: getChecked('star_resync_write_file_tags', true) ? 1 : 0,
           sync_navidrome: getChecked('star_resync_sync_navidrome', true) ? 1 : 0,
           albums_per_batch: (function () { var v = parseInt(getValue('star_resync_albums_per_batch', '25'), 10); return isFinite(v) && v > 0 ? v : 25; })()
+        },
+        // ⚠️ Read by ``get_compilation_ladder_config`` (helpers/config_helpers.py).
+        // Emitted here because ``single_detection`` is rebuilt from a literal, so
+        // a key this collector omits is DELETED from config.yaml on every save —
+        // the operator's ladder thresholds would silently reset to defaults.
+        compilation_ladder: {
+          enabled: getChecked('compilation_ladder_enabled', false) ? 1 : 0,
+          catalogue_is_cap_only: getChecked('compilation_ladder_catalogue_is_cap_only', true) ? 1 : 0,
+          five_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_five_star_listeners', '900000')); return isFinite(v) ? v : 900000; })(),
+          four_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_four_star_listeners', '120000')); return isFinite(v) ? v : 120000; })(),
+          three_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_three_star_listeners', '15000')); return isFinite(v) ? v : 15000; })(),
+          two_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_two_star_listeners', '2000')); return isFinite(v) ? v : 2000; })()
         }
       }
     ),
@@ -772,6 +784,21 @@ function buildConfigObject() {
       (window.pageConfig && window.pageConfig.filters) || {},
       {
         exclude_title_regex: getValue('statistics_exclude_title_regex', '')
+      }
+    ),
+    // Library-search behaviour. Merged over pageConfig so the sibling
+    // ``search.strip_keywords`` (written by the Search Filters card) survives —
+    // ``save_config`` writes this section verbatim, so an emitted ``search``
+    // block must carry every key it does not want to delete.
+    search: Object.assign(
+      {},
+      (window.pageConfig && window.pageConfig.search) || {},
+      {
+        fuzzy: Object.assign(
+          {},
+          ((window.pageConfig && window.pageConfig.search && window.pageConfig.search.fuzzy) || {}),
+          { enabled: getChecked('search_fuzzy_enabled', true) }
+        )
       }
     ),
     tagging: Object.assign(
@@ -1927,19 +1954,51 @@ function collectGenreSelectionConfig() {
     if (key && !Number.isNaN(value)) sourceWeights[key] = value;
   });
 
-  return {
+  const companions = String(getValue('genre_selection_nu_companions', '') || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  // ⚠️ This object REPLACES the whole ``genres.selection`` block on save (the
+  // route carries forward only TOP-LEVEL sections, not nested sub-objects), so
+  // we start from the EXISTING block and overwrite only what the form surfaces.
+  // That keeps backend-read keys the page does not expose (``keep_together``,
+  // ``conditional_keep``, the ``fourth`` threshold, the agreement weights, …)
+  // from being silently deleted. The surfaced keys — ``selection_pool``,
+  // ``metal_suppresses_rock``, ``nu_metal_exception``,
+  // ``remove_generic_parents`` and ``nu_metal_rock_companions`` — are all read by
+  // ``get_genre_selection_config`` in helpers/config_helpers.py and used to be
+  // dropped here.
+  const existing = (window.pageConfig && window.pageConfig.genres
+    && window.pageConfig.genres.selection) || {};
+  const selection = Object.assign({}, existing, {
     enabled: getChecked('genre_selection_enabled', true),
-    max_genres: parseInt(getValue('genre_selection_max', '3')) || 3,
-    family_slot_limit: parseInt(getValue('genre_selection_family_limit', '2')) || 2,
+    max_genres: parseInt(getValue('genre_selection_max', '4'), 10) || 4,
+    selection_pool: parseInt(getValue('genre_selection_pool', '6'), 10) || 6,
+    family_slot_limit: parseInt(getValue('genre_selection_family_limit', '2'), 10) || 2,
+    // Collection policy.
+    metal_suppresses_rock: getChecked('genre_selection_metal_suppresses_rock', true),
+    nu_metal_exception: getChecked('genre_selection_nu_metal_exception', true),
+    remove_generic_parents: getChecked('genre_selection_remove_generic_parents', true),
     entity_weights: entityWeights,
     source_weights: sourceWeights,
-    thresholds: {
+    thresholds: Object.assign({}, existing.thresholds || {}, {
       first: parseFloat(getValue('genre_threshold_first', '0.60')) || 0,
       second: parseFloat(getValue('genre_threshold_second', '0.45')) || 0,
       third: parseFloat(getValue('genre_threshold_third', '0.35')) || 0
-    },
+    }),
     relative_floor: parseFloat(getValue('genre_selection_relative', '0.45')) || 0
-  };
+  });
+  // Omitted when the box is cleared: the backend then falls back to its own
+  // default list rather than saving an empty one that permits nothing. Deleting
+  // the key (rather than leaving ``existing``'s value) makes a clear actually
+  // take effect.
+  if (companions.length) {
+    selection.nu_metal_rock_companions = companions;
+  } else {
+    delete selection.nu_metal_rock_companions;
+  }
+  return selection;
 }
 
 // ===== SYNCHRONIZED UI CONTROLS =====

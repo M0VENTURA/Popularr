@@ -431,10 +431,16 @@ class TestClampRunsLast:
             options={},
         )
 
-        star_updates = [
-            params for sql, params in session.executed
-            if "UPDATE tracks SET stars" in str(sql)
-        ]
+        # The persist is ONE batched statement, so the recorded params for a
+        # matching UPDATE are a LIST of per-track dicts; flatten to per-track.
+        star_updates = []
+        for sql, params in session.executed:
+            if "UPDATE tracks SET stars" not in str(sql):
+                continue
+            if isinstance(params, list):
+                star_updates.extend(params)
+            elif params is not None:
+                star_updates.append(params)
         assert star_updates, "expected a star rating to be persisted"
         assert star_updates[0]["stars"] == 2
 

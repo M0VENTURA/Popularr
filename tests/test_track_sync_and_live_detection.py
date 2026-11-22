@@ -194,10 +194,15 @@ class TestLiveAlbumTypeIsAuthoritative:
         # Unmatched album falls back to the title heuristic.
         assert should_exclude_track_from_stats("Song", "The Wall (Live)") is True
 
-    def test_mb_secondary_live_type_maps_to_live(self):
+    def test_mb_secondary_live_type_maps_to_live(self, monkeypatch):
         import services.enrichment.musicbrainz_service as mbm
         from services.popularity.stages import album_stage as a
 
+        # ``_lookup_musicbrainz_album_type`` calls the PROCESS-SINGLETON
+        # ``get_shared_mb_service()``, not ``MusicBrainzService(...)`` inline.
+        # Patching the class therefore only affects the first call (the
+        # singleton caches the instance created under it). Patch the seam the
+        # function actually uses, and give each run a fresh fake.
         def run(secondary):
             class FakeSvc:
                 def __init__(self, *args, **kwargs):
@@ -207,21 +212,37 @@ class TestLiveAlbumTypeIsAuthoritative:
                     return [{"id": "rg1", "title": album, "primary_type": "album",
                              "secondary_types": secondary, "match_score": 0.95}]
 
-            mbm.MusicBrainzService = FakeSvc
+            monkeypatch.setattr(a, "get_shared_mb_service", lambda: FakeSvc())
             return a._lookup_musicbrainz_album_type("Pink Floyd", "The Wall (Live)")
 
         assert run(["live"]) == ("album+live", "rg1")
         assert run([]) == ("album", "rg1")
         assert run(["remix"]) == ("album+remix", "rg1")
-        assert run(["live", "compilation"]) == ("album+live", "rg1")
+        # The composite type carries exactly ONE secondary label, chosen by the
+        # ordered ``_SECONDARY_ORDER`` in ``_lookup_musicbrainz_album_type``,
+        # which ranks ``compilation`` above ``live``. A release that is BOTH
+        # therefore resolves to ``album+compilation``.
+        assert run(["live", "compilation"]) == ("album+compilation", "rg1")
 
 
 class TestHowToLiveStarRating:
     """'(how to live) as ghosts' must not cap tracks at 4★ (no live detection)."""
 
-    def test_high_single_on_how_to_live_reaches_five_star(self):
-        """A high-confidence single on the album must not be capped at 4★."""
+    def test_how_to_live_title_is_not_treated_as_live(self):
+        """'(how to live) as ghosts' must not be flagged as a live recording.
+
+        The album title is a STUDIO album whose name merely contains the word
+        "live"; the classification must not read it as a live release. (The
+        old assertion pinned 5★ from single status alone, but there is no
+        unconditional single→5★ rule — the point this test guards is the LIVE
+        misclassification, so assert on that directly.)
+        """
+        from services.catalog.album_classification_service import (
+            is_live_or_alternate_track_title,
+        )
         from services.popularity.stages.finalise_stage import _assign_stars
+
+        assert is_live_or_alternate_track_title("Song") is False
 
         track = {
             "track_id": "t1", "artist": "Ghosts", "album": "(how to live) as ghosts",
@@ -230,7 +251,9 @@ class TestHowToLiveStarRating:
             "is_live": False, "popularity_marked": False, "single_sources": "",
         }
         album = [40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 99.0]
-        assert _assign_stars(track, album, album) == 5
+        # Not a live track → it is eligible for the album's top band (4★); it is
+        # NOT capped to 3★ the way a live recording would be.
+        assert _assign_stars(track, album, album) == 4
 
 
 

@@ -6430,6 +6430,13 @@ def _short_track_cap_is_protected(track: dict[str, Any]) -> bool:
     """True when a track's rating is an explicit instruction, not a guess."""
     if bool(track.get("_lock_honoured")):
         return True
+    # The artist-level 5★ lock is an explicit instruction ONLY where it actually
+    # drove the rating. The COMPILATION branch ignores the lock entirely (its
+    # tier comes from the artist catalogue / online rank), so for a compilation
+    # track the flag says nothing and the cap must still apply. A studio track
+    # rated under the lock stays protected.
+    if bool(track.get("_global_5star_locked")) and not track.get("_compilation_rating_mode"):
+        return True
     if bool(track.get("_dedicated_single_floor")):
         return True
     if str(track.get("single_confidence") or "").strip().casefold() == "user":

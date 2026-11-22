@@ -117,7 +117,23 @@ def _album_results():
 
 
 def _star_updates(session):
-    return [e for e in session.executed if "UPDATE tracks SET stars" in e[0]]
+    """Flatten the recorded star-UPDATE statements into per-track params.
+
+    ``post_album_star_ratings`` persists ratings as ONE batched statement
+    (``session.execute(stmt, [param, param, ...])``) with a per-row savepoint
+    fallback. The recording session captures the raw argument, so the batch
+    form arrives as a LIST of dicts; the fallback form as a single dict. Both
+    shapes are normalised to a flat list of per-track param dicts here.
+    """
+    rows = []
+    for sql, params in session.executed:
+        if "UPDATE tracks SET stars" not in sql:
+            continue
+        if isinstance(params, list):
+            rows.extend(params)
+        elif params is not None:
+            rows.append(params)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +264,10 @@ class TestTheTwoPhasesAreWired:
     def test_phase_2_marks_the_rating_final(self) -> None:
         src = self._runner_src()
         flush_idx = src.index("def _flush_artist_star_ratings")
-        window = src[flush_idx: flush_idx + 2400]
+        # Window the WHOLE function body, not a magic character count — the
+        # marker drifted past the old 2400-char budget as comments grew above it.
+        end = src.find("\n    def ", flush_idx + 1)
+        window = src[flush_idx: end if end != -1 else len(src)]
         assert "reconciled=True" in window, (
             "the artist-boundary flush is the COMPLETE-catalogue pass — it must "
             "write stars_reconciled=TRUE"
@@ -278,9 +297,11 @@ class _PhaseHarness:
         monkeypatch.setattr(fs, "_assign_stars", lambda track, *a, **k: 4)
         monkeypatch.setattr(fs, "_build_rating_sync_clients", lambda: [object()])
         syncs: list[tuple] = []
+        # The real contract returns a STATUS STRING ("ok"/"not_found"/
+        # "deferred"/"failed"); only "ok" counts as synced.
         monkeypatch.setattr(
             fs, "_sync_rating_to_navidrome",
-            lambda tid, stars, clients=None: syncs.append((tid, stars)) or True,
+            lambda tid, stars, clients=None: syncs.append((tid, stars)) or "ok",
         )
         logs: list[str] = []
         monkeypatch.setattr(fs, "log_unified", lambda msg: logs.append(str(msg)))
@@ -297,6 +318,11 @@ class _PhaseHarness:
         return outcome, results, session, syncs, logs
 
 
+def _star_update_sql(session) -> list[str]:
+    """The recorded SQL text of every star-UPDATE statement."""
+    return [sql for sql, _params in session.executed if "UPDATE tracks SET stars" in sql]
+
+
 class TestTheFlagRidesWithTheStars:
     def test_a_provisional_post_writes_false_atomically(self, monkeypatch) -> None:
         _o, _r, session, _s, _l = _PhaseHarness.run(
@@ -304,17 +330,16 @@ class TestTheFlagRidesWithTheStars:
         )
         updates = _star_updates(session)
         assert updates, "no star UPDATE was recorded — the stars never persisted"
-        sql, params = updates[0]
-        assert "stars_reconciled = :rec" in sql, sql
-        assert params["rec"] is False
-        assert params["stars"] == 4
+        assert any("stars_reconciled = :rec" in sql for sql in _star_update_sql(session))
+        assert updates[0]["rec"] is False
+        assert updates[0]["stars"] == 4
 
     def test_a_reconciled_post_writes_true(self, monkeypatch) -> None:
         _o, _r, session, _s, _l = _PhaseHarness.run(
             monkeypatch, stars_reconciled=True
         )
         updates = _star_updates(session)
-        assert updates and updates[0][1]["rec"] is True
+        assert updates and updates[0]["rec"] is True
 
     def test_no_flag_leaves_the_sql_untouched(self, monkeypatch) -> None:
         """CONTROL — the finalise grouping path passes nothing (None), so its
@@ -322,9 +347,10 @@ class TestTheFlagRidesWithTheStars:
         _o, _r, session, _s, _l = _PhaseHarness.run(monkeypatch)
         updates = _star_updates(session)
         assert updates, "stars must still persist"
-        sql, params = updates[0]
-        assert "stars_reconciled" not in sql, sql
-        assert "rec" not in (params or {})
+        for sql in _star_update_sql(session):
+            assert "stars_reconciled" not in sql, sql
+        for params in updates:
+            assert "rec" not in params
 
     def test_provisional_persists_every_rated_track(self, monkeypatch) -> None:
         _o, results, session, _s, _l = _PhaseHarness.run(
@@ -355,14 +381,28 @@ class TestTheFlagRidesWithTheStars:
         )
         assert any("SCAN RESULTS" in m for m in logs)
 
-    def test_provisional_still_syncs_navidrome(self, monkeypatch) -> None:
-        """The durability half includes the Navidrome sync — an early return
-        in the provisional branch would silently strand phase 1's stars in the
-        DB while Navidrome keeps the old ratings."""
+    def test_provisional_defers_navidrome_to_the_reconcile_pass(self, monkeypatch) -> None:
+        """Phase 1 persists stars to the DB only; the RECONCILE pass writes
+        them to Navidrome.
+
+        This is the documented design (``finalise_stage.py``: the provisional
+        pass "persists stars without writing the file tag or syncing
+        Navidrome"), with ``_needs_external_write`` paying the sync back on the
+        reconcile pass because the stored row is still provisional.
+        """
         _o, _r, _session, syncs, _logs = _PhaseHarness.run(
             monkeypatch, stars_reconciled=False, provisional=True,
             sync_navidrome=True,
         )
+        assert syncs == [], (
+            f"phase 1 must NOT sync Navidrome (the reconcile pass owes it), got {syncs!r}"
+        )
+
+    def test_the_reconcile_pass_syncs_navidrome(self, monkeypatch) -> None:
+        """The complement: the final pass does sync, so nothing is stranded."""
+        _o, _r, _session, syncs, _logs = _PhaseHarness.run(
+            monkeypatch, stars_reconciled=True, sync_navidrome=True,
+        )
         assert len(syncs) == 2, (
-            f"phase 1 must sync its durable stars to Navidrome, got {syncs!r}"
+            f"the reconcile pass must sync its final stars to Navidrome, got {syncs!r}"
         )

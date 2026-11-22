@@ -58,38 +58,57 @@ def record_scan(
                     },
                 )
             else:
-                # Update the most recent 'started' row for this scan_type/artist
-                updated = session.execute(
+                # Find the most recent 'started' row for this scan_type/artist.
+                #
+                # ``duration_seconds`` is computed here rather than with
+                # ``EXTRACT(EPOCH FROM ...)``: that is PostgreSQL-only, and the
+                # SQLite test suite cannot even PARSE it (``FROM`` is reserved),
+                # so the completion path was never exercised. Same reasoning as
+                # ``was_album_scanned`` below. Two statements also make
+                # ``rowcount`` meaningful on every dialect.
+                completed_at = datetime.utcnow()
+                target = session.execute(
                     text("""
-                        UPDATE scan_history
-                        SET status = :status,
-                            message = :message,
-                            completed_at = :completed_at,
-                            duration_seconds = EXTRACT(EPOCH FROM (:completed_at - started_at))
-                        WHERE id = (
-                            SELECT id FROM scan_history
-                            WHERE scan_type = :scan_type
-                              AND (artist IS NOT DISTINCT FROM :artist)
-                              AND status = 'started'
-                            ORDER BY started_at DESC NULLS LAST, id DESC
-                            LIMIT 1
-                        )
+                        SELECT id, started_at FROM scan_history
+                        WHERE scan_type = :scan_type
+                          AND (artist IS NOT DISTINCT FROM :artist)
+                          AND status = 'started'
+                        ORDER BY started_at DESC NULLS LAST, id DESC
+                        LIMIT 1
                     """),
-                    {
-                        "scan_type": scan_type,
-                        "status": status,
-                        "message": message,
-                        "artist": artist,
-                        "completed_at": datetime.utcnow(),
-                    },
-                )
+                    {"scan_type": scan_type, "artist": artist},
+                ).fetchone()
+
+                updated = None
+                if target is not None:
+                    duration_seconds: float | None = None
+                    _started = target[1]
+                    if isinstance(_started, datetime):
+                        duration_seconds = (completed_at - _started).total_seconds()
+                    updated = session.execute(
+                        text("""
+                            UPDATE scan_history
+                            SET status = :status,
+                                message = :message,
+                                completed_at = :completed_at,
+                                duration_seconds = :duration_seconds
+                            WHERE id = :id
+                        """),
+                        {
+                            "id": target[0],
+                            "status": status,
+                            "message": message,
+                            "completed_at": completed_at,
+                            "duration_seconds": duration_seconds,
+                        },
+                    )
                 # If NO matching 'started' row exists (e.g. the scan was
                 # launched by a path that never recorded 'started', or the
                 # started row was written with a different artist), INSERT the
                 # completion as its own row so the scan history is never
                 # silently lost.  The dashboard renders any non-failed
                 # _SCAN_SESSION_ row as a completed session.
-                if updated.rowcount == 0:
+                if updated is None or updated.rowcount == 0:
                     session.execute(
                         text("""
                             INSERT INTO scan_history
