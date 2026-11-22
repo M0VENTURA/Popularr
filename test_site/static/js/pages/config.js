@@ -790,9 +790,59 @@
           score_threshold: parseFloat(getValue('matching_score_threshold', '0.60')) || 0.60
         }
       ),
-      logging: {
-        level: getValue('log_level', 'info').toLowerCase()
-      },
+      // Merged over pageConfig so the scan-logging sub-blocks
+      // (logging.progress/results/playlists/diagnostics) that this page does not
+      // render survive a save. A bare literal deleted them on every save.
+      logging: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.logging) || {},
+        {
+          level: getValue('log_level', 'info').toLowerCase(),
+          progress: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.logging
+              && global.pageConfig.logging.progress) || {}),
+            {
+              show_track_starts: getChecked('log_show_track_starts', true),
+              show_track_completions: getChecked('log_show_track_completions', true),
+              heartbeat_seconds: (() => {
+                const raw = parseInt(getValue('log_heartbeat_seconds', '15'), 10);
+                return Number.isFinite(raw) ? Math.max(1, Math.min(3600, raw)) : 15;
+              })()
+            }
+          ),
+          results: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.logging
+              && global.pageConfig.logging.results) || {}),
+            {
+              show_final_ratings: getChecked('log_show_final_ratings', true),
+              show_final_genres: getChecked('log_show_final_genres', true),
+              show_provisional_scores: getChecked('log_show_provisional_scores', false),
+              genre_display: getValue('log_genre_display', 'defaults_with_exceptions') || 'defaults_with_exceptions'
+            }
+          ),
+          playlists: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.logging
+              && global.pageConfig.logging.playlists) || {}),
+            {
+              show_created: getChecked('log_show_created', true),
+              show_updated: getChecked('log_show_updated', true),
+              show_failed: getChecked('log_show_failed', true),
+              show_unchanged_individually: getChecked('log_show_unchanged', false)
+            }
+          ),
+          diagnostics: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.logging
+              && global.pageConfig.logging.diagnostics) || {}),
+            {
+              provider_payloads: getChecked('log_provider_payloads', false)
+            }
+          )
+        }
+      ),
       slskd: Object.assign(
         {},
         (global.pageConfig && global.pageConfig.slskd) || {},
@@ -1024,30 +1074,60 @@
         genre_playlists_name_template: getValue('playlists_genre_name_template', '{genre} - Top Tracks'),
         excluded_artists: [...configExcludedArtists],
       },
-      navidrome: {
-        auto_public_playlists: getChecked('api_navidrome_auto_public_playlists', false),
-        playlist_cover_art: getChecked('api_navidrome_playlist_cover_art', false)
-      },
-      // Safe shutdown for database maintenance. The auto-resume value exists so a
-      // forgotten shutdown cannot leave the app dormant forever.
-      maintenance: {
-        safe_shutdown: {
-          enabled: getChecked('safe_shutdown_enabled', true),
-          drain_timeout_seconds: parseInt(getValue('safe_shutdown_drain_timeout', '60')) || 0,
-          auto_cancel_after_minutes: parseInt(getValue('safe_shutdown_auto_cancel', '120')) || 0,
-          release_connections: getChecked('safe_shutdown_release_connections', true)
+      navidrome: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.navidrome) || {},
+        {
+          auto_public_playlists: getChecked('api_navidrome_auto_public_playlists', false),
+          playlist_cover_art: getChecked('api_navidrome_playlist_cover_art', false)
         }
-      },
+      ),
+      // Safe shutdown for database maintenance. The auto-resume value exists so a
+      // forgotten shutdown cannot leave the app dormant forever. Merged over
+      // pageConfig at BOTH levels so un-rendered sibling keys survive.
+      maintenance: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.maintenance) || {},
+        {
+          safe_shutdown: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.maintenance
+              && global.pageConfig.maintenance.safe_shutdown) || {}),
+            {
+              enabled: getChecked('safe_shutdown_enabled', true),
+              drain_timeout_seconds: parseInt(getValue('safe_shutdown_drain_timeout', '60')) || 0,
+              auto_cancel_after_minutes: parseInt(getValue('safe_shutdown_auto_cancel', '120')) || 0,
+              release_connections: getChecked('safe_shutdown_release_connections', true)
+            }
+          )
+        }
+      ),
       // Large album saves: past this track count the file-tagging half runs in a
       // background service, so the response is not held past Cloudflare's 100s
       // origin timeout (the reported 524).
-      album_save: {
-        background: {
-          enabled: getChecked('album_save_background_enabled', true),
-          track_threshold: parseInt(getValue('album_save_background_threshold', '40')) || 0
+      album_save: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.album_save) || {},
+        {
+          background: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.album_save
+              && global.pageConfig.album_save.background) || {}),
+            {
+              enabled: getChecked('album_save_background_enabled', true),
+              track_threshold: parseInt(getValue('album_save_background_threshold', '40')) || 0
+            }
+          )
         }
-      },
-      downloads: {
+      ),
+      // ⚠️ MERGED over pageConfig at the section AND nested-block level.
+      // ``downloads.matching`` (min_accept_score / top_n_candidates /
+      // early_accept_length_tolerance) is read by the backend but not rendered
+      // here — a bare literal deleted it on every save.
+      downloads: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.downloads) || {},
+        {
         folder: getValue('downloads_folder'),
         external_export_path: getValue('external_export_path'),
         file_name_format: getValue('downloads_file_name_format', '{album_artist}/{year} - {album}/{track_number}. {artist} - {title}'),
@@ -1055,22 +1135,32 @@
           const priorities = [];
           if (getChecked('downloads_quality_allow_mp3_320', true)) priorities.push({ format: 'mp3', bitrate_kbps: 320 });
           if (getChecked('downloads_quality_allow_flac', true)) priorities.push({ format: 'flac', bitrate_kbps: null });
-          return {
-            enabled: getChecked('downloads_quality_enabled'),
-            reject_others: getChecked('downloads_quality_reject_others', true),
-            bitrate_tolerance: parseInt(getValue('downloads_quality_bitrate_tolerance', '5')) || 5,
-            priorities: priorities
-          };
+          return Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.downloads
+              && global.pageConfig.downloads.quality_filter) || {}),
+            {
+              enabled: getChecked('downloads_quality_enabled'),
+              reject_others: getChecked('downloads_quality_reject_others', true),
+              bitrate_tolerance: parseInt(getValue('downloads_quality_bitrate_tolerance', '5')) || 5,
+              priorities: priorities
+            }
+          );
         })(),
         // Re-align imported downloads with the release their queue row names.
         // The `limit` is a cap on QUEUE ROWS examined per run: each release needs
         // a MusicBrainz lookup and that client is rate-limited, so an unbounded
         // first run would crawl. 0 = no cap.
-        metadata_heal: {
-          enabled: getChecked('downloads_heal_enabled'),
-          run_on_startup: getChecked('downloads_heal_on_startup', true),
-          limit: parseInt(getValue('downloads_heal_limit', '200')) || 0
-        },
+        metadata_heal: Object.assign(
+          {},
+          ((global.pageConfig && global.pageConfig.downloads
+            && global.pageConfig.downloads.metadata_heal) || {}),
+          {
+            enabled: getChecked('downloads_heal_enabled'),
+            run_on_startup: getChecked('downloads_heal_on_startup', true),
+            limit: parseInt(getValue('downloads_heal_limit', '200')) || 0
+          }
+        ),
         // Soulseek search quality: bitrate floor for the first pass + optional
         // low-quality fallback tier (rare releases only exist as 128kbps MP3s).
         quality: Object.assign(
@@ -1090,20 +1180,32 @@
             ).map((el) => el.value)
           }
         ),
-        conversion: {
-          enabled: getChecked('downloads_conversion_enabled'),
-          mode: getValue('downloads_conversion_mode', 'flac_to_mp3'),
-          mp3_bitrate_kbps: parseInt(getValue('downloads_conversion_mp3_bitrate', '320')) || 320,
-          original_handling: getValue('downloads_conversion_original_handling', 'move_to_original'),
-          original_subfolder: getValue('downloads_conversion_original_subfolder', 'Original')
+        conversion: Object.assign(
+          {},
+          ((global.pageConfig && global.pageConfig.downloads
+            && global.pageConfig.downloads.conversion) || {}),
+          {
+            enabled: getChecked('downloads_conversion_enabled'),
+            mode: getValue('downloads_conversion_mode', 'flac_to_mp3'),
+            mp3_bitrate_kbps: parseInt(getValue('downloads_conversion_mp3_bitrate', '320')) || 320,
+            original_handling: getValue('downloads_conversion_original_handling', 'move_to_original'),
+            original_subfolder: getValue('downloads_conversion_original_subfolder', 'Original')
+          }
+        )
         }
-      },
-      watcher: {
-        scan_interval: parseInt(getValue('watcher_scan_interval', '30')) || 30,
-        auto_import_enabled: getChecked('watcher_auto_import', true),
-        auto_popularity_scan: getChecked('watcher_auto_popularity', true),
-        downloads_watcher_enabled: getChecked('watcher_downloads_enabled', true)
-      },
+      ),
+      // Merged over pageConfig: `watcher.navidrome_sync_wait` and any other
+      // un-rendered key would otherwise be deleted on every save.
+      watcher: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.watcher) || {},
+        {
+          scan_interval: parseInt(getValue('watcher_scan_interval', '30')) || 30,
+          auto_import_enabled: getChecked('watcher_auto_import', true),
+          auto_popularity_scan: getChecked('watcher_auto_popularity', true),
+          downloads_watcher_enabled: getChecked('watcher_downloads_enabled', true)
+        }
+      ),
       // Scheduled background jobs (APScheduler).  This section MUST be in the
       // payload: save_config() REPLACES config.yaml wholesale, so a payload
       // without `scheduler:` deletes every interval and the timezone on the
@@ -1299,11 +1401,45 @@
             five_star_min_listeners: (function () { var v = parseInt(getValue('album_star_curve_five_star_min_listeners', '0'), 10); return isFinite(v) ? v : 0; })(),
             min_album_tracks: (function () { var v = parseInt(getValue('album_star_curve_min_album_tracks', '3'), 10); return isFinite(v) ? v : 3; })()
           },
+          // Live-album rating model. Merged over pageConfig so the sub-block
+          // survives even when the UI is older than the config file.
+          live_album_scaling: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.single_detection
+              && global.pageConfig.single_detection.live_album_scaling) || {}),
+            {
+              enabled: getChecked('live_album_scaling_enabled', true),
+              mode: getValue('live_album_scaling_mode', 'artist_and_album') || 'artist_and_album',
+              max_stars: (function () { var v = parseInt(getValue('live_album_scaling_max_stars', '3'), 10); return isFinite(v) ? v : 3; })(),
+              artist_z_star5: (function () { var v = parseFloat(getValue('live_album_scaling_artist_z_star5', '1.50')); return isFinite(v) ? v : 1.50; })(),
+              artist_z_star4: (function () { var v = parseFloat(getValue('live_album_scaling_artist_z_star4', '1.00')); return isFinite(v) ? v : 1.00; })(),
+              artist_z_star3: (function () { var v = parseFloat(getValue('live_album_scaling_artist_z_star3', '-0.25')); return isFinite(v) ? v : -0.25; })(),
+              artist_z_star2: (function () { var v = parseFloat(getValue('live_album_scaling_artist_z_star2', '-1.20')); return isFinite(v) ? v : -1.20; })(),
+              album_z_gate: (function () { var v = parseFloat(getValue('live_album_scaling_album_z_gate', '2.00')); return isFinite(v) ? v : 2.00; })(),
+              promote_artist_z_min: (function () { var v = parseFloat(getValue('live_album_scaling_promote_artist_z_min', '0.50')); return isFinite(v) ? v : 0.50; })(),
+              min_catalogue: (function () { var v = parseInt(getValue('live_album_scaling_min_catalogue', '8'), 10); return isFinite(v) ? v : 8; })(),
+              max_5star_slots: (function () { var v = parseInt(getValue('live_album_scaling_max_5star_slots', '1'), 10); return isFinite(v) ? v : 1; })(),
+              max_4star_slots: (function () { var v = parseInt(getValue('live_album_scaling_max_4star_slots', '2'), 10); return isFinite(v) ? v : 2; })(),
+              track_fraction: (function () { var v = parseFloat(getValue('live_album_scaling_track_fraction', '0.60')); return isFinite(v) ? v : 0.60; })()
+            }
+          ),
           star_resync: {
             enabled: getChecked('star_resync_enabled', true),
             write_file_tags: getChecked('star_resync_write_file_tags', true) ? 1 : 0,
             sync_navidrome: getChecked('star_resync_sync_navidrome', true) ? 1 : 0,
             albums_per_batch: (function () { var v = parseInt(getValue('star_resync_albums_per_batch', '25'), 10); return isFinite(v) && v > 0 ? v : 25; })()
+          },
+          // ⚠️ Read by ``get_compilation_ladder_config`` (helpers/config_helpers.py).
+          // The six inputs render in this tree, but without this block the value
+          // never reached the payload and every save left the stored ladder
+          // untouched (or reset it). Kept identical to static/js/config.js.
+          compilation_ladder: {
+            enabled: getChecked('compilation_ladder_enabled', false) ? 1 : 0,
+            catalogue_is_cap_only: getChecked('compilation_ladder_catalogue_is_cap_only', true) ? 1 : 0,
+            five_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_five_star_listeners', '900000')); return isFinite(v) ? v : 900000; })(),
+            four_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_four_star_listeners', '120000')); return isFinite(v) ? v : 120000; })(),
+            three_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_three_star_listeners', '15000')); return isFinite(v) ? v : 15000; })(),
+            two_star_listeners: (function () { var v = parseFloat(getValue('compilation_ladder_two_star_listeners', '2000')); return isFinite(v) ? v : 2000; })()
           }
         }
       ),
@@ -1356,7 +1492,30 @@
             return Number.isFinite(raw) ? Math.max(0, raw) : 30;
           })(),
           scan_threads: parseInt(getValue('pop_scan_threads', '4'), 10) || 4,
-          prefetch_budget_seconds: parseInt(getValue('pop_prefetch_budget_seconds', '360'), 10) || 360
+          prefetch_budget_seconds: parseInt(getValue('pop_prefetch_budget_seconds', '360'), 10) || 360,
+          // ⚠️ Read by ``get_velocity_scoring_config`` (popularity_config.py).
+          // Emitted here so the opt-in velocity / collision terms are reachable
+          // from this tree, identical to static/js/config.js. Off by default.
+          velocity: {
+            enabled: getChecked('pop_velocity_enabled', false),
+            weight: (function () { var v = parseFloat(getValue('pop_velocity_weight', '0.0')); return isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.0; })(),
+            collision_damping: (function () { var v = parseFloat(getValue('pop_velocity_collision_damping', '0.88')); return isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.88; })(),
+            collision_min_listens: (function () { var v = parseInt(getValue('pop_velocity_collision_min_listens', '50000'), 10); return isFinite(v) ? Math.max(0, v) : 50000; })()
+          }
+        }
+      ),
+      // Library-search behaviour. Merged over pageConfig so the sibling
+      // ``search.strip_keywords`` (written by the Search Filters card) survives —
+      // ``save_config`` writes this section verbatim.
+      search: Object.assign(
+        {},
+        (global.pageConfig && global.pageConfig.search) || {},
+        {
+          fuzzy: Object.assign(
+            {},
+            ((global.pageConfig && global.pageConfig.search && global.pageConfig.search.fuzzy) || {}),
+            { enabled: getChecked('search_fuzzy_enabled', true) }
+          )
         }
       ),
       statistics: Object.assign(
@@ -1390,7 +1549,10 @@
             fill_missing_only: getChecked('tagging_fill_missing_only', false),
             embed_lyrics: getChecked('tagging_embed_lyrics', false)
           },
-          preserve_file_timestamps: getChecked('tagging_preserve_timestamps', true)
+          preserve_file_timestamps: getChecked('tagging_preserve_timestamps', true),
+          // Queue file tag writes onto a worker pool instead of blocking the
+          // scan. Read by ``get_tagging_config``; the live tree emits it too.
+          defer_file_writes: getChecked('tagging_defer_writes', true)
         }
       ),
       genres: Object.assign(
@@ -1430,32 +1592,41 @@
           selection: collectGenreSelectionConfig()
         }
       ),
-      api_integrations: {
-        lastfm: {
-          enabled: getChecked('api_lastfm_enabled'),
-          api_key: getValue('api_lastfm_api_key')
-        },
-        listenbrainz: {
-          enabled: getChecked('api_listenbrainz_enabled'),
-          token: getValue('api_listenbrainz_token')
-        },
-        discogs: {
-          enabled: getChecked('api_discogs_enabled'),
-          token: getValue('api_discogs_token')
-        },
-        musicbrainz: { enabled: getChecked('api_musicbrainz_enabled', true) },
-        audiodb: {
-          enabled: getChecked('api_audiodb_enabled'),
-          api_key: getValue('api_audiodb_api_key')
-        },
-        // Billable third-party image API. Only used by the Top Genre playlist
-        // covers (playlists.genre_playlist_ai_cover_enabled).
-        gemini: {
-          enabled: getChecked('api_gemini_enabled'),
-          api_key: getValue('api_gemini_api_key'),
-          model: getValue('api_gemini_model', 'gemini-2.5-flash-image') || 'gemini-2.5-flash-image'
-        }
-      },
+      // ⚠️ MERGED over pageConfig, per service. ``save_config`` replaces the
+      // whole section, and ``get_config`` populates ``lastfm.api_secret`` from
+      // the env/legacy key — a bare literal here DELETED that secret on every
+      // save. Any un-rendered sibling (e.g. a spotify block) now survives too.
+      api_integrations: (() => {
+        const _api = (global.pageConfig && global.pageConfig.api_integrations) || {};
+        return Object.assign({}, _api, {
+          lastfm: Object.assign({}, _api.lastfm || {}, {
+            enabled: getChecked('api_lastfm_enabled'),
+            api_key: getValue('api_lastfm_api_key')
+          }),
+          listenbrainz: Object.assign({}, _api.listenbrainz || {}, {
+            enabled: getChecked('api_listenbrainz_enabled'),
+            token: getValue('api_listenbrainz_token')
+          }),
+          discogs: Object.assign({}, _api.discogs || {}, {
+            enabled: getChecked('api_discogs_enabled'),
+            token: getValue('api_discogs_token')
+          }),
+          musicbrainz: Object.assign({}, _api.musicbrainz || {}, {
+            enabled: getChecked('api_musicbrainz_enabled', true)
+          }),
+          audiodb: Object.assign({}, _api.audiodb || {}, {
+            enabled: getChecked('api_audiodb_enabled'),
+            api_key: getValue('api_audiodb_api_key')
+          }),
+          // Billable third-party image API. Only used by the Top Genre playlist
+          // covers (playlists.genre_playlist_ai_cover_enabled).
+          gemini: Object.assign({}, _api.gemini || {}, {
+            enabled: getChecked('api_gemini_enabled'),
+            api_key: getValue('api_gemini_api_key'),
+            model: getValue('api_gemini_model', 'gemini-2.5-flash-image') || 'gemini-2.5-flash-image'
+          })
+        });
+      })(),
       strip_parentheses_filters: Array.from(document.querySelectorAll('#stripKeywordsList .badge'))
         .map((badge) => badge.childNodes[0].textContent.trim())
         .filter(Boolean),
@@ -2489,19 +2660,43 @@
       if (key && !Number.isNaN(value)) sourceWeights[key] = value;
     });
 
-    return {
+    const companions = String(getValue('genre_selection_nu_companions', '') || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    // ⚠️ This object REPLACES the whole ``genres.selection`` block on save (the
+    // route carries forward only TOP-LEVEL sections, not nested sub-objects), so
+    // we start from the EXISTING block and overwrite only what the form surfaces.
+    // That keeps backend-read keys the page does not expose from being deleted,
+    // and surfaces the collection-policy keys that used to be dropped here.
+    const existing = (global.pageConfig && global.pageConfig.genres
+      && global.pageConfig.genres.selection) || {};
+    const selection = Object.assign({}, existing, {
       enabled: getChecked('genre_selection_enabled', true),
-      max_genres: parseInt(getValue('genre_selection_max', '3')) || 3,
-      family_slot_limit: parseInt(getValue('genre_selection_family_limit', '3')) || 3,
+      max_genres: parseInt(getValue('genre_selection_max', '4'), 10) || 4,
+      selection_pool: parseInt(getValue('genre_selection_pool', '6'), 10) || 6,
+      family_slot_limit: parseInt(getValue('genre_selection_family_limit', '2'), 10) || 2,
+      // Collection policy.
+      metal_suppresses_rock: getChecked('genre_selection_metal_suppresses_rock', true),
+      nu_metal_exception: getChecked('genre_selection_nu_metal_exception', true),
+      remove_generic_parents: getChecked('genre_selection_remove_generic_parents', true),
       entity_weights: entityWeights,
       source_weights: sourceWeights,
-      thresholds: {
+      thresholds: Object.assign({}, existing.thresholds || {}, {
         first: parseFloat(getValue('genre_threshold_first', '0.60')) || 0,
         second: parseFloat(getValue('genre_threshold_second', '0.45')) || 0,
         third: parseFloat(getValue('genre_threshold_third', '0.35')) || 0
-      },
+      }),
       relative_floor: parseFloat(getValue('genre_selection_relative', '0.45')) || 0
-    };
+    });
+    // Omitted when the box is cleared, so clearing actually takes effect.
+    if (companions.length) {
+      selection.nu_metal_rock_companions = companions;
+    } else {
+      delete selection.nu_metal_rock_companions;
+    }
+    return selection;
   }
 
   // ── Genre vocabulary ──────────────────────────────────────────────────

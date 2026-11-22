@@ -527,8 +527,12 @@ def test_config_page_offers_the_settings(page: Path) -> None:
 @pytest.mark.parametrize("js", CONFIG_JS, ids=lambda p: p.parent.name)
 def test_config_js_collects_the_block(js: Path) -> None:
     source = js.read_text(encoding="utf-8")
-    assert "album_save: {" in source
-    assert "background: {" in source
+    # ``album_save`` / ``album_save.background`` are now merged over pageConfig
+    # (Object.assign) so an un-rendered sibling key is not deleted on save,
+    # rather than bare ``album_save: {`` / ``background: {`` literals. What
+    # matters is that the block is still collected from its controls.
+    assert "album_save:" in source
+    assert "background:" in source
     assert "album_save_background_threshold" in source
 
 

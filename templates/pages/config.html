@@ -43,12 +43,43 @@
      `active` is whether the cutover actually applied. They differ when the
      rebuilt tree is missing, which is exactly the case worth surfacing.
 
-     The control itself lives on the rebuilt tree's Config page
-     (test_site/templates/Pages/config.html) as `feature_use_test_site`; the
-     live tree cannot switch to the very tree that renders this page, and
-     `use_test_site` is in `moved_feature_keys` below so it is never emitted by
-     the Advanced Features sweeper either.
+     Offered on BOTH Config pages (ids match) so an operator can switch back
+     and forth. `use_test_site` is in `moved_feature_keys` below so the Advanced
+     Features sweeper never emits it twice; `feature_use_test_site` is collected
+     by `collectFeatureFieldOverrides`, which every tree's collector runs.
   #}
+  <div class="card shadow-sm mb-3" id="ui-tree">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-layers"></i> User Interface</h5>
+    </div>
+    <div class="card-body">
+      <div class="row g-3 align-items-start">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_use_test_site">Interface</label>
+          <select class="form-select form-select-sm feature-field" id="feature_use_test_site" name="feature_use_test_site">
+            <option value="false" {% if not config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Live (templates/)</option>
+            <option value="true" {% if config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Rebuilt (test_site/)</option>
+          </select>
+          <small class="form-text text-muted">
+            <strong>Requires a restart</strong> — the interface is bound at startup.
+          </small>
+        </div>
+        <div class="col-12 col-lg-8">
+          {% if test_site and test_site.get('active') %}
+            <div class="alert alert-success py-2 mb-0 small">
+              <i class="bi bi-check-circle-fill"></i>
+              <strong>Rebuilt UI is active</strong> — select Live and restart to go back.
+            </div>
+          {% else %}
+            <div class="alert alert-secondary py-2 mb-0 small">
+              <i class="bi bi-window"></i>
+              <strong>Live UI active.</strong> The rebuilt tree is served once switched on and the app restarted.
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
   <!-- Vertical Tab Navigation -->
   <div class="row mt-3">
     <div class="col-12 col-md-3 col-xl-2 mb-4">
@@ -69,7 +100,10 @@
           <i class="bi bi-union"></i> Matching
         </button>
         <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-analytics" type="button" role="tab">
-          <i class="bi bi-graph-up"></i> Analytics & Scoring
+          <i class="bi bi-graph-up"></i> Popularity & Scoring
+        </button>
+        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-stars" type="button" role="tab">
+          <i class="bi bi-star-half"></i> Star Ratings
         </button>
         <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-playlists" type="button" role="tab">
           <i class="bi bi-music-note-beamed"></i> Playlists
@@ -235,7 +269,7 @@
   <div class="card shadow-sm mb-3" id="logging">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
       <h5 class="mb-0"><i class="bi bi-bug-fill"></i> Logging</h5>
-      <small class="text-muted">Control application log verbosity. Log files are viewable on the <a href="/logs" target="_blank">/logs</a> page.</small>
+      <small class="text-muted">Control application log verbosity and how much the scan prints. Log files are viewable on the <a href="/logs" target="_blank">/logs</a> page.</small>
     </div>
     <div class="card-body">
       <div class="row g-3">
@@ -250,6 +284,85 @@
             <option value="error" {% if current_level == 'error' %}selected{% endif %}>Error only</option>
           </select>
           <div class="form-text">Debug is off by default. Enable it only when troubleshooting — it produces large, detailed logs and applies immediately on save.</div>
+        </div>
+        <div class="col-12 col-md-6">
+          <label class="form-label" for="log_heartbeat_seconds">Progress Heartbeat (seconds)</label>
+          <input type="number" step="1" min="1" max="3600" class="form-control" id="log_heartbeat_seconds" placeholder="15" value="{{ (log_cfg.get('progress', {}) or {}).get('heartbeat_seconds', 15) }}">
+          <div class="form-text">How often the scan prints a "still working" heartbeat line while it waits on slow work. Lower is noisier. Default: <strong>15</strong></div>
+        </div>
+      </div>
+
+      <h6 class="mb-2 mt-4"><i class="bi bi-list-check"></i> Scan Log Detail (<code>logging.*</code>)</h6>
+      <small class="text-muted d-block mb-3">What the scan prints at INFO. Turn these off to quiet a large run without switching the whole app to WARNING.</small>
+      <div class="row g-3">
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_track_starts" {% if (log_cfg.get('progress', {}) or {}).get('show_track_starts', True) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_track_starts">Show track starts</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_track_completions" {% if (log_cfg.get('progress', {}) or {}).get('show_track_completions', True) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_track_completions">Show track completions</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_final_ratings" {% if (log_cfg.get('results', {}) or {}).get('show_final_ratings', True) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_final_ratings">Show final star ratings</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_final_genres" {% if (log_cfg.get('results', {}) or {}).get('show_final_genres', True) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_final_genres">Show final genres</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_provisional_scores" {% if (log_cfg.get('results', {}) or {}).get('show_provisional_scores', False) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_provisional_scores">Show provisional scores</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_created" {% if (log_cfg.get('playlists', {}) or {}).get('show_created', True) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_created">Playlists created</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_updated" {% if (log_cfg.get('playlists', {}) or {}).get('show_updated', True) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_updated">Playlists updated</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_failed" {% if (log_cfg.get('playlists', {}) or {}).get('show_failed', True) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_failed">Playlist failures</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_show_unchanged" {% if (log_cfg.get('playlists', {}) or {}).get('show_unchanged_individually', False) %}checked{% endif %}>
+            <label class="form-check-label" for="log_show_unchanged">Unchanged playlists (individually)</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="log_provider_payloads" {% if (log_cfg.get('diagnostics', {}) or {}).get('provider_payloads', False) %}checked{% endif %}>
+            <label class="form-check-label" for="log_provider_payloads">Provider payload tracing (DEBUG)</label>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <label class="form-label" for="log_genre_display">Genre display</label>
+          {% set _gd = (log_cfg.get('results', {}) or {}).get('genre_display', 'defaults_with_exceptions') %}
+          <select class="form-select form-select-sm" id="log_genre_display">
+            <option value="defaults_with_exceptions" {% if _gd == 'defaults_with_exceptions' %}selected{% endif %}>Defaults + exceptions (default)</option>
+            <option value="per_track" {% if _gd == 'per_track' %}selected{% endif %}>Per track</option>
+            <option value="none" {% if _gd == 'none' %}selected{% endif %}>None</option>
+          </select>
         </div>
       </div>
     </div>
@@ -995,39 +1108,6 @@
   </div>
 
   <!-- Scheduled Scans Section -->
-  <div class="card shadow-sm mb-3" id="scheduled-scans">
-    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-clock-history"></i> Scheduled Scans</h5>
-      <small class="text-muted">Background jobs the scheduler runs on its own — separate from every scan button</small>
-    </div>
-    <div class="card-body">
-      {% set sch_jobs = ((config.get('scheduler', {}) or {}).get('jobs', {}) or {}) %}
-      <div class="row g-3">
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="scheduler_library_sync_interval_minutes">Library Sync Interval (minutes)</label>
-          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_library_sync_interval_minutes" value="{{ (sch_jobs.get('library_sync', {}) or {}).get('interval_minutes', 360) }}">
-          <small class="form-text text-muted">Re-imports new and changed Navidrome rows so the library stays in step. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Import</strong> on the Watcher Service card). Default: <strong>360</strong> (6&nbsp;h)</small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="scheduler_popularity_scan_interval_minutes">Popularity Scan Interval (minutes)</label>
-          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_popularity_scan_interval_minutes" value="{{ (sch_jobs.get('popularity_scan', {}) or {}).get('interval_minutes', 1440) }}">
-          <small class="form-text text-muted">Runs the <strong>Popularity</strong> mode only — never Finalise, Metadata, Singles or Essentia. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Popularity Scan</strong>). Default: <strong>1440</strong> (24&nbsp;h)</small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="scheduler_navidrome_import_interval_minutes">Navidrome Import Interval (minutes)</label>
-          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_navidrome_import_interval_minutes" value="{{ (sch_jobs.get('navidrome_import', {}) or {}).get('interval_minutes', 240) }}">
-          <small class="form-text text-muted">Runs the same <strong>Import</strong> as the dashboard button, so <code>tracks</code> follows your library on its own. <strong>0 = never.</strong> Default: <strong>240</strong> (4&nbsp;h). Other scans keep running; their incidental Navidrome traffic is paused while the import runs.</small>
-        </div>
-      </div>
-      <div class="alert alert-secondary mb-0 mt-3 py-2">
-        <small class="text-muted">
-          These live under <code>scheduler.jobs</code> and are applied the moment you save — the scheduler is re-read
-          on every save, so a new interval takes effect without a restart.
-        </small>
-      </div>
-    </div>
-  </div>
-
   <!-- Download Maintenance Schedulers Section -->
   <div class="card shadow-sm mb-3" id="retry-cleanup-schedulers">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
@@ -1233,6 +1313,170 @@
       </div>
     </div>
   </div>
+  <div class="card shadow-sm mb-3" id="scheduled-scans">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-clock-history"></i> Scheduled Scans</h5>
+      <small class="text-muted">Background jobs the scheduler runs on its own — separate from every scan button</small>
+    </div>
+    <div class="card-body">
+      {% set sch_jobs = ((config.get('scheduler', {}) or {}).get('jobs', {}) or {}) %}
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_library_sync_interval_minutes">Library Sync Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_library_sync_interval_minutes" value="{{ (sch_jobs.get('library_sync', {}) or {}).get('interval_minutes', 360) }}">
+          <small class="form-text text-muted">Re-imports new and changed Navidrome rows so the library stays in step. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Import</strong> on the Watcher Service card). Default: <strong>360</strong> (6&nbsp;h)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_popularity_scan_interval_minutes">Popularity Scan Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_popularity_scan_interval_minutes" value="{{ (sch_jobs.get('popularity_scan', {}) or {}).get('interval_minutes', 1440) }}">
+          <small class="form-text text-muted">Runs the <strong>Popularity</strong> mode only — never Finalise, Metadata, Singles or Essentia. <strong>0 = never</strong> (equivalent to unticking <strong>Auto Popularity Scan</strong>). Default: <strong>1440</strong> (24&nbsp;h)</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="scheduler_navidrome_import_interval_minutes">Navidrome Import Interval (minutes)</label>
+          <input type="number" step="1" min="0" max="10080" class="form-control form-control-sm" id="scheduler_navidrome_import_interval_minutes" value="{{ (sch_jobs.get('navidrome_import', {}) or {}).get('interval_minutes', 240) }}">
+          <small class="form-text text-muted">Runs the same <strong>Import</strong> as the dashboard button, so <code>tracks</code> follows your library on its own. <strong>0 = never.</strong> Default: <strong>240</strong> (4&nbsp;h). Other scans keep running; their incidental Navidrome traffic is paused while the import runs.</small>
+        </div>
+      </div>
+      <div class="alert alert-secondary mb-0 mt-3 py-2">
+        <small class="text-muted">
+          These live under <code>scheduler.jobs</code> and are applied the moment you save — the scheduler is re-read
+          on every save, so a new interval takes effect without a restart.
+        </small>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3" id="scan-skip-behaviour">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-skip-forward-circle"></i> Scan Behaviour</h5>
+      <small class="text-muted">When the scan skips already-scanned albums, and what it does during a scan</small>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_album_skip_days">Full Scan Rescan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_skip_days" value="{{ config.get('features', {}).get('album_skip_days', 7) }}" id="feature_album_skip_days">
+          <small class="form-text text-muted">Albums scanned by a <strong>full scan</strong> within this many days are skipped. Set to <strong>0 to always rescan</strong>. Default: <strong>7</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_popularity_skip_days">Popularity Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_skip_days" value="{{ config.get('features', {}).get('popularity_skip_days', 7) }}" id="feature_popularity_skip_days">
+          <small class="form-text text-muted">Albums re-scored by the <strong>Popularity</strong> scan option within this many days are skipped. Set to <strong>0 to always run</strong>. Default: <strong>7</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_singles_skip_days">Singles Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_skip_days" value="{{ config.get('features', {}).get('singles_skip_days', 7) }}" id="feature_singles_skip_days">
+          <small class="form-text text-muted">Albums whose <strong>Singles</strong> scan ran within this many days are skipped (verdicts are also reused per-track inside their freshness TTL). Set to <strong>0 to always run</strong>. Default: <strong>7</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_genre_skip_days">Genre Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_genre_skip_days" value="{{ config.get('features', {}).get('genre_skip_days', 7) }}" id="feature_genre_skip_days">
+          <small class="form-text text-muted">Albums whose <strong>Genres</strong> scan ran within this many days are skipped. A genre pass retries any empty online source (MusicBrainz, Discogs, ListenBrainz, Last.fm). Default: <strong>7</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_forced_finalise_skip_days">Forced Finalise Minimum Interval (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_forced_finalise_skip_days" value="{{ config.get('features', {}).get('forced_finalise_skip_days', 0) }}" id="feature_forced_finalise_skip_days">
+          <small class="form-text text-muted">Even a <strong>forced</strong> finalise pass skips an album finalised within this many days. Set to <strong>0 to always force</strong>. Default: <strong>0</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_forced_singles_skip_days">Forced Singles Minimum Interval (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_forced_singles_skip_days" value="{{ config.get('features', {}).get('forced_singles_skip_days', 0) }}" id="feature_forced_singles_skip_days">
+          <small class="form-text text-muted">Even a <strong>forced</strong> singles pass skips an album checked within this many days. Set to <strong>0 to always force</strong>. Default: <strong>0</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_metadata_skip_days">Metadata Scan Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_skip_days" value="{{ config.get('features', {}).get('metadata_skip_days', 0) }}" id="feature_metadata_skip_days">
+          <small class="form-text text-muted">Albums whose <strong>Metadata</strong> scan ran within this many days are skipped. Set to <strong>0 to always run</strong> (default — metadata stays fresh).</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_old_album_age_months">Old Album Age Threshold (months)</label>
+          <input type="number" step="1" min="1" max="600" class="form-control form-control-sm feature-field" name="feature_old_album_age_months" value="{{ config.get('features', {}).get('old_album_age_months', 48) }}" id="feature_old_album_age_months">
+          <small class="form-text text-muted">Albums released before this age (in months) are <strong>old albums</strong> and use the longer old-album windows below — their popularity changes far less often. Default: <strong>48</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_album_old_album_skip_days">Full Scan Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_old_album_skip_days" value="{{ config.get('features', {}).get('album_old_album_skip_days', 30) }}" id="feature_album_old_album_skip_days">
+          <small class="form-text text-muted">Old albums skipped by a <strong>full scan</strong> for this many days. Default: <strong>30</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_popularity_old_album_skip_days">Popularity Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_old_album_skip_days" value="{{ config.get('features', {}).get('popularity_old_album_skip_days', 30) }}" id="feature_popularity_old_album_skip_days">
+          <small class="form-text text-muted">Old albums re-scored by the <strong>Popularity</strong> scan for this many days. Default: <strong>30</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_singles_old_album_skip_days">Singles Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_old_album_skip_days" value="{{ config.get('features', {}).get('singles_old_album_skip_days', 30) }}" id="feature_singles_old_album_skip_days">
+          <small class="form-text text-muted">Old albums whose <strong>Singles</strong> scan ran for this many days. Default: <strong>30</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_metadata_old_album_skip_days">Metadata Old-Album Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_old_album_skip_days" value="{{ config.get('features', {}).get('metadata_old_album_skip_days', 30) }}" id="feature_metadata_old_album_skip_days">
+          <small class="form-text text-muted">Old albums whose <strong>Metadata</strong> scan ran for this many days. Default: <strong>30</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_missing_release_tracklist_limit">Missing-Release Tracklists per Artist</label>
+          <input type="number" step="1" min="0" max="200" class="form-control form-control-sm feature-field" name="feature_missing_release_tracklist_limit" value="{{ config.get('features', {}).get('missing_release_tracklist_limit', 10) }}" id="feature_missing_release_tracklist_limit">
+          <small class="form-text text-muted">Missing releases per artist whose <strong>tracklist</strong> is fetched and cached in the background by the missing-releases sweep, so the artist page's expander loads them instantly. The sweep already pauses whenever a popularity scan is running. Each tracklist costs up to <strong>3 MusicBrainz requests</strong> against the shared 1&nbsp;req/s budget. Set to <strong>0 to disable</strong>. Default: <strong>10</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_prefetch_cache_days">Artist Prefetch Cache Window (days)</label>
+          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_prefetch_cache_days" value="{{ config.get('features', {}).get('prefetch_cache_days', 7) }}" id="feature_prefetch_cache_days">
+          <small class="form-text text-muted">How long an artist's <strong>prefetched</strong> data (Last.fm/ListenBrainz popularity, MusicBrainz/Discogs releases, similar artists) stays fresh before a non-forced scan re-fetches it. When fresh, the prefetch is a pure database read and costs no API calls. Set to <strong>0 to always re-fetch</strong>. Default: <strong>7</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_album_skip_min_tracks">Minimum Tracks for Album Skip Check</label>
+          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm feature-field" name="feature_album_skip_min_tracks" value="{{ config.get('features', {}).get('album_skip_min_tracks', 1) }}" id="feature_album_skip_min_tracks">
+          <small class="form-text text-muted">Albums below this track count are not treated as valid albums by the skip check. Default: <strong>1</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_skip_unchanged_albums">Skip Unchanged Albums</label>
+          <select class="form-select form-select-sm feature-field" name="feature_skip_unchanged_albums" id="feature_skip_unchanged_albums">
+            <option value="true" {% if config.get('features', {}).get('skip_unchanged_albums', True) %}selected{% endif %}>True</option>
+            <option value="false" {% if not config.get('features', {}).get('skip_unchanged_albums', True) %}selected{% endif %}>False</option>
+          </select>
+          <small class="form-text text-muted">Skip albums whose tracks are all already scored and singles-assessed, even inside the window. Default: <strong>True</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_run_singles_on_skipped_albums">Run Singles Detection on Skipped Albums</label>
+          <select class="form-select form-select-sm feature-field" name="feature_run_singles_on_skipped_albums" id="feature_run_singles_on_skipped_albums">
+            <option value="true" {% if config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>True</option>
+            <option value="false" {% if not config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>False</option>
+          </select>
+          <small class="form-text text-muted">An already-scanned album is still visited when any track has <strong>no</strong> singles verdict, so a track the scan missed (an abandoned worker, a track added later, a detection that errored) is never skipped for ever. Only the tracks without a verdict do lookups — the rest are cached. Off by default: it costs Discogs/MusicBrainz calls.</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_cover_detection_enabled">Flag Cover Songs During Scans</label>
+          <select class="form-select form-select-sm feature-field" name="feature_cover_detection_enabled" id="feature_cover_detection_enabled">
+            <option value="true" {% if config.get('features', {}).get('cover_detection_enabled', True) %}selected{% endif %}>True</option>
+            <option value="false" {% if not config.get('features', {}).get('cover_detection_enabled', True) %}selected{% endif %}>False</option>
+          </select>
+          <small class="form-text text-muted">MusicBrainz work-history lookup + "(Artist Cover)" renames. Turn off to skip the per-track cover pass entirely. Default: <strong>True</strong></small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="feature_deep_genre_search">Deep Genre Search (Discogs / MB fallback)</label>
+          <select class="form-select form-select-sm feature-field" name="feature_deep_genre_search" id="feature_deep_genre_search">
+            <option value="true" {% if config.get('features', {}).get('deep_genre_search', False) %}selected{% endif %}>True</option>
+            <option value="false" {% if not config.get('features', {}).get('deep_genre_search', False) %}selected{% endif %}>False</option>
+          </select>
+          <small class="form-text text-muted">During metadata scans, fetch genres from Discogs and fall back to MusicBrainz recording text search when the track has no MBIDs. Each genre-less track can cost up to 3 rate-limited API calls, so this defaults to <strong>False</strong> for scan speed; enable it for deeper genre coverage. Genres still populate from Navidrome, the batched ListenBrainz tags, and cached MusicBrainz recordings.</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="mature_track_min_age_years">Mature Track Freeze Cutoff (years)</label>
+          <input type="number" min="1" max="50" class="form-control form-control-sm" id="mature_track_min_age_years" placeholder="2" value="{{ config.get('features', {}).get('mature_track_min_age_years', 2) }}">
+          <small class="form-text text-muted">Tracks at or above this age keep their existing Last.fm-backed popularity unless listener data is missing. Default: <strong>2</strong></small>
+        </div>
+      </div>
+      <div class="alert alert-secondary mb-0 mt-3 py-2">
+        <small class="text-muted">
+          <strong>How it works:</strong> each scan option on the Scan page (Full, Popularity, Singles, Metadata) has its own
+          rescan window — an album is only re-processed by that scan once its window has passed. Set any window to <strong>0</strong>
+          and that scan always re-processes the whole library (slower, more API calls). A forced scan or an individual album
+          scan always re-scans regardless of these settings.
+        </small>
+      </div>
+    </div>
+  </div>
+
         </div><!-- /tab-downloads -->
 
         <!-- ===== TAB: FILE MANAGEMENT ===== -->
@@ -1543,6 +1787,134 @@
             <small id="essentia-download-status-text" class="text-muted"></small>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3" id="metadata-update">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-pencil-square"></i> Updating Metadata</h5>
+      <small class="text-muted">What the scan rewrites, and whether it touches the database only or also the audio files</small>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="metadata_update_album_name_source">Album Name Source</label>
+          <select class="form-select form-select-sm" id="metadata_update_album_name_source">
+            <option value="dedupe" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') == 'dedupe' %}selected{% endif %}>Repair only (keep edition)</option>
+            <option value="release_group" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') in ('release_group', 'release') %}selected{% endif %}>Release Group (MusicBrainz)</option>
+            <option value="album" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') == 'album' %}selected{% endif %}>Album name (cleaned, edition stripped)</option>
+          </select>
+          <small class="form-text text-muted">
+            The album name will be cleaned up with the <strong>Name</strong> during the <strong>Popularity Scan</strong>:
+            repeated edition markers are stripped ("Doomsday Machine (reissue) (reissue) (reissue)" → "Doomsday Machine").
+            Choose <strong>Album name</strong> to keep the current name (cleaned) or <strong>Release Name</strong> to
+            prefer the MusicBrainz release title when a confident match exists.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="metadata_update_album_name_target">Album Name Update Target</label>
+          <select class="form-select form-select-sm" id="metadata_update_album_name_target">
+            <option value="db" {% if (config.get('metadata_update', {}) or {}).get('album_name_update_target', 'db') == 'db' %}selected{% endif %}>Database only</option>
+            <option value="files" {% if (config.get('metadata_update', {}) or {}).get('album_name_update_target', 'db') == 'files' %}selected{% endif %}>Files (database + file tags)</option>
+          </select>
+          <small class="form-text text-muted">
+            <strong>Database only</strong> updates the tracks table. <strong>Files</strong> updates the tracks table
+            AND rewrites the ALBUM tag on the audio files — Navidrome reads file tags, so it then re-serves the new
+            name too.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="metadata_update_apply_during_scan">Apply Metadata during Scan</label>
+          <select class="form-select form-select-sm" id="metadata_update_apply_during_scan">
+            <option value="true" {% if (config.get('metadata_update', {}) or {}).get('apply_during_scan', true) %}selected{% endif %}>Apply automatically (current behaviour)</option>
+            <option value="false" {% if not (config.get('metadata_update', {}) or {}).get('apply_during_scan', true) %}selected{% endif %}>Recommend only — save or discard later</option>
+          </select>
+          <small class="form-text text-muted">
+            <strong>Recommend only</strong> stops the scan writing MusicBrainz metadata. The changes it would
+            have made are stored against the album's tracks instead and offered on the album and artist pages,
+            where each one can be <strong>saved or discarded</strong>. Nothing is written until you say so.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm">Update on Files during Scan</label>
+          <div class="border rounded p-2" style="background: rgba(0,0,0,.15);">
+            {% set mu_fields = (config.get('metadata_update', {}) or {}).get('update_on_files', {}) %}
+            <div class="form-check form-check-sm">
+              <input class="form-check-input" type="checkbox" id="metadata_update_field_album_name" {% if mu_fields.get('album_name', false) %}checked{% endif %}>
+              <label class="form-check-label small" for="metadata_update_field_album_name">Album Name</label>
+            </div>
+            <div class="form-check form-check-sm">
+              <input class="form-check-input" type="checkbox" id="metadata_update_field_year" {% if mu_fields.get('year', false) %}checked{% endif %}>
+              <label class="form-check-label small" for="metadata_update_field_year">Year</label>
+            </div>
+            <div class="form-check form-check-sm">
+              <input class="form-check-input" type="checkbox" id="metadata_update_field_album_artist" {% if mu_fields.get('album_artist', false) %}checked{% endif %}>
+              <label class="form-check-label small" for="metadata_update_field_album_artist">Album Artist</label>
+            </div>
+            <div class="form-check form-check-sm">
+              <input class="form-check-input" type="checkbox" id="metadata_update_field_genres" {% if mu_fields.get('genres', false) %}checked{% endif %}>
+              <label class="form-check-label small" for="metadata_update_field_genres">Genres</label>
+            </div>
+            <div class="form-check form-check-sm">
+              <input class="form-check-input" type="checkbox" id="metadata_update_field_cover_art" {% if mu_fields.get('cover_art', false) %}checked{% endif %}>
+              <label class="form-check-label small" for="metadata_update_field_cover_art">Cover Art</label>
+            </div>
+            <div class="form-check form-check-sm">
+              <input class="form-check-input" type="checkbox" id="metadata_update_field_lyrics" {% if mu_fields.get('lyrics', false) %}checked{% endif %}>
+              <label class="form-check-label small" for="metadata_update_field_lyrics">Lyrics</label>
+            </div>
+          </div>
+          <small class="form-text text-muted">Which fields the scan writes to the audio FILES (the database is always updated during the scan). When a field is off, file tags are left untouched for that field.</small>
+        </div>
+      </div>
+
+      <!-- Album MBID sanity guard -->
+      {% set mbid_guard = (config.get('metadata_update', {}) or {}).get('album_mbid_guard', {}) %}
+      <div class="row g-3 mt-1 pt-3 border-top">
+        <div class="col-12">
+          <label class="form-label form-label-sm mb-1">MusicBrainz Album ID Guard</label>
+          <small class="form-text text-muted d-block mb-2">
+            Before an album MusicBrainz ID is written to the tracks or the audio files, the ID's own artist and title
+            are compared with this album's text. A mismatch is refused and the ID is discarded — the normal text search
+            is used instead. This is what stops one bad ID (from an errant batch-tagging run) from merging unrelated
+            albums into a single release. If the ID cannot be looked up (MusicBrainz unreachable) there is nothing to
+            compare, so the update proceeds and is logged as unverified — an outage must not silently break the action.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="metadata_update_mbid_guard_enabled">Guard</label>
+          <select class="form-select form-select-sm" id="metadata_update_mbid_guard_enabled">
+            <option value="true" {% if mbid_guard.get('enabled', true) %}selected{% endif %}>Enabled (recommended)</option>
+            <option value="false" {% if not mbid_guard.get('enabled', true) %}selected{% endif %}>Disabled</option>
+          </select>
+          <small class="form-text text-muted">Disabling restores the old behaviour: a stored MusicBrainz ID is trusted as-is, with nothing checked against the album's own tags.</small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="metadata_update_mbid_guard_min_similarity">Minimum Similarity</label>
+          <input type="number" class="form-control form-control-sm" id="metadata_update_mbid_guard_min_similarity"
+                 min="0.05" max="1" step="0.05" value="{{ mbid_guard.get('min_similarity', 0.65) }}">
+          <small class="form-text text-muted">
+            0.65 keeps legitimate variation matching — edition markers, "&amp;"/"feat." credits, "Vol. 1" vs
+            "Volume 1", punctuation and case are all normalised away first. Lower it only if real albums are refused.
+          </small>
+        </div>
+        <div class="col-12 col-sm-6 col-lg-4">
+          <label class="form-label form-label-sm" for="metadata_update_mbid_guard_allow_disc_folders">Multi-Folder Albums</label>
+          <select class="form-select form-select-sm" id="metadata_update_mbid_guard_allow_disc_folders">
+            <option value="true" {% if mbid_guard.get('allow_disc_folders', true) %}selected{% endif %}>Allow for disc folders only (CD1, Disc 2)</option>
+            <option value="false" {% if not mbid_guard.get('allow_disc_folders', true) %}selected{% endif %}>Never — one folder per album</option>
+          </select>
+          <small class="form-text text-muted">An album may span several folders only when every extra folder is a disc folder of the same parent (a genuine multi-disc release). Any other multi-folder album is two albums sharing a name, and unifying them is refused.</small>
+        </div>
+      </div>
+      <div class="alert alert-secondary mb-0 mt-3 py-2">
+        <small class="text-muted">
+          <strong>How it works:</strong> the popularity scan cleans the album name with the configured source and
+          updates the database every album. Whether the audio files are rewritten for each field is controlled by the
+          per-field checkboxes — <strong>Album Name Update Target</strong> is the master switch for the album name
+          specifically (Files = database + file tags).
+        </small>
       </div>
     </div>
   </div>
@@ -1892,267 +2264,13 @@
   </div>
 
   <!-- Scan Behaviour Section -->
-  <div class="card shadow-sm mb-3" id="scan-skip-behaviour">
-    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-skip-forward-circle"></i> Scan Behaviour</h5>
-      <small class="text-muted">When the scan skips already-scanned albums, and what it does during a scan</small>
-    </div>
-    <div class="card-body">
-      <div class="row g-3">
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_album_skip_days">Full Scan Rescan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_skip_days" value="{{ config.get('features', {}).get('album_skip_days', 7) }}" id="feature_album_skip_days">
-          <small class="form-text text-muted">Albums scanned by a <strong>full scan</strong> within this many days are skipped. Set to <strong>0 to always rescan</strong>. Default: <strong>7</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_popularity_skip_days">Popularity Scan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_skip_days" value="{{ config.get('features', {}).get('popularity_skip_days', 7) }}" id="feature_popularity_skip_days">
-          <small class="form-text text-muted">Albums re-scored by the <strong>Popularity</strong> scan option within this many days are skipped. Set to <strong>0 to always run</strong>. Default: <strong>7</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_singles_skip_days">Singles Scan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_skip_days" value="{{ config.get('features', {}).get('singles_skip_days', 7) }}" id="feature_singles_skip_days">
-          <small class="form-text text-muted">Albums whose <strong>Singles</strong> scan ran within this many days are skipped (verdicts are also reused per-track inside their freshness TTL). Set to <strong>0 to always run</strong>. Default: <strong>7</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_genre_skip_days">Genre Scan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_genre_skip_days" value="{{ config.get('features', {}).get('genre_skip_days', 7) }}" id="feature_genre_skip_days">
-          <small class="form-text text-muted">Albums whose <strong>Genres</strong> scan ran within this many days are skipped. A genre pass retries any empty online source (MusicBrainz, Discogs, ListenBrainz, Last.fm). Default: <strong>7</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_forced_finalise_skip_days">Forced Finalise Minimum Interval (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_forced_finalise_skip_days" value="{{ config.get('features', {}).get('forced_finalise_skip_days', 0) }}" id="feature_forced_finalise_skip_days">
-          <small class="form-text text-muted">Even a <strong>forced</strong> finalise pass skips an album finalised within this many days. Set to <strong>0 to always force</strong>. Default: <strong>0</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_forced_singles_skip_days">Forced Singles Minimum Interval (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_forced_singles_skip_days" value="{{ config.get('features', {}).get('forced_singles_skip_days', 0) }}" id="feature_forced_singles_skip_days">
-          <small class="form-text text-muted">Even a <strong>forced</strong> singles pass skips an album checked within this many days. Set to <strong>0 to always force</strong>. Default: <strong>0</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_metadata_skip_days">Metadata Scan Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_skip_days" value="{{ config.get('features', {}).get('metadata_skip_days', 0) }}" id="feature_metadata_skip_days">
-          <small class="form-text text-muted">Albums whose <strong>Metadata</strong> scan ran within this many days are skipped. Set to <strong>0 to always run</strong> (default — metadata stays fresh).</small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_old_album_age_months">Old Album Age Threshold (months)</label>
-          <input type="number" step="1" min="1" max="600" class="form-control form-control-sm feature-field" name="feature_old_album_age_months" value="{{ config.get('features', {}).get('old_album_age_months', 48) }}" id="feature_old_album_age_months">
-          <small class="form-text text-muted">Albums released before this age (in months) are <strong>old albums</strong> and use the longer old-album windows below — their popularity changes far less often. Default: <strong>48</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_album_old_album_skip_days">Full Scan Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_album_old_album_skip_days" value="{{ config.get('features', {}).get('album_old_album_skip_days', 30) }}" id="feature_album_old_album_skip_days">
-          <small class="form-text text-muted">Old albums skipped by a <strong>full scan</strong> for this many days. Default: <strong>30</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_popularity_old_album_skip_days">Popularity Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_popularity_old_album_skip_days" value="{{ config.get('features', {}).get('popularity_old_album_skip_days', 30) }}" id="feature_popularity_old_album_skip_days">
-          <small class="form-text text-muted">Old albums re-scored by the <strong>Popularity</strong> scan for this many days. Default: <strong>30</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_singles_old_album_skip_days">Singles Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_singles_old_album_skip_days" value="{{ config.get('features', {}).get('singles_old_album_skip_days', 30) }}" id="feature_singles_old_album_skip_days">
-          <small class="form-text text-muted">Old albums whose <strong>Singles</strong> scan ran for this many days. Default: <strong>30</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_metadata_old_album_skip_days">Metadata Old-Album Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_metadata_old_album_skip_days" value="{{ config.get('features', {}).get('metadata_old_album_skip_days', 30) }}" id="feature_metadata_old_album_skip_days">
-          <small class="form-text text-muted">Old albums whose <strong>Metadata</strong> scan ran for this many days. Default: <strong>30</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_missing_release_tracklist_limit">Missing-Release Tracklists per Artist</label>
-          <input type="number" step="1" min="0" max="200" class="form-control form-control-sm feature-field" name="feature_missing_release_tracklist_limit" value="{{ config.get('features', {}).get('missing_release_tracklist_limit', 10) }}" id="feature_missing_release_tracklist_limit">
-          <small class="form-text text-muted">Missing releases per artist whose <strong>tracklist</strong> is fetched and cached in the background by the missing-releases sweep, so the artist page's expander loads them instantly. The sweep already pauses whenever a popularity scan is running. Each tracklist costs up to <strong>3 MusicBrainz requests</strong> against the shared 1&nbsp;req/s budget. Set to <strong>0 to disable</strong>. Default: <strong>10</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_prefetch_cache_days">Artist Prefetch Cache Window (days)</label>
-          <input type="number" step="1" min="0" max="365" class="form-control form-control-sm feature-field" name="feature_prefetch_cache_days" value="{{ config.get('features', {}).get('prefetch_cache_days', 7) }}" id="feature_prefetch_cache_days">
-          <small class="form-text text-muted">How long an artist's <strong>prefetched</strong> data (Last.fm/ListenBrainz popularity, MusicBrainz/Discogs releases, similar artists) stays fresh before a non-forced scan re-fetches it. When fresh, the prefetch is a pure database read and costs no API calls. Set to <strong>0 to always re-fetch</strong>. Default: <strong>7</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_album_skip_min_tracks">Minimum Tracks for Album Skip Check</label>
-          <input type="number" step="1" min="1" max="100" class="form-control form-control-sm feature-field" name="feature_album_skip_min_tracks" value="{{ config.get('features', {}).get('album_skip_min_tracks', 1) }}" id="feature_album_skip_min_tracks">
-          <small class="form-text text-muted">Albums below this track count are not treated as valid albums by the skip check. Default: <strong>1</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_skip_unchanged_albums">Skip Unchanged Albums</label>
-          <select class="form-select form-select-sm feature-field" name="feature_skip_unchanged_albums" id="feature_skip_unchanged_albums">
-            <option value="true" {% if config.get('features', {}).get('skip_unchanged_albums', True) %}selected{% endif %}>True</option>
-            <option value="false" {% if not config.get('features', {}).get('skip_unchanged_albums', True) %}selected{% endif %}>False</option>
-          </select>
-          <small class="form-text text-muted">Skip albums whose tracks are all already scored and singles-assessed, even inside the window. Default: <strong>True</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_run_singles_on_skipped_albums">Run Singles Detection on Skipped Albums</label>
-          <select class="form-select form-select-sm feature-field" name="feature_run_singles_on_skipped_albums" id="feature_run_singles_on_skipped_albums">
-            <option value="true" {% if config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>True</option>
-            <option value="false" {% if not config.get('features', {}).get('run_singles_on_skipped_albums', False) %}selected{% endif %}>False</option>
-          </select>
-          <small class="form-text text-muted">An already-scanned album is still visited when any track has <strong>no</strong> singles verdict, so a track the scan missed (an abandoned worker, a track added later, a detection that errored) is never skipped for ever. Only the tracks without a verdict do lookups — the rest are cached. Off by default: it costs Discogs/MusicBrainz calls.</small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_cover_detection_enabled">Flag Cover Songs During Scans</label>
-          <select class="form-select form-select-sm feature-field" name="feature_cover_detection_enabled" id="feature_cover_detection_enabled">
-            <option value="true" {% if config.get('features', {}).get('cover_detection_enabled', True) %}selected{% endif %}>True</option>
-            <option value="false" {% if not config.get('features', {}).get('cover_detection_enabled', True) %}selected{% endif %}>False</option>
-          </select>
-          <small class="form-text text-muted">MusicBrainz work-history lookup + "(Artist Cover)" renames. Turn off to skip the per-track cover pass entirely. Default: <strong>True</strong></small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_deep_genre_search">Deep Genre Search (Discogs / MB fallback)</label>
-          <select class="form-select form-select-sm feature-field" name="feature_deep_genre_search" id="feature_deep_genre_search">
-            <option value="true" {% if config.get('features', {}).get('deep_genre_search', False) %}selected{% endif %}>True</option>
-            <option value="false" {% if not config.get('features', {}).get('deep_genre_search', False) %}selected{% endif %}>False</option>
-          </select>
-          <small class="form-text text-muted">During metadata scans, fetch genres from Discogs and fall back to MusicBrainz recording text search when the track has no MBIDs. Each genre-less track can cost up to 3 rate-limited API calls, so this defaults to <strong>False</strong> for scan speed; enable it for deeper genre coverage. Genres still populate from Navidrome, the batched ListenBrainz tags, and cached MusicBrainz recordings.</small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="mature_track_min_age_years">Mature Track Freeze Cutoff (years)</label>
-          <input type="number" min="1" max="50" class="form-control form-control-sm" id="mature_track_min_age_years" placeholder="2" value="{{ config.get('features', {}).get('mature_track_min_age_years', 2) }}">
-          <small class="form-text text-muted">Tracks at or above this age keep their existing Last.fm-backed popularity unless listener data is missing. Default: <strong>2</strong></small>
-        </div>
-      </div>
-      <div class="alert alert-secondary mb-0 mt-3 py-2">
-        <small class="text-muted">
-          <strong>How it works:</strong> each scan option on the Scan page (Full, Popularity, Singles, Metadata) has its own
-          rescan window — an album is only re-processed by that scan once its window has passed. Set any window to <strong>0</strong>
-          and that scan always re-processes the whole library (slower, more API calls). A forced scan or an individual album
-          scan always re-scans regardless of these settings.
-        </small>
-      </div>
-    </div>
-  </div>
-
   <!-- Updating Metadata Section -->
-  <div class="card shadow-sm mb-3" id="metadata-update">
-    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-pencil-square"></i> Updating Metadata</h5>
-      <small class="text-muted">What the scan rewrites, and whether it touches the database only or also the audio files</small>
-    </div>
-    <div class="card-body">
-      <div class="row g-3">
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="metadata_update_album_name_source">Album Name Source</label>
-          <select class="form-select form-select-sm" id="metadata_update_album_name_source">
-            <option value="dedupe" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') == 'dedupe' %}selected{% endif %}>Repair only (keep edition)</option>
-            <option value="release_group" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') in ('release_group', 'release') %}selected{% endif %}>Release Group (MusicBrainz)</option>
-            <option value="album" {% if (config.get('metadata_update', {}) or {}).get('album_name_source', 'dedupe') == 'album' %}selected{% endif %}>Album name (cleaned, edition stripped)</option>
-          </select>
-          <small class="form-text text-muted">
-            The album name will be cleaned up with the <strong>Name</strong> during the <strong>Popularity Scan</strong>:
-            repeated edition markers are stripped ("Doomsday Machine (reissue) (reissue) (reissue)" → "Doomsday Machine").
-            Choose <strong>Album name</strong> to keep the current name (cleaned) or <strong>Release Name</strong> to
-            prefer the MusicBrainz release title when a confident match exists.
-          </small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="metadata_update_album_name_target">Album Name Update Target</label>
-          <select class="form-select form-select-sm" id="metadata_update_album_name_target">
-            <option value="db" {% if (config.get('metadata_update', {}) or {}).get('album_name_update_target', 'db') == 'db' %}selected{% endif %}>Database only</option>
-            <option value="files" {% if (config.get('metadata_update', {}) or {}).get('album_name_update_target', 'db') == 'files' %}selected{% endif %}>Files (database + file tags)</option>
-          </select>
-          <small class="form-text text-muted">
-            <strong>Database only</strong> updates the tracks table. <strong>Files</strong> updates the tracks table
-            AND rewrites the ALBUM tag on the audio files — Navidrome reads file tags, so it then re-serves the new
-            name too.
-          </small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="metadata_update_apply_during_scan">Apply Metadata during Scan</label>
-          <select class="form-select form-select-sm" id="metadata_update_apply_during_scan">
-            <option value="true" {% if (config.get('metadata_update', {}) or {}).get('apply_during_scan', true) %}selected{% endif %}>Apply automatically (current behaviour)</option>
-            <option value="false" {% if not (config.get('metadata_update', {}) or {}).get('apply_during_scan', true) %}selected{% endif %}>Recommend only — save or discard later</option>
-          </select>
-          <small class="form-text text-muted">
-            <strong>Recommend only</strong> stops the scan writing MusicBrainz metadata. The changes it would
-            have made are stored against the album's tracks instead and offered on the album and artist pages,
-            where each one can be <strong>saved or discarded</strong>. Nothing is written until you say so.
-          </small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm">Update on Files during Scan</label>
-          <div class="border rounded p-2" style="background: rgba(0,0,0,.15);">
-            {% set mu_fields = (config.get('metadata_update', {}) or {}).get('update_on_files', {}) %}
-            <div class="form-check form-check-sm">
-              <input class="form-check-input" type="checkbox" id="metadata_update_field_album_name" {% if mu_fields.get('album_name', false) %}checked{% endif %}>
-              <label class="form-check-label small" for="metadata_update_field_album_name">Album Name</label>
-            </div>
-            <div class="form-check form-check-sm">
-              <input class="form-check-input" type="checkbox" id="metadata_update_field_year" {% if mu_fields.get('year', false) %}checked{% endif %}>
-              <label class="form-check-label small" for="metadata_update_field_year">Year</label>
-            </div>
-            <div class="form-check form-check-sm">
-              <input class="form-check-input" type="checkbox" id="metadata_update_field_album_artist" {% if mu_fields.get('album_artist', false) %}checked{% endif %}>
-              <label class="form-check-label small" for="metadata_update_field_album_artist">Album Artist</label>
-            </div>
-            <div class="form-check form-check-sm">
-              <input class="form-check-input" type="checkbox" id="metadata_update_field_genres" {% if mu_fields.get('genres', false) %}checked{% endif %}>
-              <label class="form-check-label small" for="metadata_update_field_genres">Genres</label>
-            </div>
-            <div class="form-check form-check-sm">
-              <input class="form-check-input" type="checkbox" id="metadata_update_field_cover_art" {% if mu_fields.get('cover_art', false) %}checked{% endif %}>
-              <label class="form-check-label small" for="metadata_update_field_cover_art">Cover Art</label>
-            </div>
-            <div class="form-check form-check-sm">
-              <input class="form-check-input" type="checkbox" id="metadata_update_field_lyrics" {% if mu_fields.get('lyrics', false) %}checked{% endif %}>
-              <label class="form-check-label small" for="metadata_update_field_lyrics">Lyrics</label>
-            </div>
-          </div>
-          <small class="form-text text-muted">Which fields the scan writes to the audio FILES (the database is always updated during the scan). When a field is off, file tags are left untouched for that field.</small>
-        </div>
-      </div>
-
-      <!-- Album MBID sanity guard -->
-      {% set mbid_guard = (config.get('metadata_update', {}) or {}).get('album_mbid_guard', {}) %}
-      <div class="row g-3 mt-1 pt-3 border-top">
-        <div class="col-12">
-          <label class="form-label form-label-sm mb-1">MusicBrainz Album ID Guard</label>
-          <small class="form-text text-muted d-block mb-2">
-            Before an album MusicBrainz ID is written to the tracks or the audio files, the ID's own artist and title
-            are compared with this album's text. A mismatch is refused and the ID is discarded — the normal text search
-            is used instead. This is what stops one bad ID (from an errant batch-tagging run) from merging unrelated
-            albums into a single release. If the ID cannot be looked up (MusicBrainz unreachable) there is nothing to
-            compare, so the update proceeds and is logged as unverified — an outage must not silently break the action.
-          </small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="metadata_update_mbid_guard_enabled">Guard</label>
-          <select class="form-select form-select-sm" id="metadata_update_mbid_guard_enabled">
-            <option value="true" {% if mbid_guard.get('enabled', true) %}selected{% endif %}>Enabled (recommended)</option>
-            <option value="false" {% if not mbid_guard.get('enabled', true) %}selected{% endif %}>Disabled</option>
-          </select>
-          <small class="form-text text-muted">Disabling restores the old behaviour: a stored MusicBrainz ID is trusted as-is, with nothing checked against the album's own tags.</small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="metadata_update_mbid_guard_min_similarity">Minimum Similarity</label>
-          <input type="number" class="form-control form-control-sm" id="metadata_update_mbid_guard_min_similarity"
-                 min="0.05" max="1" step="0.05" value="{{ mbid_guard.get('min_similarity', 0.65) }}">
-          <small class="form-text text-muted">
-            0.65 keeps legitimate variation matching — edition markers, "&amp;"/"feat." credits, "Vol. 1" vs
-            "Volume 1", punctuation and case are all normalised away first. Lower it only if real albums are refused.
-          </small>
-        </div>
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="metadata_update_mbid_guard_allow_disc_folders">Multi-Folder Albums</label>
-          <select class="form-select form-select-sm" id="metadata_update_mbid_guard_allow_disc_folders">
-            <option value="true" {% if mbid_guard.get('allow_disc_folders', true) %}selected{% endif %}>Allow for disc folders only (CD1, Disc 2)</option>
-            <option value="false" {% if not mbid_guard.get('allow_disc_folders', true) %}selected{% endif %}>Never — one folder per album</option>
-          </select>
-          <small class="form-text text-muted">An album may span several folders only when every extra folder is a disc folder of the same parent (a genuine multi-disc release). Any other multi-folder album is two albums sharing a name, and unifying them is refused.</small>
-        </div>
-      </div>
-      <div class="alert alert-secondary mb-0 mt-3 py-2">
-        <small class="text-muted">
-          <strong>How it works:</strong> the popularity scan cleans the album name with the configured source and
-          updates the database every album. Whether the audio files are rewritten for each field is controlled by the
-          per-field checkboxes — <strong>Album Name Update Target</strong> is the master switch for the album name
-          specifically (Files = database + file tags).
-        </small>
-      </div>
-    </div>
-  </div>
-
   <!-- Single Detection & Star Ratings Section -->
+        </div><!-- /tab-analytics -->
+
+        <!-- ===== TAB: STAR RATINGS ===== -->
+        <div class="tab-pane fade" id="tab-stars" role="tabpanel">
+
   <div class="card shadow-sm mb-3" id="single-detection-zscore">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
       <h5 class="mb-0"><i class="bi bi-sliders"></i> Single Detection &amp; Star Ratings</h5>
@@ -2917,6 +3035,180 @@
   </div>
 
   <!-- Genre Aggregation Weights Section (NEW) -->
+  <!-- Genre Selection Engine Section -->
+  <!-- Genre Vocabulary Section -->
+  <!-- Album Scaling (Era 5★ Caps) Section -->
+  <div class="card shadow-sm mb-3" id="album-scaling">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-stars"></i> Album Scaling — Era 5★ Caps</h5>
+      <small class="text-muted">How many singles per album can reach 5★, by where the album sits on the artist's career curve (R_eff vs the discography peak)</small>
+    </div>
+    <div class="card-body">
+      <div class="alert alert-secondary mb-3 py-2">
+        <small class="text-muted">
+          Each album is classified into an era by its effective ratio
+          (<code>R_eff = album median × age-skew / peak album median</code>).
+          A high-confidence single earns 5★ only while it clears the era's
+          <strong>Artist Catalog Top %</strong> cutoff <strong>or</strong> ranks
+          in the album's top-N tracks — otherwise it falls to the 4★ Single
+          Floor. The era's <strong>Max 5★ Tracks Per Album</strong> caps how
+          many singles one album can carry; surplus (weakest by album z) are
+          demoted to 4★.
+        </small>
+      </div>
+      <div class="row g-3">
+        {% set era_caps = [
+          ('peak', 'Peak Era Albums (Career Highs)', 0.20, 3, 4),
+          ('solid', 'Solid Era Albums (Core Discography)', 0.15, 3, 3),
+          ('minor', 'Minor Era Albums (Deep Cuts & Early / Late Career)', 0.10, 3, 2)
+        ] %}
+        {% set scaling = config.get('single_detection', {}).get('album_scaling') or {} %}
+        {% for key, label, top_pct, top_n, slots in era_caps %}
+        <div class="col-12 col-md-4">
+          <div class="border rounded p-3 h-100">
+            <h6 class="mb-2">{{ label }}</h6>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="era_{{ key }}_catalog_top_pct">Artist Catalog Top %</label>
+              <input type="number" step="0.01" min="0.01" max="1" class="form-control form-control-sm" id="era_{{ key }}_catalog_top_pct" placeholder="{{ top_pct }}" value="{{ scaling.get(key ~ '_catalog_top_pct', top_pct) }}">
+              <small class="form-text text-muted">Track must rank in the top {{ top_pct * 100 }}% of the artist's total discography to qualify for 5★. Default: <strong>{{ top_pct }}</strong></small>
+            </div>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="era_{{ key }}_album_top_n">Top Album Tracks (Rank)</label>
+              <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="era_{{ key }}_album_top_n" placeholder="{{ top_n }}" value="{{ scaling.get(key ~ '_album_top_n', top_n) }}">
+              <small class="form-text text-muted">Track must rank among the top {{ top_n }} most popular tracks on this specific album. Default: <strong>{{ top_n }}</strong></small>
+            </div>
+            <div>
+              <label class="form-label form-label-sm" for="era_{{ key }}_max_5star_slots">Max 5★ Tracks Per Album</label>
+              <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="era_{{ key }}_max_5star_slots" placeholder="{{ slots }}" value="{{ scaling.get(key ~ '_max_5star_slots', slots) }}">
+              <small class="form-text text-muted">Hard limit on how many tracks on a single album can be awarded 5★. Default: <strong>{{ slots }}</strong></small>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+        <div class="col-12 col-md-4">
+          <div class="border rounded p-3 h-100">
+            <h6 class="mb-2">Era Thresholds</h6>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="peak_era_min_ratio">Peak Era Threshold</label>
+              <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="peak_era_min_ratio" placeholder="0.75" value="{{ scaling.get('peak_era_min_ratio', 0.75) }}">
+              <small class="form-text text-muted">Popularity ratio (0.0–1.0) relative to the artist's highest-performing album needed to be considered a Peak Era album. Default: <strong>0.75</strong>. Keep this above the Solid threshold or the Solid era is unreachable.</small>
+            </div>
+            <div>
+              <label class="form-label form-label-sm" for="solid_era_min_ratio">Solid Era Threshold</label>
+              <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="solid_era_min_ratio" placeholder="0.40" value="{{ scaling.get('solid_era_min_ratio', 0.40) }}">
+              <small class="form-text text-muted">Popularity ratio required for a Solid Era album. Albums below this threshold are marked Minor. Default: <strong>0.40</strong></small>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-4">
+          <div class="border rounded p-3 h-100">
+            <h6 class="mb-2">Minor Album Penalty</h6>
+            <p class="text-muted small mb-2">A mature Minor-era album (well below the artist's peak album) gives up high-tier slots. Genuine standouts can still reach 5★. New albums are exempt until they have had time to gather plays.</p>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="album_penalty_min_age_years">Minimum Album Age (years)</label>
+              <input type="number" step="1" min="0" max="50" class="form-control form-control-sm" id="album_penalty_min_age_years" placeholder="2" value="{{ scaling.get('penalty_min_age_years', 2) }}">
+              <small class="form-text text-muted">Albums newer than this are never penalised. Default: <strong>2</strong></small>
+            </div>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="album_penalty_min_catalogue_albums">Minimum Catalogue Albums</label>
+              <input type="number" step="1" min="0" max="100" class="form-control form-control-sm" id="album_penalty_min_catalogue_albums" placeholder="3" value="{{ scaling.get('penalty_min_catalogue_albums', 3) }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label form-label-sm" for="album_penalty_min_catalogue_tracks">Minimum Catalogue Tracks</label>
+              <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="album_penalty_min_catalogue_tracks" placeholder="30" value="{{ scaling.get('penalty_min_catalogue_tracks', 30) }}">
+            </div>
+            <div class="row g-2">
+              <div class="col-6">
+                <label class="form-label form-label-sm" for="album_penalty_minor_max_5star_slots">Max 5★ Tracks</label>
+                <input type="number" step="1" min="0" max="20" class="form-control form-control-sm" id="album_penalty_minor_max_5star_slots" placeholder="1" value="{{ scaling.get('penalty_minor_max_5star_slots', 1) }}">
+              </div>
+              <div class="col-6">
+                <label class="form-label form-label-sm" for="album_penalty_minor_max_4star_slots">Max 4★ Tracks</label>
+                <input type="number" step="1" min="0" max="20" class="form-control form-control-sm" id="album_penalty_minor_max_4star_slots" placeholder="2" value="{{ scaling.get('penalty_minor_max_4star_slots', 2) }}">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# ⭐⭐ LIVE-ALBUM RATING — live releases use their own model: an ordinary
+         live track is capped below 5★, and only a genuine standout (high
+         artist-z AND the album-z gate) is promoted. #}
+      {% set las = (config.get('single_detection', {}) or {}).get('live_album_scaling', {}) or {} %}
+      <h6 class="mb-2 mt-4"><i class="bi bi-broadcast"></i> Live Album Rating (<code>live_album_scaling.*</code>)</h6>
+      <small class="text-muted d-block mb-3">
+        Live releases use their own rating model so a concert album is not scored like a studio one.
+        An ordinary live track is capped at <strong>Max Stars</strong>; a standout is promoted only when it clears
+        both the artist-z band and the album-z gate.
+      </small>
+      <div class="row g-3">
+        <div class="col-12 col-md-4">
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="live_album_scaling_enabled" {% if las.get('enabled', True) %}checked{% endif %}>
+            <label class="form-check-label" for="live_album_scaling_enabled"><strong>Enable live-album rating model</strong></label>
+            <small class="d-block text-muted">Off rates live tracks with the ordinary studio model.</small>
+          </div>
+          <label class="form-label form-label-sm" for="live_album_scaling_mode">Mode</label>
+          <select class="form-select form-select-sm" id="live_album_scaling_mode">
+            <option value="artist_and_album" {% if (las.get('mode', 'artist_and_album') | string) == 'artist_and_album' %}selected{% endif %}>artist_and_album (default)</option>
+            <option value="artist_z" {% if (las.get('mode', 'artist_and_album') | string) == 'artist_z' %}selected{% endif %}>artist_z</option>
+          </select>
+        </div>
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="live_album_scaling_max_stars">Max Stars (ordinary live track)</label>
+          <input type="number" step="1" min="1" max="5" class="form-control form-control-sm" id="live_album_scaling_max_stars" placeholder="3" value="{{ las.get('max_stars', 3) }}">
+          <small class="form-text text-muted">Ceiling for a live track that is not a standout. Default: <strong>3</strong></small>
+        </div>
+        <div class="col-6 col-md-4">
+          <label class="form-label form-label-sm" for="live_album_scaling_album_z_gate">Album-Z Gate</label>
+          <input type="number" step="0.05" class="form-control form-control-sm" id="live_album_scaling_album_z_gate" placeholder="2.00" value="{{ las.get('album_z_gate', 2.00) }}">
+          <small class="form-text text-muted">Album-z a live track must clear to be promoted. Default: <strong>2.00</strong></small>
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_artist_z_star5">Artist-Z → 5★</label>
+          <input type="number" step="0.05" class="form-control form-control-sm" id="live_album_scaling_artist_z_star5" placeholder="1.50" value="{{ las.get('artist_z_star5', 1.50) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_artist_z_star4">Artist-Z → 4★</label>
+          <input type="number" step="0.05" class="form-control form-control-sm" id="live_album_scaling_artist_z_star4" placeholder="1.00" value="{{ las.get('artist_z_star4', 1.00) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_artist_z_star3">Artist-Z → 3★</label>
+          <input type="number" step="0.05" class="form-control form-control-sm" id="live_album_scaling_artist_z_star3" placeholder="-0.25" value="{{ las.get('artist_z_star3', -0.25) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_artist_z_star2">Artist-Z → 2★</label>
+          <input type="number" step="0.05" class="form-control form-control-sm" id="live_album_scaling_artist_z_star2" placeholder="-1.20" value="{{ las.get('artist_z_star2', -1.20) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_promote_artist_z_min">Promote Artist-Z Min</label>
+          <input type="number" step="0.05" class="form-control form-control-sm" id="live_album_scaling_promote_artist_z_min" placeholder="0.50" value="{{ las.get('promote_artist_z_min', 0.50) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_min_catalogue">Min Catalogue (artist-z noise floor)</label>
+          <input type="number" step="1" min="0" class="form-control form-control-sm" id="live_album_scaling_min_catalogue" placeholder="8" value="{{ las.get('min_catalogue', 8) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_max_5star_slots">Max 5★ Slots</label>
+          <input type="number" step="1" min="0" class="form-control form-control-sm" id="live_album_scaling_max_5star_slots" placeholder="1" value="{{ las.get('max_5star_slots', 1) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_max_4star_slots">Max 4★ Slots</label>
+          <input type="number" step="1" min="0" class="form-control form-control-sm" id="live_album_scaling_max_4star_slots" placeholder="2" value="{{ las.get('max_4star_slots', 2) }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label form-label-sm" for="live_album_scaling_track_fraction">Track Fraction (release is "live")</label>
+          <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" id="live_album_scaling_track_fraction" placeholder="0.60" value="{{ las.get('track_fraction', 0.60) }}">
+          <small class="form-text text-muted">Share of tracks that must be live to mark the release. Default: <strong>0.60</strong></small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+        </div><!-- /tab-stars -->
+
+        <!-- ===== TAB: PLAYLISTS ===== -->
+        <div class="tab-pane fade" id="tab-playlists" role="tabpanel">
   <div class="card shadow-sm mb-3" id="genre-weights">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
       <h5 class="mb-0"><i class="bi bi-tags-fill"></i> Genre Aggregation</h5>
@@ -3004,7 +3296,6 @@
     </div>
   </div>
 
-  <!-- Genre Selection Engine Section -->
   <div class="card shadow-sm mb-3" id="genre-selection">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
       <h5 class="mb-0"><i class="bi bi-diagram-3"></i> Genre Selection Engine</h5>
@@ -3163,7 +3454,6 @@
     </div>
   </div>
 
-  <!-- Genre Vocabulary Section -->
   <div class="card shadow-sm mb-3" id="genre-vocabulary">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
       <h5 class="mb-0"><i class="bi bi-book"></i> Genre Vocabulary</h5>
@@ -3205,106 +3495,6 @@
     </div>
   </div>
 
-  <!-- Album Scaling (Era 5★ Caps) Section -->
-  <div class="card shadow-sm mb-3" id="album-scaling">
-    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-stars"></i> Album Scaling — Era 5★ Caps</h5>
-      <small class="text-muted">How many singles per album can reach 5★, by where the album sits on the artist's career curve (R_eff vs the discography peak)</small>
-    </div>
-    <div class="card-body">
-      <div class="alert alert-secondary mb-3 py-2">
-        <small class="text-muted">
-          Each album is classified into an era by its effective ratio
-          (<code>R_eff = album median × age-skew / peak album median</code>).
-          A high-confidence single earns 5★ only while it clears the era's
-          <strong>Artist Catalog Top %</strong> cutoff <strong>or</strong> ranks
-          in the album's top-N tracks — otherwise it falls to the 4★ Single
-          Floor. The era's <strong>Max 5★ Tracks Per Album</strong> caps how
-          many singles one album can carry; surplus (weakest by album z) are
-          demoted to 4★.
-        </small>
-      </div>
-      <div class="row g-3">
-        {% set era_caps = [
-          ('peak', 'Peak Era Albums (Career Highs)', 0.20, 3, 4),
-          ('solid', 'Solid Era Albums (Core Discography)', 0.15, 3, 3),
-          ('minor', 'Minor Era Albums (Deep Cuts & Early / Late Career)', 0.10, 3, 2)
-        ] %}
-        {% set scaling = config.get('single_detection', {}).get('album_scaling') or {} %}
-        {% for key, label, top_pct, top_n, slots in era_caps %}
-        <div class="col-12 col-md-4">
-          <div class="border rounded p-3 h-100">
-            <h6 class="mb-2">{{ label }}</h6>
-            <div class="mb-2">
-              <label class="form-label form-label-sm" for="era_{{ key }}_catalog_top_pct">Artist Catalog Top %</label>
-              <input type="number" step="0.01" min="0.01" max="1" class="form-control form-control-sm" id="era_{{ key }}_catalog_top_pct" placeholder="{{ top_pct }}" value="{{ scaling.get(key ~ '_catalog_top_pct', top_pct) }}">
-              <small class="form-text text-muted">Track must rank in the top {{ top_pct * 100 }}% of the artist's total discography to qualify for 5★. Default: <strong>{{ top_pct }}</strong></small>
-            </div>
-            <div class="mb-2">
-              <label class="form-label form-label-sm" for="era_{{ key }}_album_top_n">Top Album Tracks (Rank)</label>
-              <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="era_{{ key }}_album_top_n" placeholder="{{ top_n }}" value="{{ scaling.get(key ~ '_album_top_n', top_n) }}">
-              <small class="form-text text-muted">Track must rank among the top {{ top_n }} most popular tracks on this specific album. Default: <strong>{{ top_n }}</strong></small>
-            </div>
-            <div>
-              <label class="form-label form-label-sm" for="era_{{ key }}_max_5star_slots">Max 5★ Tracks Per Album</label>
-              <input type="number" step="1" min="1" max="20" class="form-control form-control-sm" id="era_{{ key }}_max_5star_slots" placeholder="{{ slots }}" value="{{ scaling.get(key ~ '_max_5star_slots', slots) }}">
-              <small class="form-text text-muted">Hard limit on how many tracks on a single album can be awarded 5★. Default: <strong>{{ slots }}</strong></small>
-            </div>
-          </div>
-        </div>
-        {% endfor %}
-        <div class="col-12 col-md-4">
-          <div class="border rounded p-3 h-100">
-            <h6 class="mb-2">Era Thresholds</h6>
-            <div class="mb-2">
-              <label class="form-label form-label-sm" for="peak_era_min_ratio">Peak Era Threshold</label>
-              <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="peak_era_min_ratio" placeholder="0.75" value="{{ scaling.get('peak_era_min_ratio', 0.75) }}">
-              <small class="form-text text-muted">Popularity ratio (0.0–1.0) relative to the artist's highest-performing album needed to be considered a Peak Era album. Default: <strong>0.75</strong>. Keep this above the Solid threshold or the Solid era is unreachable.</small>
-            </div>
-            <div>
-              <label class="form-label form-label-sm" for="solid_era_min_ratio">Solid Era Threshold</label>
-              <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="solid_era_min_ratio" placeholder="0.40" value="{{ scaling.get('solid_era_min_ratio', 0.40) }}">
-              <small class="form-text text-muted">Popularity ratio required for a Solid Era album. Albums below this threshold are marked Minor. Default: <strong>0.40</strong></small>
-            </div>
-          </div>
-        </div>
-        <div class="col-12 col-md-4">
-          <div class="border rounded p-3 h-100">
-            <h6 class="mb-2">Minor Album Penalty</h6>
-            <p class="text-muted small mb-2">A mature Minor-era album (well below the artist's peak album) gives up high-tier slots. Genuine standouts can still reach 5★. New albums are exempt until they have had time to gather plays.</p>
-            <div class="mb-2">
-              <label class="form-label form-label-sm" for="album_penalty_min_age_years">Minimum Album Age (years)</label>
-              <input type="number" step="1" min="0" max="50" class="form-control form-control-sm" id="album_penalty_min_age_years" placeholder="2" value="{{ scaling.get('penalty_min_age_years', 2) }}">
-              <small class="form-text text-muted">Albums newer than this are never penalised. Default: <strong>2</strong></small>
-            </div>
-            <div class="mb-2">
-              <label class="form-label form-label-sm" for="album_penalty_min_catalogue_albums">Minimum Catalogue Albums</label>
-              <input type="number" step="1" min="0" max="100" class="form-control form-control-sm" id="album_penalty_min_catalogue_albums" placeholder="3" value="{{ scaling.get('penalty_min_catalogue_albums', 3) }}">
-            </div>
-            <div class="mb-2">
-              <label class="form-label form-label-sm" for="album_penalty_min_catalogue_tracks">Minimum Catalogue Tracks</label>
-              <input type="number" step="1" min="0" max="10000" class="form-control form-control-sm" id="album_penalty_min_catalogue_tracks" placeholder="30" value="{{ scaling.get('penalty_min_catalogue_tracks', 30) }}">
-            </div>
-            <div class="row g-2">
-              <div class="col-6">
-                <label class="form-label form-label-sm" for="album_penalty_minor_max_5star_slots">Max 5★ Tracks</label>
-                <input type="number" step="1" min="0" max="20" class="form-control form-control-sm" id="album_penalty_minor_max_5star_slots" placeholder="1" value="{{ scaling.get('penalty_minor_max_5star_slots', 1) }}">
-              </div>
-              <div class="col-6">
-                <label class="form-label form-label-sm" for="album_penalty_minor_max_4star_slots">Max 4★ Tracks</label>
-                <input type="number" step="1" min="0" max="20" class="form-control form-control-sm" id="album_penalty_minor_max_4star_slots" placeholder="2" value="{{ scaling.get('penalty_minor_max_4star_slots', 2) }}">
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-        </div><!-- /tab-analytics -->
-
-        <!-- ===== TAB: PLAYLISTS ===== -->
-        <div class="tab-pane fade" id="tab-playlists" role="tabpanel">
 
   {# Genre → Playlist Resync — an ACTION, not a setting, so it sits beside the
      genre-playlist controls it rewrites. Two steps so a library-wide genre
@@ -3954,30 +4144,17 @@
 
 <script>
   (function () {
-    // Each card is listed under exactly ONE tab, so the pane a card appears in
-    // matches its tab's name. Previously the "Matching" tab held NO matching
-    // settings (they had been moved to Analytics) and instead carried the scan
-    // scheduler, the import watcher and the Essentia ML scan; search settings
-    // were split across System/Downloads/Analytics. Grouped now by concern:
-    //   Matching & Search  — how tracks/queue items are matched and how search
-    //                        behaves (thresholds, filters, fuzzy, experience);
-    //   Downloads          — the download pipeline and its scheduling;
-    //   File Management    — everything that writes/analyses local files;
-    //   Analytics & Scoring— popularity/single/star/genre scoring only.
+    // Most cards now sit physically in their correct tab pane, so this script no
+    // longer relocates them. It performs the two moves that remain awkward to do
+    // in markup:
+    //   * `album_save` / `safe_shutdown` are legacy-nested at 4-space indent
+    //     inside the System pane (an old unclosed-div). Lift them into the tabs
+    //     they belong to without re-indenting their markup.
+    //   * the fuzzy-search toggle lives in the Downloads source block but belongs
+    //     with the Search Experience card on Matching.
     var layout = {
-      'tab-system':    ['user-context', 'users', 'logging', 'safe_shutdown', 'features-weights'],
-      'tab-apis':      ['api-integrations', 'lastfm-advanced', 'wikidata'],
-      'tab-downloads': ['sources', 'slskd-timeouts', 'downloads', 'search-quality', 'queue-search-tuning',
-                        'queue-retry-windows', 'queue-auto-restart', 'retry-cleanup-schedulers',
-                        'watcher', 'scheduled-scans', 'scan-skip-behaviour',
-                        'upcoming-releases-automation', 'upcoming-releases-sources'],
-      'tab-files':     ['file-organization', 'file-conversion', 'tag-writing', 'filesystem',
-                        'album_save', 'metadata-update', 'essentia-mood-scan'],
-      'tab-matching':  ['matching-config', 'queue-matching', 'search-filters', 'search-experience'],
-      'tab-analytics': ['algorithm-sandbox', 'popularity-export', 'popularity-weights',
-                        'single-detection-zscore', 'album-scaling', 'statistics-card',
-                        'genre-weights', 'genre-selection', 'genre-vocabulary'],
-      'tab-playlists': ['playlists', 'genre-playlist-resync']
+      'tab-files': ['album_save'],
+      'tab-system': ['safe_shutdown']
     };
     Object.keys(layout).forEach(function (paneId) {
       var pane = document.getElementById(paneId);

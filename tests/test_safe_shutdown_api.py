@@ -249,7 +249,11 @@ def test_config_page_reads_the_nested_block(page: Path) -> None:
 @pytest.mark.parametrize("js", CONFIG_JS, ids=lambda p: p.parent.name)
 def test_config_js_collects_the_block(js: Path) -> None:
     source = _read(js)
-    assert "safe_shutdown: {" in source
+    # ``safe_shutdown`` is now merged over pageConfig (Object.assign) so an
+    # un-rendered sibling key is not deleted on save, rather than a bare literal
+    # ``safe_shutdown: {``. What matters is that the block is still collected
+    # from the four controls.
+    assert "safe_shutdown:" in source
     assert "safe_shutdown_drain_timeout" in source
     assert "safe_shutdown_auto_cancel" in source
 
