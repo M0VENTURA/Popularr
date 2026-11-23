@@ -108,6 +108,65 @@ def values_are_alphabetical(values: Any) -> bool:
 
 
 @dataclass(frozen=True)
+class GenreScope:
+    """Which evidence may create one genre, and whether it takes a slot.
+
+    ⭐ THIS USED TO BE SILENTLY DISCARDED. A v4 vocabulary can carry a ``scope``
+    block per genre and the loader had no field for it, so these rules were
+    parsed away on load and never applied:
+
+    * ``soundtrack`` / ``film_score`` / ``video_game_music`` declare
+      ``require_confirmation: true`` with ``confirm_release_types: ["Soundtrack"]``
+      — they must NOT be reachable from a track tag alone. Probed before this
+      fix: three track-level "Soundtrack" tags on a plain album produced
+      ``Soundtrack`` as a final genre.
+    * ``christmas`` / ``comedy`` / ``soundtrack`` declare ``slot: "marker"`` —
+      written on top of the selected genres, never consuming a Maximum Genres
+      slot. Markers were previously only the hardcoded ``_FILTER_TAGS`` in
+      Python, so a vocabulary could not change them.
+
+    An EMPTY ``levels`` means "the vocabulary declares nothing here", not "no
+    levels allowed" — the policy default applies.
+    """
+
+    #: Evidence levels that may create this genre (``track``/``album``/``artist``).
+    levels: tuple[str, ...] = ()
+    #: ``genre`` (default) or ``marker`` (never uses a Maximum Genres slot).
+    slot: str = "genre"
+    #: MusicBrainz release-group secondary types that confirm it.
+    confirm_release_types: tuple[str, ...] = ()
+    #: Regexes against the ALBUM title that confirm it.
+    confirm_album_title_patterns: tuple[str, ...] = ()
+    #: Regexes against the TRACK title that confirm it.
+    confirm_title_patterns: tuple[str, ...] = ()
+    #: ``True`` = rejected unless one of the confirm rules above matches.
+    require_confirmation: bool = False
+    #: Artist-level evidence only counts with at least this many source groups.
+    artist_requires_min_sources: int = 0
+
+    @property
+    def is_marker(self) -> bool:
+        return self.slot == "marker"
+
+    @property
+    def is_default(self) -> bool:
+        """True when nothing was declared, i.e. the policy default applies."""
+        return not (
+            self.levels
+            or self.confirm_release_types
+            or self.confirm_album_title_patterns
+            or self.confirm_title_patterns
+            or self.require_confirmation
+            or self.artist_requires_min_sources
+            or self.is_marker
+        )
+
+
+#: The scope a genre gets when the vocabulary declares none for it.
+DEFAULT_GENRE_SCOPE = GenreScope()
+
+
+@dataclass(frozen=True)
 class GenreEntry:
     """One canonical genre."""
 
@@ -121,6 +180,8 @@ class GenreEntry:
     specificity: int
     family: str
     aliases: tuple[str, ...]
+    #: Which evidence may create it, and whether it takes a slot.
+    scope: GenreScope = DEFAULT_GENRE_SCOPE
 
     def ancestors(self, by_id: dict[str, "GenreEntry"]) -> list[str]:
         """Every ancestor id, nearest first. Breadth-first, cycle-safe, bounded."""
@@ -206,9 +267,27 @@ class Vocabulary:
     attributes: dict[str, str] = field(default_factory=dict)
     attribute_lookup: dict[str, str] = field(default_factory=dict)
     content: dict[str, str] = field(default_factory=dict)
+    #: Values that are never a genre, mood, place or attribute. Dropped before
+    #: scoring. ⭐ This block used to be discarded: a hand-written
+    #: ``noise_values`` list had no effect, and values the junk HEURISTIC did
+    #: not recognise ("alternative & punk", "folk, world, & country") reached
+    #: the final genres anyway.
+    noise_values: frozenset[str] = frozenset()
     source_path: str = ""
     is_override: bool = False
     errors: tuple[str, ...] = ()
+
+    def is_noise_value(self, raw: Any) -> bool:
+        """True when ``raw`` is listed in the vocabulary's ``noise_values``.
+
+        Matched on the NORMALISED token, so a punctuation difference between the
+        list and a provider's spelling ("1–4 wochen" vs "1-4 wochen") still
+        matches. Only exact normalised equality counts: a substring test would
+        drop "folk" because "folk, world" was listed.
+        """
+        if not self.noise_values:
+            return False
+        return normalize_token(raw) in self.noise_values
 
     def classify(self, raw: Any) -> Classification:
         """Classify one raw value.
@@ -322,6 +401,43 @@ class Vocabulary:
         return self.deciding_family(tokens)[0]
 
 
+#: Sources that are ONE voice for corroboration, because one derives from the
+#: other. ListenBrainz's genres are a projection of MusicBrainz's, so counting
+#: them separately would let a single upstream opinion satisfy a two-source
+#: requirement on its own.
+SOURCE_GROUP_OF: dict[str, str] = {
+    "musicbrainz": "metabrainz",
+    "musicbrainz_tags": "metabrainz",
+    "listenbrainz": "metabrainz",
+    "lastfm": "lastfm",
+    "discogs": "discogs",
+    "wikidata": "wikidata",
+    "audiodb": "audiodb",
+    "spotify": "spotify",
+    "essentia": "essentia",
+    "navidrome": "navidrome",
+    "manual": "manual",
+    "library": "navidrome",
+    "context": "context",
+}
+
+
+def source_group_count(sources: Any) -> int:
+    """How many INDEPENDENT voices a set of sources represents.
+
+    ``{"musicbrainz", "listenbrainz"}`` is ONE opinion, not two — which is what
+    ``scope.artist_requires_min_sources`` means by "sources". An unknown source
+    counts as its own group so a new provider is never silently merged.
+    """
+    return len(
+        {
+            SOURCE_GROUP_OF.get(str(source).strip().lower(), str(source).strip().lower())
+            for source in (sources or ())
+            if str(source or "").strip()
+        }
+    )
+
+
 def override_vocabulary_path() -> str:
     """Where the Config page writes the user's vocabulary."""
     from helpers.config_helpers import get_config_directory
@@ -401,11 +517,89 @@ def validate_vocabulary(data: Any) -> list[str]:
         if block is not None and not isinstance(block, list):
             errors.append(f"'{section}' must be a list when present")
 
+    # ⚠️ A scope typo is SILENT: an unknown level or a bad regex simply never
+    # matches, so a genre is either never created or never confirmed. Validated
+    # here because the Config page validates before it saves.
+    for raw in genres:
+        if not isinstance(raw, dict):
+            continue
+        gid = str(raw.get("id") or "").strip()
+        scope = raw.get("scope")
+        if scope is None:
+            continue
+        if not isinstance(scope, dict):
+            errors.append(f"genre {gid!r} scope must be an object")
+            continue
+        levels = scope.get("levels")
+        if levels is not None:
+            if not isinstance(levels, list):
+                errors.append(f"genre {gid!r} scope.levels must be a list")
+            else:
+                for level in levels:
+                    if str(level) not in ("track", "album", "artist"):
+                        errors.append(
+                            f"genre {gid!r} scope.levels has {level!r}; "
+                            "expected track, album or artist"
+                        )
+        slot = scope.get("slot")
+        if slot is not None and str(slot) not in ("genre", "marker"):
+            errors.append(
+                f"genre {gid!r} scope.slot is {slot!r}; expected 'genre' or 'marker'"
+            )
+        for pattern_key in ("confirm_album_title_patterns", "confirm_title_patterns"):
+            for pattern in _string_tuple(scope.get(pattern_key)):
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    errors.append(
+                        f"genre {gid!r} scope.{pattern_key} is not a valid regex: {exc}"
+                    )
+
+    noise = data.get("noise_values")
+    if noise is not None:
+        raw_noise = noise.get("values") if isinstance(noise, dict) else noise
+        if not isinstance(raw_noise, list):
+            errors.append("'noise_values' must be a list, or an object with a 'values' list")
+
     geo = data.get("geography")
     if geo is not None and not isinstance(geo, dict):
         errors.append("'geography' must be an object when present")
 
     return errors
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    """Coerce a JSON list of strings (or a lone string) to a tuple."""
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item or "").strip())
+
+
+def _parse_scope(raw: Any) -> GenreScope:
+    """Parse one entry's ``scope`` block. Absent or malformed = the default."""
+    if not isinstance(raw, dict):
+        return DEFAULT_GENRE_SCOPE
+
+    slot = str(raw.get("slot") or "genre").strip().lower()
+    if slot not in ("genre", "marker"):
+        slot = "genre"
+
+    try:
+        min_sources = int(raw.get("artist_requires_min_sources") or 0)
+    except (TypeError, ValueError):
+        min_sources = 0
+
+    return GenreScope(
+        levels=_string_tuple(raw.get("levels")),
+        slot=slot,
+        confirm_release_types=_string_tuple(raw.get("confirm_release_types")),
+        confirm_album_title_patterns=_string_tuple(raw.get("confirm_album_title_patterns")),
+        confirm_title_patterns=_string_tuple(raw.get("confirm_title_patterns")),
+        require_confirmation=bool(raw.get("require_confirmation", False)),
+        artist_requires_min_sources=max(0, min_sources),
+    )
 
 
 def _entry_parents(raw: dict[str, Any]) -> list[str]:
@@ -517,6 +711,7 @@ def _build(
             specificity=specificity if isinstance(specificity, int) else 1,
             family=str(raw.get("family") or "").strip(),
             aliases=tuple(str(a) for a in (raw.get("aliases") or []) if a),
+            scope=_parse_scope(raw.get("scope")),
         )
 
     # A genre that declares no family INHERITS the nearest declared one from its
@@ -530,6 +725,11 @@ def _build(
             specificity=entry.specificity,
             family=entry.family or entry.family_of(genres),
             aliases=entry.aliases,
+            # ⚠️ Carried through: this rebuild exists only to back-fill the
+            # inherited family, and dropping scope here re-discarded every
+            # rule a second time (the file parsed, and the value still arrived
+            # empty at the selector).
+            scope=entry.scope,
         )
         for gid, entry in genres.items()
     }
@@ -582,6 +782,14 @@ def _build(
                 attributes.setdefault(str(attr_id), str(group))
     content = {k: v for k, v in attributes.items() if v == "content"}
 
+    #: ``noise_values.values`` — matched on the NORMALISED token, so "1–4 wochen"
+    #: and "1-4 wochen" (en dash vs hyphen) are one entry.
+    noise_block = data.get("noise_values")
+    raw_noise = noise_block.get("values") if isinstance(noise_block, dict) else noise_block
+    noise_values = frozenset(
+        token for token in (normalize_token(v) for v in (raw_noise or [])) if token
+    )
+
     return Vocabulary(
         genres=genres,
         genre_lookup=lookup,
@@ -592,6 +800,7 @@ def _build(
         attributes=attributes,
         attribute_lookup=attribute_lookup,
         content=content,
+        noise_values=noise_values,
         source_path=path,
         is_override=is_override,
         errors=errors,

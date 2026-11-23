@@ -22,7 +22,7 @@ import math
 import re
 import threading
 from collections import OrderedDict, defaultdict
-from typing import Any
+from typing import Any, Iterable
 
 import structlog
 from sqlalchemy import text
@@ -858,7 +858,44 @@ def _collect_intercepted_filter_tags(source_map: dict[str, Any] | None) -> set[s
             matched = _canonical_filter_tag(genre)
             if matched:
                 intercepted.add(matched)
-    return intercepted
+    return _drop_unconfirmed_vocabulary_markers(intercepted)
+
+
+def _drop_unconfirmed_vocabulary_markers(intercepted: set[str]) -> set[str]:
+    """Remove a marker the vocabulary says is not confirmed for this track.
+
+    ⭐ ``_FILTER_TAGS`` is a hardcoded Python list, so a marker used to be
+    appended purely because a provider mentioned it — which reinstated exactly
+    what ``scope.require_confirmation`` exists to prevent. Probed: with a
+    ``require_confirmation`` soundtrack scope, three track-level "Soundtrack"
+    tags still produced a Soundtrack marker on a plain studio album, because
+    this append runs AFTER the selector has already rejected it.
+
+    A tag that is not a declared vocabulary marker is left alone: these tags
+    predate the vocabulary and other code depends on them.
+    """
+    if not intercepted:
+        return intercepted
+    try:
+        from services.enrichment.genre_vocabulary import get_vocabulary
+
+        vocab = get_vocabulary()
+    except Exception:
+        return intercepted
+
+    out = set(intercepted)
+    for tag in list(intercepted):
+        entry = None
+        for candidate in vocab.genres.values():
+            if candidate.display.casefold() == str(tag).casefold():
+                entry = candidate
+                break
+        if entry is None or not entry.scope.is_marker or not entry.scope.require_confirmation:
+            continue
+        # A marker that requires confirmation cannot be granted by this append:
+        # the selector already decided, and it has no confirming evidence here.
+        out.discard(tag)
+    return out
 
 
 def _selection_engine_v2_enabled() -> bool:
@@ -882,6 +919,7 @@ def _aggregate_genres_v2(
     max_genres: int,
     context_title: str,
     context_album: str,
+    release_types: Iterable[str] = (),
 ) -> list[str] | None:
     """The canonical-vocabulary path. ``None`` means "fall back to legacy".
 
@@ -894,7 +932,18 @@ def _aggregate_genres_v2(
     try:
         from services.enrichment.genre_selection import select_album_or_track_genres
 
-        result = select_album_or_track_genres(source_map, max_genres=max_genres)
+        # ⚠️ The album title and release type MUST reach the selector: a genre's
+        # ``scope`` judges ``confirm_album_title_patterns`` against the album and
+        # ``confirm_release_types`` against the release-group type. Dropping them
+        # here is why the vocabulary's confirmed genres (Soundtrack, Film Score,
+        # Video Game Music) could be created from a track tag alone.
+        result = select_album_or_track_genres(
+            source_map,
+            max_genres=max_genres,
+            album_title=context_album,
+            track_title=context_title,
+            release_types=release_types,
+        )
         selected = list(result.get("genres") or [])
     except Exception as exc:
         logger.warning(
@@ -965,6 +1014,7 @@ def _aggregate_from_sources(
     context_title: str,
     context_album: str,
     nav_genres: Any = None,
+    release_types: Iterable[str] = (),
 ) -> list[str]:
     """Run one engine over one evidence map."""
     if _selection_engine_v2_enabled():
@@ -973,6 +1023,7 @@ def _aggregate_from_sources(
             max_genres=max_genres,
             context_title=context_title,
             context_album=context_album,
+            release_types=release_types,
         )
         if v2 is not None:
             return v2
@@ -992,6 +1043,7 @@ def aggregate_genres(
     context_title: str = "",
     context_album: str = "",
     nav_genres: Any = None,
+    release_types: Iterable[str] = (),
 ) -> list[str]:
     """Top genres for one track or album.
 
@@ -1024,6 +1076,7 @@ def aggregate_genres(
             context_title=context_title,
             context_album=context_album,
             nav_genres=nav_genres,
+            release_types=release_types,
         )
         if any(
             genre and not is_track_affiliation_tag(genre)
@@ -1038,6 +1091,7 @@ def aggregate_genres(
             context_title=context_title,
             context_album=context_album,
             nav_genres=nav_genres,
+            release_types=release_types,
         )
     return _aggregate_from_sources(
         navidrome_map,
@@ -1045,6 +1099,7 @@ def aggregate_genres(
         context_title=context_title,
         context_album=context_album,
         nav_genres=nav_genres,
+        release_types=release_types,
     )
 
 

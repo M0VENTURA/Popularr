@@ -17,7 +17,19 @@
     "  family       hierarchy branch used for the family-slot limit; defaults to the",
     "               root ancestor's id when omitted",
     "",
-    "Adding an entry is enough to make it selectable; nothing is hardcoded in Python."
+    "Adding an entry is enough to make it selectable; nothing is hardcoded in Python.",
+    "",
+    "v4 - per-genre scope and noise_values.",
+    "  scope.levels                       track / album / artist; evidence at",
+    "                                    any other level is ignored.",
+    "  scope.slot                         genre (default) or marker. A marker is",
+    "                                    appended AFTER the genres and never",
+    "                                    consumes a Maximum Genres slot.",
+    "  scope.confirm_release_types        MusicBrainz secondary types.",
+    "  scope.confirm_album_title_patterns regex against the ALBUM title.",
+    "  scope.confirm_title_patterns       regex against the TRACK title.",
+    "  scope.require_confirmation         true = rejected unless confirmed.",
+    "  scope.artist_requires_min_sources  artist evidence needs N groups."
   ],
 
   "genres": [
@@ -233,8 +245,14 @@
     {"id": "noise", "display": "Noise", "parent": "experimental", "specificity": 2},
     {"id": "avant_garde", "display": "Avant-Garde", "parent": "experimental", "specificity": 2, "aliases": ["avant garde"]},
     {"id": "comedy", "display": "Comedy", "parent": null, "specificity": 1},
-    {"id": "soundtrack", "display": "Soundtrack", "parent": null, "specificity": 1, "aliases": ["original soundtrack", "ost"]},
-    {"id": "christmas", "display": "Christmas", "parent": null, "specificity": 1, "aliases": ["xmas", "holiday", "yuletide", "christmas music"]},
+    {"id": "soundtrack", "display": "Soundtrack", "parent": null, "specificity": 1, "aliases": ["original soundtrack", "ost"],
+     "scope": {"levels": ["track", "album"], "slot": "marker",
+               "confirm_release_types": ["Soundtrack"],
+               "confirm_album_title_patterns": ["(?i)\\b(original )?(motion picture )?soundtrack\\b", "(?i)\\bOST\\b"],
+               "require_confirmation": true}},
+    {"id": "christmas", "display": "Christmas", "parent": null, "specificity": 1, "aliases": ["xmas", "holiday", "yuletide", "christmas music"],
+     "scope": {"levels": ["track", "album"], "slot": "marker",
+               "confirm_title_patterns": ["(?i)\\b(christmas|xmas|noel|yule(tide)?|santa|sleigh|jingle bells?|silent night|mistletoe|holly)\\b"]}},
 
     {"id": "pop_rock", "display": "Pop Rock", "parents": ["rock", "pop"], "specificity": 2, "family": "rock", "aliases": ["pop-rock"]},
     {"id": "classic_rock", "display": "Classic Rock", "parent": "rock", "specificity": 2, "aliases": ["classic-rock"]},
@@ -287,6 +305,20 @@
     {"id": "heavy", "display": "Heavy", "family": "texture", "aliases": ["heaviness"]}
   ],
 
+  "noise_values": {
+    "_comment": [
+      "Values that are never genres, moods, places or attributes. Matched EXACTLY",
+      "(normalised) and dropped BEFORE tokenisation, so a value containing a",
+      "separator - 'folk, world, & country' - can be listed whole."
+    ],
+    "values": [
+      "vocal", "female vocalists", "male vocalists", "offizielle charts",
+      "1\u20134 wochen", "1-4 wochen", "5\u20138 wochen", "5-8 wochen", "seen live",
+      "favorites", "favourite", "under 2000 listeners", "albums i own",
+      "alternative and punk", "alternative & punk",
+      "folk, world, & country", "& country", "folk, world"
+    ]
+  },
   "geography": {
     "_comment": [
       "Adjective -> country. Applied ONLY to values that are not a recognised genre,",

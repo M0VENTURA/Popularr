@@ -12,6 +12,7 @@ It is the genre twin of ``services.popularity.star_resync_service``:
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Callable
 
@@ -42,8 +43,31 @@ SOURCE_COLUMNS: tuple[tuple[str, str], ...] = (
 
 _SELECT_COLUMNS = (
     "id", "title", "album", "artist", "album_artist", "genres", "file_path",
+    # ⭐ A genre's ``scope.confirm_release_types`` is judged against the
+    # release-group type, so the resync has to carry it or every confirmed genre
+    # (Soundtrack, Film Score, Video Game Music) would be rejected on a re-run
+    # even for a real soundtrack.
+    "musicbrainz_albumtype",
     *(column for _source, column in SOURCE_COLUMNS),
 )
+
+
+def _row_release_types(row: Any) -> tuple[str, ...]:
+    """The release-group secondary types for one stored row.
+
+    ``tracks.musicbrainz_albumtype`` holds the primary type ("Album", "Single",
+    "EP"), while a genre's ``confirm_release_types`` names SECONDARY types
+    ("Soundtrack", "Live", "Compilation", "Audio drama"). The stored column can
+    carry either — MusicBrainz reports "Album + Soundtrack" for a soundtrack —
+    so the value is split on its separators and returned whole, which lets the
+    matcher find "Soundtrack" in either position.
+    """
+    raw = row.get("musicbrainz_albumtype") if hasattr(row, "get") else None
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return ()
+    parts = re.split(r"[,/+&]|\band\b", text_value, flags=re.IGNORECASE)
+    return tuple(part.strip() for part in parts if part.strip())
 
 
 def _has_value(value: Any) -> bool:
@@ -466,6 +490,11 @@ def resync_genres(
             max_genres=max_genres,
             context_title=str(row.get("title") or ""),
             context_album=str(row.get("album") or ""),
+            # ⚠️ Required for ``scope.confirm_release_types``: without it a
+            # soundtrack's Soundtrack marker could never be confirmed, and the
+            # vocabulary's require_confirmation rule would drop it on every
+            # re-evaluation even though the scan had accepted it.
+            release_types=_row_release_types(row),
         )
         if not proposed:
             continue

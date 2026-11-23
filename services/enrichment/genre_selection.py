@@ -545,6 +545,9 @@ def collect_candidates(
     *,
     vocab: Vocabulary | None = None,
     settings: SelectionSettings | None = None,
+    album_title: str = "",
+    track_title: str = "",
+    release_types: Iterable[str] = (),
 ) -> tuple[list[Candidate], dict[str, list[str]]]:
     """Classify every value and score the GENRE candidates.
 
@@ -557,6 +560,11 @@ def collect_candidates(
     ``rock``, ``alternative rock`` and ``alt rock`` has made ONE statement about
     ``alternative_rock``, not three — without the cap a single provider's
     vocabulary quirks would outweigh genuine cross-source agreement.
+
+    ⭐ ``album_title`` / ``track_title`` / ``release_types`` are what a genre's
+    ``scope`` is judged against. They used to be unavailable here — the album
+    title never reached the selector at all — so ``confirm_album_title_patterns``
+    and ``confirm_release_types`` could not fire.
     """
     vocab = vocab or get_vocabulary()
     settings = settings or _settings_from_config(None)
@@ -565,6 +573,7 @@ def collect_candidates(
         is_admin_genre,
         is_junk_genre,
     )
+    from services.enrichment.genre_scope import reject_reason
     from services.enrichment.genre_vocabulary import (
         tokenize_values,
         values_are_alphabetical,
@@ -582,13 +591,36 @@ def collect_candidates(
         # Vocabulary-aware: the whole value is tried before any splitting, so
         # ``death/doom`` stays one genre and a pipe-delimited list is split
         # instead of being kept whole and classified as unknown.
-        parsed = tokenize_values(raw_values, vocab)
+        #
+        # ⭐ ``noise_values`` is checked on the WHOLE raw value, BEFORE
+        # tokenisation. A listed value like "alternative & punk" or
+        # "folk, world, & country" contains a separator, so by the time the
+        # tokens exist the phrase is gone — checking per token dropped neither
+        # and both reached the final genres.
+        raw_list = (
+            [raw_values] if isinstance(raw_values, str)
+            else list(raw_values or [])
+        )
+        kept_raw: list[Any] = []
+        for raw_item in raw_list:
+            if vocab.is_noise_value(raw_item):
+                moved.setdefault("noise", []).append(str(raw_item))
+            else:
+                kept_raw.append(raw_item)
+
+        parsed = tokenize_values(kept_raw, vocab)
         alphabetically_sorted = values_are_alphabetical(parsed)
         entity_weight = settings.entity_weights.get(entity, DEFAULT_ENTITY_WEIGHTS[ENTITY_TRACK])
         source_weight = settings.source_weights.get(source, 0.10)
 
         for rank, value in enumerate(parsed):
             if not value:
+                continue
+
+            # Per-token check as well: a delimited list ("Rock; vocal") splits
+            # into tokens that were never seen as whole values.
+            if vocab.is_noise_value(value):
+                moved.setdefault("noise", []).append(value)
                 continue
 
             classification = vocab.classify(value)
@@ -604,6 +636,18 @@ def collect_candidates(
                 else:
                     moved.setdefault(classification.kind, []).append(value)
                 continue
+
+            # ⭐ ``scope.levels``: evidence at a disallowed level must not even
+            # reach the ranking. Checked here, before the candidate exists, so a
+            # genre that requires album evidence cannot be created by a stray
+            # track tag and then merely rank low.
+            entry = vocab.genres.get(classification.canonical)
+            if entry is not None and entry.scope.levels:
+                from services.enrichment.genre_scope import evidence_levels_allowed
+
+                if entity not in evidence_levels_allowed(entry.scope):
+                    moved.setdefault("level_not_allowed", []).append(value)
+                    continue
 
             # A track's own "rock" and its album's "rock" are two contributions
             # (different evidence); the same source at the same level twice is not.
@@ -633,6 +677,31 @@ def collect_candidates(
             )
             if source == "manual":
                 candidate.manual = True
+
+    # ⭐ ``require_confirmation`` / ``artist_requires_min_sources`` are judged on
+    # the COMPLETE evidence for a genre, not one contribution at a time, so they
+    # run once the candidate is whole. ``source_groups`` counts INDEPENDENT
+    # voices (ListenBrainz derives from MusicBrainz, so those are one group).
+    if candidates:
+        from services.enrichment.genre_scope import reject_reason
+        from services.enrichment.genre_vocabulary import source_group_count
+
+        for genre_id in list(candidates):
+            entry = vocab.genres.get(genre_id)
+            if entry is None or entry.scope.is_default:
+                continue
+            candidate = candidates[genre_id]
+            reason = reject_reason(
+                entry.scope,
+                entities=candidate.entities,
+                source_groups=source_group_count(candidate.sources),
+                album_title=album_title,
+                track_title=track_title,
+                release_types=release_types,
+            )
+            if reason:
+                moved.setdefault(reason, []).append(candidate.display)
+                del candidates[genre_id]
 
     return list(candidates.values()), moved
 
@@ -1592,6 +1661,7 @@ def remove_family_outliers(
     *,
     settings: SelectionSettings | None = None,
     reasons: list[dict[str, Any]] | None = None,
+    vocab: Vocabulary | None = None,
 ) -> list[Candidate]:
     """Drop a genre family that is only a tiny minority of the evidence.
 
@@ -1623,9 +1693,17 @@ def remove_family_outliers(
         return candidates
 
     floor = strongest * settings.family_consensus_min_share
+    # ⭐ A ``slot: "marker"`` genre is EXEMPT from this test. A marker exists
+    # precisely because its evidence is thin — one "Christmas" tag on a track
+    # whose music is well supported — and a marker never competes for a slot, so
+    # the outlier rule has nothing to protect here. Without this exemption the
+    # only Christmas tag on a metal album was dropped as a lone family and the
+    # playlist builder lost the marker it filters on.
+    marker_ids = _marker_genre_ids(vocab)
     kept = [
         candidate for candidate in candidates
         if candidate.manual
+        or candidate.genre_id in marker_ids
         or family_scores.get(candidate.family or candidate.genre_id, 0.0) >= floor
     ]
     dropped = [c for c in candidates if c not in kept]
@@ -1645,6 +1723,42 @@ def remove_family_outliers(
             family_scores={k: round(v, 3) for k, v in family_scores.items()},
         )
     return kept
+
+
+def _marker_genre_ids(vocab: Vocabulary | None = None) -> frozenset[str]:
+    """Genre ids whose vocabulary scope says ``slot: "marker"``.
+
+    ⚠️ Takes the CALLER's vocabulary. Re-reading the file here looked equivalent
+    but was not: a caller that builds a vocabulary from an override (the resync,
+    a test) then had its rules judged against the shipped default, which declares
+    no markers at all — so the exemption silently never applied.
+    """
+    try:
+        vocab = vocab or get_vocabulary()
+        return frozenset(
+            gid for gid, entry in vocab.genres.items() if entry.scope.is_marker
+        )
+    except Exception:
+        return frozenset()
+
+
+def _marker_limit() -> int | None:
+    """How many ``slot: "marker"`` genres may be appended. ``None`` = no cap.
+
+    Read from ``evidence_policy.markers.max_markers``. The block is not part of
+    the parsed Vocabulary (the policy numbers live in config), so a missing or
+    unreadable value simply means "no cap" rather than "zero markers" — dropping
+    every marker would silently lose the Christmas/Soundtrack/Comedy tags the
+    playlist builder depends on.
+    """
+    try:
+        from helpers.config_helpers import get_config
+
+        policy = (get_config() or {}).get("genres", {}).get("evidence_policy") or {}
+        raw = (policy.get("markers") or {}).get("max_markers")
+        return int(raw) if raw is not None else None
+    except Exception:
+        return None
 
 
 def _floor_for(settings: SelectionSettings, position: int) -> float:
@@ -1834,11 +1948,19 @@ def select_album_or_track_genres(
     max_genres: int | None = None,
     settings: SelectionSettings | None = None,
     vocab: Vocabulary | None = None,
+    album_title: str = "",
+    track_title: str = "",
+    release_types: Iterable[str] = (),
 ) -> dict[str, Any]:
     """The whole pipeline. Returns the selection plus what was set aside.
 
     ``{"genres": [display…], "candidates": [...], "moved": {...},
        "removed": [...], "engine": "v2", "algorithm_version": "2.1"}``
+
+    ⭐ ``album_title`` / ``track_title`` / ``release_types`` are required for a
+    genre's ``scope`` to mean anything: ``confirm_album_title_patterns`` matches
+    the album, and ``confirm_release_types`` needs the release-group type. They
+    were not parameters before, so those rules could not fire from any caller.
 
     ``candidates`` is the FULL ranked, post-condensation set — each entry marked
     ``selected`` — so a genre that did not make the cut can still be explained.
@@ -1875,10 +1997,19 @@ def select_album_or_track_genres(
     removed: list[dict[str, Any]] = []
 
     # ── 1. Evidence first ────────────────────────────────────────────────
-    candidates, moved = collect_candidates(source_map, vocab=vocab, settings=settings)
+    candidates, moved = collect_candidates(
+        source_map,
+        vocab=vocab,
+        settings=settings,
+        album_title=album_title,
+        track_title=track_title,
+        release_types=release_types,
+    )
     score_candidates(candidates, settings=settings)
     ranked = rank_and_condense(candidates, vocab=vocab, settings=settings)
-    ranked = remove_family_outliers(ranked, settings=settings, reasons=removed)
+    ranked = remove_family_outliers(
+        ranked, settings=settings, reasons=removed, vocab=vocab
+    )
 
     # The post-outlier set is what the result can EXPLAIN; the gate below narrows
     # what may be SELECTED but must not erase a candidate from the provenance.
@@ -1916,6 +2047,24 @@ def select_album_or_track_genres(
     )
     pool = enforce_family_diversity(pool, settings=settings)
 
+    # ⭐ ``slot: "marker"`` genres never consume a Maximum Genres slot.
+    #
+    # Split them out BEFORE the trim, not after: a marker that competed in
+    # ``trim_to_final`` would occupy one of the four slots and silently displace
+    # a musical genre, which is the opposite of "never takes a slot". They have
+    # already passed their own scope in ``collect_candidates`` (so a soundtrack
+    # marker without a confirming release type is gone), so what survives here is
+    # appendable as-is.
+    from services.enrichment.genre_scope import split_markers
+
+    _pool_musical, _pool_markers = split_markers(
+        [c.display for c in pool], vocab, max_markers=_marker_limit()
+    )
+    _marker_displays = set(_pool_markers)
+    if _pool_markers:
+        pool = [c for c in pool if c.display not in _marker_displays]
+        overflow = [c for c in overflow if c.display not in _marker_displays]
+
     # ── 6. Final cardinality ─────────────────────────────────────────────
     selected, trim_removed = trim_to_final(pool, settings=settings)
 
@@ -1937,6 +2086,12 @@ def select_album_or_track_genres(
 
     removed.extend(trim_removed)
 
+    # Musical genres first, markers last — the contract the playlist builder
+    # reads. ``_pool_markers`` was split out before the trim.
+    _selected_displays = [c.display for c in selected]
+    selected_display_order = _selected_displays + _pool_markers
+    _markers = _pool_markers
+
     winners = {c.genre_id for c in selected}
     # Candidates outside the pool are still explained rather than discarded.
     for candidate in overflow:
@@ -1954,7 +2109,8 @@ def select_album_or_track_genres(
         "engine": "v2",
         "algorithm_version": "2.1",
         "taxonomy_version": _vocabulary_version(vocab),
-        "genres": [c.display for c in selected],
+        "genres": selected_display_order,
+        "markers": _markers,
         "candidates": [
             {**c.to_dict(), "selected": c.genre_id in winners} for c in considered
         ],
