@@ -60,9 +60,26 @@ HEALTH_FILE_NAME = "queue_processor_health.json"
 _MIN_STALE_AFTER_SECONDS = 60.0
 
 #: How many configured cycles may be missed before the processor counts as
-#: stopped. Three keeps a restart, a hung cycle and a late cycle all green,
-#: while a processor that has genuinely stopped trips the card.
-_STALE_AFTER_CYCLES = 3
+#: stopped.
+#:
+#: ⚠️ WAS 3 (a 180s window at the 60s default), which the report shows was too
+#: tight: "The watchdog restarted the queue processor 12 times, each time because
+#: the last queue cycle was 181-256 s old against a 180 s limit."
+#:
+#: That window is genuinely too small for what a cycle does here. The heartbeat
+#: refreshes every ``refresh_interval_seconds()`` (half the window) WHILE a cycle
+#: runs, so an age past the window means the /cycle itself/ overran it — and a
+#: cycle runs ``run_maintenance()`` inline, whose filesystem hooks the report
+#: measured at a 44s average and a 12-minute peak. A cycle that legitimately
+#: takes four minutes therefore looked dead, and the "restart" it triggered is a
+#: no-op that only re-arms the driver.
+#:
+#: 5 restores the intended margin (300s at the 60s default) without hiding a
+#: genuinely stopped processor: the card still trips after five missed cycles.
+_STALE_AFTER_CYCLES = 5
+
+#: Operator override, in seconds. ``0``/unset keeps the derived window.
+_STALE_AFTER_OVERRIDE_ENV = "QUEUE_PROCESSOR_STALE_AFTER_SECONDS"
 
 
 def health_file_path() -> str:
@@ -81,7 +98,20 @@ def stale_after_seconds() -> float:
     Derived from the configured worker interval (``queue.worker.interval_seconds``)
     rather than hard-coded, so shortening the cycle shortens the detection
     window too. Never below :data:`_MIN_STALE_AFTER_SECONDS`.
+
+    ``QUEUE_PROCESSOR_STALE_AFTER_SECONDS`` overrides it outright, for a
+    deployment whose cycles are legitimately longer than any sane multiple of the
+    interval (a slow filesystem in maintenance, for instance).
     """
+    override = str(os.environ.get(_STALE_AFTER_OVERRIDE_ENV) or "").strip()
+    if override:
+        try:
+            value = float(override)
+            if value > 0:
+                return max(_MIN_STALE_AFTER_SECONDS, value)
+        except ValueError:
+            pass
+
     try:
         from helpers.config_helpers import get_queue_worker_config
 

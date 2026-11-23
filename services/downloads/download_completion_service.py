@@ -78,6 +78,14 @@ _SLSKD_SUCCEEDED_NOT_FOUND_TIMEOUT_MINUTES = 15
 _SLSKD_SUCCEEDED_NOT_FOUND_MAX_CYCLES = 3
 _LANDED_NOT_IMPORTED_MAX_CYCLES = 3
 
+#: A pass at or above this is logged at WARNING; anything faster is DEBUG.
+#:
+#: The stage timings used to be an unconditional INFO line — 3,404 of 12,406 log
+#: lines over four days — so a routine maintenance hook buried the events that
+#: actually needed attention. The breakdown is unchanged, only its level is
+#: conditional on there being something to look at.
+_SLOW_PASS_WARNING_MS = 5000.0
+
 
 def _refresh_downloading_item(queue_id: int) -> dict[str, Any] | None:
     try:
@@ -2883,8 +2891,22 @@ def check_completed_downloads() -> dict[str, Any]:
     def _finalize() -> dict[str, Any]:
         timings["total_ms"] = round((_time.monotonic() - started) * 1000.0, 1)
         stats["timings_ms"] = timings
-        if timings["total_ms"] >= 5000:
-            logger.info(
+
+        # ⚠️ 3,404 OF 12,406 LOG LINES over four days were this one stage-timing
+        # record — a maintenance hook that runs every cycle was writing at INFO
+        # whether or not anything was slow, which is what buried the real signals.
+        #
+        # It is now DEBUG in the normal case and a WARNING only when the pass is
+        # genuinely slow, so the breakdown is still there exactly when it is
+        # being looked for (and `grep` on a slow pass still finds it).
+        if timings["total_ms"] >= _SLOW_PASS_WARNING_MS:
+            logger.warning(
+                "check_completed_downloads was slow",
+                **stats["timings_ms"],
+                downloading_items=stats.get("downloading_items", 0),
+            )
+        else:
+            logger.debug(
                 "check_completed_downloads stage timings",
                 **stats["timings_ms"],
                 downloading_items=stats.get("downloading_items", 0),

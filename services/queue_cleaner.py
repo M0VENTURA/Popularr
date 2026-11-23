@@ -62,6 +62,41 @@ def _recover_from_filename(title: str) -> tuple[str | None, str | None, str]:
     return None, None, title
 
 
+def _strip_duplicated_artist_prefix(artist: str, title: str) -> str | None:
+    """Remove a leading "<credited artist> - " from the title, or ``None``.
+
+    ``"Orpheus Omega / Triple Kill"`` + ``"Triple Kill - Stacy's Mom"``
+    -> ``"Stacy's Mom"``.
+
+    ⚠️ Only a WHOLE credited artist is removed, and only from the FRONT, and
+    only when the tail still has content. That is what makes this safe on an
+    ordinary title: "Triple Kill" is not a prefix of "Killing Me Softly", and
+    stripping to an empty string is refused outright.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return None
+
+    try:
+        from helpers.normalization_service import split_artist_credit
+
+        names = split_artist_credit(artist) or [artist]
+    except Exception:
+        names = [artist]
+
+    # Longest first, so "Triple Kill" is preferred over "Triple".
+    for name in sorted((n for n in names if n), key=len, reverse=True):
+        prefix = f"{name} - "
+        if not text.casefold().startswith(prefix.casefold()):
+            continue
+        tail = text[len(prefix):].strip(" -–—")
+        # A tail that is itself just another credit is fine ("Triple Kill -
+        # Stacy's Mom" -> "Stacy's Mom"); an EMPTY tail is not.
+        if tail:
+            return tail
+    return None
+
+
 def clean_mangled_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     """Clean a queue item's artist/title/album in place and persist the result.
 
@@ -97,6 +132,19 @@ def clean_mangled_queue_item(item: dict[str, Any]) -> dict[str, Any]:
             needs_update = True
         if recovered_album and (not album or album.lower() in _UNKNOWN_ARTISTS):
             album = recovered_album
+            needs_update = True
+
+    # 3. Strip the artist when it has been duplicated into the title.
+    #
+    # Reported: "Orpheus Omega / Triple Kill – Triple Kill – Stacy's Mom: the
+    # artist is duplicated into the title." A combined credit keeps the SECOND
+    # name in the title, so the search asks for "Orpheus Omega - Triple Kill -
+    # Stacy's Mom" and matches nothing. Only strip a whole credited artist that
+    # the title actually starts with, so an ordinary title can never be eaten.
+    if artist:
+        deduped = _strip_duplicated_artist_prefix(artist, title)
+        if deduped and deduped != title:
+            title = deduped
             needs_update = True
 
     if not needs_update:

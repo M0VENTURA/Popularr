@@ -235,7 +235,11 @@ class TestTheVerdictComesFromEvidence:
         monkeypatch.setattr(
             config_helpers, "get_queue_worker_config", lambda: {"interval_seconds": 120}
         )
-        assert stale_after_seconds() == 360.0
+        # ⚠️ 5 cycles, not 3. The reported restarts were "181-256 s old against a
+        # 180 s limit": a cycle runs maintenance inline (44s average, 12-minute
+        # peak), so three cycles was too tight for a genuine 4-minute pass and
+        # the watchdog re-armed the driver on a live processor.
+        assert stale_after_seconds() == 600.0
 
 
 # ---------------------------------------------------------------------------

@@ -619,6 +619,10 @@ def get_queue_search_tuning() -> dict[str, Any]:
       burn the full ceiling each.
     - ``search_shrunken_wait_seconds`` (8): the reduced wait once the shrink
       threshold has been reached.
+    - ``max_fallback_queries`` (4): how many alternative queries a track may
+      issue after the primary. Each is a FULL search with its own wait ceiling,
+      so the reported 57s average came from a fixed tail of 8. ``0`` disables
+      fallbacks entirely.
     """
     cfg = get_config()
     queue = cfg.get("queue", {}) if isinstance(cfg, dict) else {}
@@ -636,6 +640,7 @@ def get_queue_search_tuning() -> dict[str, Any]:
         ),
         "search_empty_shrink_after": int(queue.get("search_empty_shrink_after", 4) or 0),
         "search_shrunken_wait_seconds": int(queue.get("search_shrunken_wait_seconds", 8) or 0),
+        "max_fallback_queries": int(queue.get("max_fallback_queries", 4) or 0),
     }
 
 

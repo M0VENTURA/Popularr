@@ -753,7 +753,21 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
     artist_words = [w for w in effective_artist.split() if w.lower() not in _ARTICLE_WORDS]
     title_words = [w for w in title.split()]
 
-    _MAX_FALLBACKS = 8
+    # ⚠️ PACING. The report measured a 57s average per search with several
+    # hitting the 50-result limit. Each fallback is a FULL search with its own
+    # wait ceiling, so a fixed 8-strong tail is what made a single unlocatable
+    # track cost minutes. Configurable, default 4.
+    try:
+        from helpers.config_helpers import get_queue_search_tuning
+
+        _raw_cap = get_queue_search_tuning().get("max_fallback_queries")
+        # ``or 4`` would turn an explicit 0 (disabled) back into 4.
+        _MAX_FALLBACKS = 4 if _raw_cap is None else max(0, int(_raw_cap))
+    except Exception:
+        _MAX_FALLBACKS = 4
+
+    if _MAX_FALLBACKS == 0:
+        return []
 
     if len(artist_words) > 1:
         for a_phrase in _drop_words(artist_words)[:4]:
@@ -1593,6 +1607,25 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 )
                 if best:
                     used_low_quality_fallback = tier_index > 0
+                    break
+
+                # ⚠️ THE FALLBACKS CANNOT HELP IF THE FILES ARE ALREADY HERE.
+                #
+                # ``_build_fallback_search_queries`` exists for a query that
+                # surfaced NOTHING. When the primary query DID return candidates
+                # and every one was rejected on its merits (wrong artist, wrong
+                # title, wrong album), a looser query only finds the same files
+                # again — the report's 57s average and the 50-result limit were
+                # largely this. Bail out of the tail instead.
+                if idx == 0 and results and not best:
+                    logger.info(
+                        "Primary query returned candidates but none qualified — "
+                        "not burning the fallback queries",
+                        queue_id=queue_id,
+                        artist=expected_artist,
+                        title=expected_title,
+                        candidates=len(results),
+                    )
                     break
             if best:
                 break

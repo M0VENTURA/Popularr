@@ -129,6 +129,55 @@ def api_queue_retry_all_failed() -> Any:
     return _json_response(queue_retry_all_failed())
 
 
+@queue_processing_bp.route("/api/queue/clear-outage-misses", methods=["POST"])
+async def api_queue_clear_outage_misses() -> Any:
+    """Release retry dates that a SEARCH OUTAGE stamped, not a genuine miss.
+
+    Body (all optional)::
+
+        {"dry_run": true}        # default — report what WOULD be cleared
+        {"dry_run": false}       # actually clear
+        {"lookback_days": 7}
+        {"streak_minimum": 5}
+
+    Only rows whose stamp falls inside a detected run of consecutive
+    zero-result/disconnected searches are touched, so a genuine miss keeps the
+    backoff it earned. See ``services.queue.outage_miss_service``.
+    """
+    from services.queue.outage_miss_service import clear_outage_misses
+
+    payload = (await request.get_json(silent=True)) or {}
+
+    def _as_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().casefold() not in ("", "0", "false", "no", "off")
+        return bool(value)
+
+    dry_run = _as_bool(payload.get("dry_run"), default=True)
+
+    try:
+        lookback_days = max(1, int(payload.get("lookback_days") or 7))
+    except (TypeError, ValueError):
+        lookback_days = 7
+    try:
+        streak_minimum = max(2, int(payload.get("streak_minimum") or 5))
+    except (TypeError, ValueError):
+        streak_minimum = 5
+
+    try:
+        result = clear_outage_misses(
+            lookback_days=lookback_days,
+            streak_minimum=streak_minimum,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        return _json_response({"success": False, "error": str(exc)})
+
+    return _json_response(result)
+
+
 # ── SSE: real-time queue progress stream ──────────────────────────────────
 
 @queue_processing_bp.route("/api/queue/stream", methods=["GET"])
