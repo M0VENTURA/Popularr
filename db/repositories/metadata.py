@@ -533,6 +533,34 @@ def another_track_uses_file_path(
 
 
 def merge_album_names(conn: Any = None, artist: str = "", source_albums: list[str] | None = None, canonical_name: str = "") -> int:
+    """Rename several album NAMES onto one canonical name (DB + file tags).
+
+    ⚠️ THE FILE IS ONLY RELABELLED WHEN IT ALREADY LIVES UNDER THE CANONICAL
+    ALBUM'S FOLDER.
+
+    Report: "many albums somehow got merged into the Various Artists albums such
+    as Spotify - Essential Alternative", showing e.g.
+
+        /music/Various Artists/2026 - Spotify - Essential Alternative/02. Gorillaz - Clint Eastwood.mp3
+        /music/Jimmy Eat World/2002 - Good To Go (EP)/01. Jimmy Eat World - The Middle (Acoustic).mp3
+
+    Both rendered on the ONE album page, because that page filters on
+    ``(album_artist, album)`` — the TAGS — and never looks at the path. A merge
+    rewrote ``tracks.album`` and the file's ALBUM TAG for every source album, but
+    a file never MOVES: its path keeps saying ``/music/Jimmy Eat World/2002 -
+    Good To Go (EP)/…`` while its tag now claims the compilation. The result is a
+    track that belongs to another album by its own path, stuck on the merged one,
+    and — because the tag was overwritten too — nothing left on disk to recover it
+    from.
+
+    The DB rename is still the point of a merge (two spellings of one album
+    SHOULD become one). What must not happen is relabelling a file that lives
+    under a DIFFERENT album folder: that is a merge across albums, not a merge of
+    one album's spellings, and the row belongs to the other album.
+
+    ``_file_belongs_to_canonical`` decides from the path alone, so this needs no
+    extra query.
+    """
     if not source_albums:
         return 0
 
@@ -545,7 +573,7 @@ def merge_album_names(conn: Any = None, artist: str = "", source_albums: list[st
         with db_session() as session:
             _rows = session.execute(
                 text(f"""
-                    SELECT file_path, artist, title FROM tracks
+                    SELECT file_path, artist, title, album FROM tracks
                     WHERE COALESCE(NULLIF(album_artist, ''), artist) = :artist
                       AND album IN ({', '.join([f':s{i}' for i in range(len(source_albums))])})
                 """),
@@ -555,7 +583,9 @@ def merge_album_names(conn: Any = None, artist: str = "", source_albums: list[st
                 mapping = getattr(row, "_mapping", None)
                 fp = str((mapping.get("file_path") if mapping else row[0]) or "").strip()
                 title = str((mapping.get("title") if mapping else row[2]) or "").strip()
-                _file_rows.append((fp, title, canonical_name))
+                _src_album = str((mapping.get("album") if mapping else row[3]) or "").strip()
+                if _file_belongs_to_canonical(fp, _src_album, canonical_name):
+                    _file_rows.append((fp, title, canonical_name))
     except Exception as exc:
         logger.debug("Merge-album file rows load failed", artist=artist, error=str(exc))
 
@@ -580,6 +610,45 @@ def merge_album_names(conn: Any = None, artist: str = "", source_albums: list[st
             logger.debug("Merge-album file tag write failed", file=fp, error=str(exc))
 
     return rows_updated
+
+
+def _file_belongs_to_canonical(
+    file_path: str, source_album: str, canonical_name: str,
+) -> bool:
+    """May this FILE's album tag be rewritten to *canonical_name*?
+
+    True when the file is already somewhere under the canonical album's folder, or
+    when the source and canonical names are the same album differently spelled.
+
+    False when the file lives under a DIFFERENT album folder — that file belongs
+    to that other album, and rewriting its tag is what left a Coldplay rip
+    labelled as a Spotify compilation while still sitting in
+    ``/music/Coldplay/…``.
+    """
+    from helpers.normalization_service import (
+        normalize_title_for_lookup,
+        strip_album_edition_marker,
+    )
+
+    def _key(value: str) -> str:
+        return normalize_title_for_lookup(strip_album_edition_marker(str(value or "")))
+
+    src, dst = _key(source_album), _key(canonical_name)
+    if src and dst and src == dst:
+        # Same album, different spelling — exactly what a merge is for.
+        return True
+
+    folder = ""
+    try:
+        folder = os.path.basename(os.path.dirname(str(file_path or "")))
+    except Exception:
+        folder = ""
+    folder_key = _key(folder)
+    if not folder_key or not dst:
+        # Unknown folder: prefer the DB rename alone over an irreversible relabel.
+        return False
+    # A folder is usually "<year> - <album>" (the download naming format).
+    return dst in folder_key
 
 
 def count_album_disc_numbers(conn: Any = None, artist: str = "", album: str = "") -> int:
