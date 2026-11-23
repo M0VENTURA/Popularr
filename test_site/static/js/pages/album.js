@@ -1293,11 +1293,21 @@
     if (!confirmed) return;
 
     const run = async () => {
+      // ⚠️ A LONGER TIMEOUT THAN THE 30s DEFAULT, and a reload that can no
+      // longer be skipped.
+      //
+      // Reported: "it doesn't seem to be saving correctly, or it saves but then
+      // the screen stays with the track page open rather than refreshing once
+      // the save has completed." The server now does the file fan-out in the
+      // background, so the request itself is one UPDATE — but a 30s ceiling on a
+      // selection large enough to matter was still what turned a completed save
+      // into "nothing happened": the abort threw, the code jumped past the
+      // reload below, and the page kept showing pre-edit values.
       const data = await global.api.postJson('/api/track/bulk-update', {
         track_ids: ids,
         fields,
         sync_to_file: true,
-      });
+      }, { timeoutMs: 60000 });
       if (!data || data.success !== true) {
         notifyError((data && data.error) || 'Could not update the selected tracks.');
         return;
@@ -1305,9 +1315,18 @@
       if (Array.isArray(data.file_failures) && data.file_failures.length) {
         notifyError(`${data.file_failures.length} track(s) updated in the database but ` +
           'their file tags could not be written — see the logs.');
+      } else if (data.files_synced_in_background) {
+        // The DB is committed; the file tags follow. Say so rather than
+        // implying the files are already written.
+        notifySuccess(
+          `Updated ${ids.length} track(s). File tags are being written in the background.`
+        );
       } else {
         notifySuccess(`Updated ${ids.length} track(s).`);
       }
+      // Always reload once the save has been accepted: the page is showing
+      // pre-edit values, and that is the reported "stays with the track page
+      // open". The toast is shown before it so a fast reload cannot swallow it.
       setTimeout(() => global.location.reload(), 900);
     };
 
@@ -1936,12 +1955,24 @@
     const tabBtn = document.querySelector('#albumPageTabs [data-bs-target="#tab-details"]');
     if (tabBtn && global.bootstrap) global.bootstrap.Tab.getOrCreateInstance(tabBtn).show();
 
+    // ⚠️ THE SAME BUSY POPUP "LOOKUP MBID" SHOWS.
+    //
+    // Reported: "it has a banner showing that it's updating the release, but the
+    // same banner doesn't show when it's updated using 'Choose from release
+    // group'". Both paths end here, and the work below is two sequential
+    // server round-trips (tracklist findings, then the metadata preview), so the
+    // release-group route looked like it had done nothing at all.
+    //
+    // Acquired in THIS function rather than at each call site so every caller —
+    // the release picker, an inline handler, anything added later — inherits it.
+    startLookupBusy('Applying the MusicBrainz release…');
+
     // Tracklist findings for the picked release: the missing rows and the
     // "downloaded twice" flags. Live's applyAlbumMbid has always done this
     // here — without it THIS path rendered nothing at all, so any caller that
     // arrives with a concrete release id (the release picker, an inline
     // handler) left the tracklist looking complete.
-    Promise.resolve()
+    const trackFindings = Promise.resolve()
       .then(() => refreshAlbumTrackFindings(mbid))
       .catch((error) => console.warn('Could not refresh album tracklist findings', error));
 
@@ -1962,10 +1993,15 @@
         })
         .catch(() => {
           notifySuccess('MusicBrainz ID applied. Click "Save Metadata" to persist it.');
-        });
+        })
+        // `.finally` so a thrown preview can never strand the popup — the same
+        // contract as the Lookup MBID path.
+        .finally(endLookupBusy);
       return;
     }
 
+    // No preview module: the tracklist refresh above is all the work there is.
+    trackFindings.finally(endLookupBusy);
     notifySuccess('MusicBrainz ID applied. Click "Save Metadata" to persist it.');
   }
 
@@ -2807,6 +2843,141 @@
       updateBulkActionsUI();
     }
   });
+
+  /**
+   * Re-match ONLY the SELECTED tracks onto another MusicBrainz release.
+   *
+   * ⚠️ DISTINCT FROM "Lookup MBID", which is ALBUM-WIDE.
+   *
+   * Reported: "it would also be good if I could select multiple tracks on an
+   * album and select lookup MBID and use those to match another release, but
+   * only match those tracks to another release for when tracks are accidentally
+   * merged to an incorrect release."
+   *
+   * "Lookup MBID" binds the release to EVERY track of the album and rewrites the
+   * album-level fields — correct when the whole album is wrong, destructive when
+   * two tracks from another pressing were merged into it. This searches a
+   * release and writes the release IDENTITY onto the ticks alone, leaving the
+   * rest of the album's rows exactly as they were.
+   */
+  function lookupMbidForSelectedTracks() {
+    const ids = selectedTrackIds();
+    if (!ids.length) {
+      notifyError('Please select at least one track.');
+      return;
+    }
+    if (typeof global.openGlobalMbSearch !== 'function') {
+      notifyError('MusicBrainz search is unavailable on this page.');
+      return;
+    }
+
+    global.openGlobalMbSearch(pageArtist(), pageAlbum(), function (selected) {
+      if (!selected) return;
+
+      // ⚠️ The picker returns a release GROUP (``selected.id``), not a release.
+      // Writing that into ``musicbrainz_albumid`` would bind the tracks to
+      // something that is not a release at all. Resolve a concrete release first
+      // — the same '/best-release' call the album-wide path makes — so both
+      // routes agree on what the id means.
+      resolveReleaseForGroup(selected).then(function (resolved) {
+        if (!resolved || !resolved.releaseId) {
+          notifyError(
+            'Could not resolve a specific release for that match — '
+            + 'pick a version from "Choose from release group" instead.'
+          );
+          return;
+        }
+        applyReleaseToSelectedTracks(ids, resolved.releaseId, resolved.groupId);
+      });
+    });
+  }
+
+  /**
+   * Resolve a picker match (a release GROUP) to a concrete release id.
+   *
+   * Mirrors ``applyAlbumMatch``: a match in the shared search is a group, and the
+   * concrete edition is resolved server-side. Returns ``{releaseId, groupId}``,
+   * with ``releaseId`` empty when nothing could be resolved.
+   */
+  async function resolveReleaseForGroup(selected) {
+    const groupId = String((selected && selected.id) || '').trim();
+
+    // A match that already carries a concrete release id (an inline call, a
+    // future picker) needs no round trip.
+    const direct = String(
+      (selected && (selected.release_id || selected.releaseId)) || ''
+    ).trim();
+    if (direct && direct !== groupId) {
+      return { releaseId: direct, groupId };
+    }
+    if (!groupId) return { releaseId: '', groupId: '' };
+
+    try {
+      const data = await global.api.postJson('/api/album/musicbrainz/best-release', {
+        release_group_mbid: groupId,
+        artist: pageArtist(),
+        album: pageAlbum(),
+      });
+      const best = (data && data.best_release) || null;
+      return { releaseId: (best && best.id) ? String(best.id) : '', groupId };
+    } catch (error) {
+      console.warn('Could not resolve the concrete release for this group', error);
+      return { releaseId: '', groupId };
+    }
+  }
+
+  /**
+   * Write the chosen release's identity onto *ids* only, then reload.
+   *
+   * Reuses the bulk-update endpoint rather than a new one: it already fans the
+   * write out to the files (in the background) and to Navidrome, and its
+   * allow-list now covers the release columns.
+   */
+  async function applyReleaseToSelectedTracks(ids, releaseId, groupId) {
+    const fields = {
+      musicbrainz_albumid: releaseId,
+      musicbrainz_album_mbid: releaseId,
+    };
+    if (groupId) fields.musicbrainz_releasegroupid = String(groupId).trim();
+
+    const confirmed = global.ui && global.ui.confirm
+      ? await global.ui.confirm({
+        title: 'Match selected tracks to another release',
+        message: `Bind ${ids.length} selected track(s) to release ${releaseId}?`,
+        detail:
+          'Only the selected tracks are moved. The rest of the album keeps its '
+          + 'current release, so the two halves can be split apart if that is what '
+          + 'was wrong.',
+        tone: 'warning',
+        confirmLabel: 'Match',
+      })
+      : window.confirm(`Bind ${ids.length} selected track(s) to release ${releaseId}?`);
+    if (!confirmed) return;
+
+    const run = async () => {
+      const data = await global.api.postJson('/api/track/bulk-update', {
+        track_ids: ids,
+        fields,
+        sync_to_file: true,
+      }, { timeoutMs: 60000 });
+      if (!data || data.success !== true) {
+        notifyError((data && data.error) || 'Could not re-match the selected tracks.');
+        return;
+      }
+      notifySuccess(
+        `Matched ${ids.length} track(s) to that release. Reloading…`
+      );
+      setTimeout(() => global.location.reload(), 900);
+    };
+
+    if (global.busyPopup) {
+      return global.busyPopup.showAndRun('Matching selected tracks…', run)
+        .catch((error) => notifyError('Error: ' + error.message));
+    }
+    return run().catch((error) => notifyError('Error: ' + error.message));
+  }
+
+  global.lookupMbidForSelectedTracks = lookupMbidForSelectedTracks;
 
   function selectedTrackIds() {
     // Set: a track must never be acted on twice even if markup ever renders

@@ -85,17 +85,43 @@ class TestTheEndpoint:
         assert resp.status_code == 400
 
     async def test_an_unsupported_field_is_refused(self, client, db_session):
+        """A field outside the allow-list is REFUSED, not silently dropped.
+
+        ``musicbrainz_albumid`` used to be the example here. It is deliberately
+        supported now — the album page's "Lookup MBID for Selected" binds a
+        selection to another release — so use a field nothing writes.
+        """
         _seed(db_session, "be-x")
         resp = await client.post(
             "/api/track/bulk-update",
-            json={"track_ids": ["be-x"], "fields": {"musicbrainz_albumid": "1"}},
+            json={"track_ids": ["be-x"], "fields": {"cover_art_data": "1"}},
         )
         assert resp.status_code == 400, (
             "an unknown field must be refused, not silently dropped"
         )
         payload = await resp.get_json()
         assert payload["success"] is False
-        assert "musicbrainz_albumid" in payload["error"]
+        assert "cover_art_data" in payload["error"]
+
+    async def test_the_release_identity_fields_are_supported(self, client, db_session):
+        """Re-matching a SELECTION onto another release writes these."""
+        _seed(db_session, "be-id")
+        resp = await client.post(
+            "/api/track/bulk-update",
+            json={
+                "track_ids": ["be-id"],
+                "fields": {
+                    "musicbrainz_albumid": "release-1",
+                    "musicbrainz_album_mbid": "release-1",
+                    "musicbrainz_releasegroupid": "group-1",
+                },
+                "sync_to_file": False,
+            },
+        )
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["success"] is True
+        assert "musicbrainz_albumid" in payload["updated"]
 
     async def test_only_the_selected_tracks_move(self, client, db_session):
         """THE POINT: realign a few tracks onto a different album."""

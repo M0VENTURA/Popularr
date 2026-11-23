@@ -313,6 +313,12 @@
           <button class="btn btn-sm btn-outline-secondary" id="editTracksBtn" onclick="openEditTracksModal()" title="Apply album/artist/year/title edits to the SELECTED tracks only — the same identity fields the Edit Album page offers">
             <i class="bi bi-pencil-square me-1"></i> Edit Tracks
           </button>
+          {# Re-match ONLY the selection onto another release. "Lookup MBID" (in
+             Edit Album) is album-wide; this is the repair for a handful of tracks
+             that were merged onto the wrong release. #}
+          <button class="btn btn-sm btn-outline-warning" id="lookupMbidSelectedBtn" onclick="lookupMbidForSelectedTracks()" title="Search MusicBrainz and bind ONLY the selected tracks to that release — for tracks that were merged onto an incorrect release">
+            <i class="bi bi-search me-1"></i> Lookup MBID for Selected
+          </button>
           <button class="btn btn-sm btn-outline-primary" id="renameSelectedBtn" onclick="renameSelectedTracks(this)" title="Rename the selected files to the configured naming format (converts FLAC to MP3 when that is enabled in Config)">
             <i class="bi bi-files me-1"></i> Rename Selected
           </button>

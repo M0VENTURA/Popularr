@@ -987,6 +987,13 @@ async def api_track_bulk_update() -> Any:
     allowed = {
         "album", "album_artist", "year", "release_year",
         "title", "artist", "writer", "track_number", "disc_number",
+        # Release IDENTITY. Set when re-matching a SELECTION of tracks onto
+        # another pressing: the reported "tracks are accidentally merged to an
+        # incorrect release". An album-wide id correction is still done from the
+        # Edit Album form, which fans the id out to every row AND its file; this
+        # scope exists for the handful that landed on the wrong release.
+        "musicbrainz_album_mbid", "musicbrainz_albumid",
+        "musicbrainz_releasegroupid",
     }
     unknown = sorted(set(str(k) for k in fields) - allowed)
     if unknown:
@@ -1034,33 +1041,87 @@ async def api_track_bulk_update() -> Any:
         mark_local_tags_written_for_track_ids(track_ids)
     except Exception as stamp_err:
         logger.debug("Bulk metadata authority stamp failed", error=str(stamp_err))
-    if data.get("sync_to_file", True):
-        for track_id in track_ids:
-            try:
-                if sync_track_tags_to_file(track_id):
-                    files_updated += 1
-                else:
-                    file_failures.append(track_id)
-            except Exception as sync_err:
-                file_failures.append(track_id)
-                logger.warning(
-                    "File tag sync failed for bulk update",
-                    track_id=track_id, error=str(sync_err),
-                )
+
+    # ⚠️ THE FILE FAN-OUT RUNS IN THE BACKGROUND, NOT IN THE REQUEST.
+    #
+    # Reported: "when selecting multiple tracks and selecting edit tracks, it
+    # doesn't seem to be saving correctly, or it saves but then the screen stays
+    # with the track page open rather than refreshing once the save has
+    # completed."
+    #
+    # It WAS saving — the DB update above is what persists — but this loop then
+    # read-modified-wrote every file INLINE, sequentially. The album page's
+    # mutating calls go through ``utils/api.js``'s 30s timeout, so a large
+    # selection aborted the request: the response never arrived, the page never
+    # reloaded, and the user was left looking at a page that had in fact been
+    # updated. Same failure the star re-rate had, with the same remedy.
+    #
+    # ``file_failures`` therefore reports what is known NOW (nothing yet) and the
+    # count arrives in the log; the DB is already correct either way.
+    file_sync_started = False
+    if data.get("sync_to_file", True) and track_ids:
+        file_sync_started = _start_bulk_file_sync(track_ids)
 
     navidrome_scan_triggered = False
-    if files_updated:
-        # One scan for the whole batch, not one per track.
-        navidrome_scan_triggered = _trigger_navidrome_scan()
 
     return jsonify({
         "success": True,
         "updated": sorted(updates),
         "tracks_requested": len(track_ids),
+        "files_synced_in_background": file_sync_started,
         "files_updated": files_updated,
         "file_failures": file_failures,
         "navidrome_scan_triggered": navidrome_scan_triggered,
     })
+
+
+def _start_bulk_file_sync(track_ids: list[str]) -> bool:
+    """Write the updated rows' tags to disk on a daemon thread.
+
+    Returns False when the thread could not be started, so the caller can say
+    the files were not synced rather than implying they were.
+
+    One Navidrome rescan is requested for the whole batch, not one per track.
+    """
+    try:
+        import threading
+
+        def _run() -> None:
+            updated = 0
+            failures: list[str] = []
+            for track_id in track_ids:
+                try:
+                    if sync_track_tags_to_file(track_id):
+                        updated += 1
+                    else:
+                        failures.append(track_id)
+                except Exception as sync_err:
+                    failures.append(track_id)
+                    logger.warning(
+                        "File tag sync failed for bulk update",
+                        track_id=track_id, error=str(sync_err),
+                    )
+            logger.info(
+                "Bulk track file sync finished",
+                requests=len(track_ids), updated=updated,
+                failures=len(failures),
+            )
+            if updated:
+                try:
+                    _trigger_navidrome_scan()
+                except Exception as scan_err:
+                    logger.debug(
+                        "Navidrome rescan after bulk edit failed",
+                        error=str(scan_err),
+                    )
+
+        threading.Thread(
+            target=_run, name="bulk-track-file-sync", daemon=True
+        ).start()
+        return True
+    except Exception as exc:
+        logger.warning("Could not start the bulk file sync thread", error=str(exc))
+        return False
 
 
 # ---------------------------------------------------------------------------
