@@ -950,6 +950,7 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
     # Multi-disc albums share one folder, so every disc needs its prefix
     # (101, 102, 201…). The whole group is in hand here — use it.
     from services.downloads.download_organize_helpers import _any_multi_disc
+    from services.metadata.disc_number import stored_disc_number
 
     group_multi_disc = _any_multi_disc([item.get("disc_number") for item in items])
 
@@ -1058,7 +1059,22 @@ def organize_group_sync(group_id: Any, metadata: dict[str, Any] | None = None) -
                 "album": resolved_album_name,
                 "year": resolved_year,
                 "track_number": item_track_number,
-                "disc_number": item_disc_number,
+                # ⚠️ ALWAYS SUPPLIED — including the CLEAR.
+                #
+                # ``update_file_metadata`` treats ``None`` as "not supplied" and
+                # leaves the frame alone, so omitting this left the DOWNLOADED
+                # disc position on the copy: the reported "something isn't
+                # clearing the tags in the Downloads folder before updating".
+                # A rip tagged disc 1 of 2 that is now filed as a single-disc
+                # release kept "/2" — and a single-disc release has no
+                # meaningful position at all, which is why the import and the
+                # album page both clear it.
+                #
+                # One shared rule for every writer: see
+                # ``services.metadata.disc_number``.
+                "disc_number": stored_disc_number(
+                    item_disc_number, multi_disc=group_multi_disc
+                ),
             }
             if not update_file_metadata(file_path, file_metadata):
                 logger.warning(

@@ -1596,23 +1596,14 @@ def _apply_stored_metadata(
         "year": item.get("year"),
         "track_number": item.get("track_number"),
     }
-    _disc_raw = item.get("disc_number")
-    try:
-        _disc_num = int(str(_disc_raw).split("/")[0])
-    except (TypeError, ValueError):
-        _disc_num = 0
+    # One shared rule — see ``services.metadata.disc_number``. It was written
+    # inline here first; the fingerprint and the queue's group-organize path now
+    # need the same decision, and three copies would drift.
+    from services.metadata.disc_number import stored_disc_number
 
-    try:
-        _disctotal = int(str(_album_level.get("disctotal") or "0").split("/")[0])
-    except (TypeError, ValueError):
-        _disctotal = 0
-
-    if _disc_num >= 2:
-        _disc_value: str | None = str(_disc_raw)
-    elif _disc_num == 1:
-        _disc_value = "1" if _disctotal >= 2 else ""
-    else:
-        _disc_value = "" if _disctotal < 2 else None
+    _disc_value = stored_disc_number(
+        item.get("disc_number"), disc_total=_album_level.get("disctotal")
+    )
 
     meta = {k: v for k, v in meta.items() if v not in (None, "")}
     if _disc_value is not None:

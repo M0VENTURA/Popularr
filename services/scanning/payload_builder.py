@@ -303,15 +303,18 @@ def build_track_payload(
     # scan's "offer whatever I could not apply" pass stash a Disc # change for
     # EVERY track on EVERY single-disc album — the whole library showed
     # "needs review". Clear it here, at import time, instead of offering it.
-    _disc_total_raw = (
+    #
+    # The rule itself lives in ``services.metadata.disc_number`` so the album
+    # fingerprint compares the two sides the same way this writes them; three
+    # inline copies of "what counts as a disc" is how the album cache stopped
+    # ever skipping.
+    from services.metadata.disc_number import disc_total_int
+
+    _disc_total = disc_total_int(
         (extracted.get("disctotal") if extracted else None)
         or (album_tags or {}).get("disctotal")
         or (album_tags or {}).get("disc_count")
     )
-    try:
-        _disc_total = int(str(_disc_total_raw).split("/")[0].strip())
-    except (TypeError, ValueError):
-        _disc_total = 0
     if _disc_total == 1:
         payload["disc_number"] = None
 

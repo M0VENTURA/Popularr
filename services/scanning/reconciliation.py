@@ -252,17 +252,43 @@ def db_row_record(row: dict[str, Any]) -> dict[str, str]:
     )
 
 
-def _fingerprint(records: Iterable[dict[str, str]]) -> str:
+def album_fingerprint(records: Iterable[dict[str, str]]) -> str:
+    """Content hash proving an album's rows are unchanged since the last import.
+
+    ⚠️ DISC 1 IS COMPARED AS "NO DISC", and that is what makes the cache work.
+
+    ``disc_number`` is a fingerprint field, but a one-disc release has no
+    meaningful position: the import CLEARS it (``payload_builder`` — storing "1"
+    made Navidrome mislabel the album), while Navidrome keeps reporting
+    ``discNumber: 1`` for those very songs. Comparing the raw values therefore
+    made the two sides permanently unequal, and ``should_skip_cached_album``
+    never skipped: every album re-imported on every scan.
+
+        Re-importing album — song IDs match but metadata changed or cannot be
+        proven unchanged album='…' fingerprint_equal=False dirty=False
+
+    ``dirty=False`` on every line was the tell — nothing had been edited; the
+    comparison itself could not succeed.
+
+    Canonicalised here rather than in one side's builder so BOTH sides go
+    through it, and a genuine move (disc 1 -> disc 2) still differs. See
+    ``services.metadata.disc_number``.
+    """
+    from services.metadata.disc_number import canonical_disc_number
+
+    normalised = [
+        {
+            **{field: record.get(field, "") for field in FINGERPRINT_FIELDS},
+            "disc_number": canonical_disc_number(record.get("disc_number", "")),
+        }
+        for record in records
+    ]
     ordered = sorted(
-        ({field: record.get(field, "") for field in FINGERPRINT_FIELDS} for record in records),
+        normalised,
         key=lambda item: (item.get("id", ""), item.get("file_path", "")),
     )
     payload = json.dumps(ordered, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def album_fingerprint(records: Iterable[dict[str, str]]) -> str:
-    return _fingerprint(records)
 
 
 def navidrome_album_fingerprint(
