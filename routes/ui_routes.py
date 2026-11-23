@@ -2662,6 +2662,11 @@ async def album_detail(album_path: str) -> Any:
             "title", "track_number", "disc_number", "mbid",
             "writer", "musicbrainz_genres", "is_cover", "original_cover_artist",
             "artist",
+            # ⭐ The review proposes these (``_TRACK_FIELD_SPECS``) and both are
+            # real columns the scanner and the file writer already handle, so a
+            # correction had to be applicable — without them here the save
+            # silently dropped the staged value.
+            "composer", "lyricist",
         })
 
         # A SAVED review clears the stashed recommendations for this album —

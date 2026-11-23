@@ -32,6 +32,7 @@ Design notes
 from __future__ import annotations
 
 import ast
+import re
 from typing import Any
 
 import structlog
@@ -81,6 +82,19 @@ _TRACK_FIELD_SPECS: tuple[tuple[str, str, str], ...] = (
     ("disc_number", "Disc #", "mb_disc_number"),
     ("mbid", "MusicBrainz Recording ID", "mb_recording_mbid"),
     ("writer", "Writer", "writer"),
+    # ⭐ COMPOSER / LYRICIST were already stored, scanned and written to the
+    # files (``payload_builder`` carries both, ``metadata_extractor`` fills
+    # them, ``tag_file_service`` writes TCOM/Lyricist) — but the review never
+    # proposed them, so a wrong credit could not be corrected from the album
+    # page at all. MusicBrainz publishes both per recording from the work's
+    # composer/lyricist relations (``musicbrainz_service`` sets
+    # ``entry["composer"]`` / ``entry["lyricist"]``).
+    #
+    # ``_PEOPLE_FIELDS`` in ``reconciliation`` already compares these as SETS of
+    # names, so "A, B" and "B, A" is not a change, and a correction written
+    # here survives the next Navidrome import instead of being reverted.
+    ("composer", "Composer", "composer"),
+    ("lyricist", "Lyricist", "lyricist"),
     ("musicbrainz_genres", "Genres", "musicbrainz_genres"),
     # The TRACK artist — the album's own artist is proposed at album level
     # (``_ALBUM_FIELD_SPECS``), so a lookup must be able to show BOTH: the
@@ -218,6 +232,30 @@ def _genre_names(value: Any) -> set[str]:
     would read as a change.
     """
     return {_norm(name) for name in _genre_list(value)}
+
+
+#: Fields holding a multi-name CREDIT. Compared as sets, because the same people
+#: in a different order — or joined with a different delimiter — is not a change.
+#: This mirrors ``services.scanning.reconciliation._PEOPLE_FIELDS``, which is how
+#: the Navidrome import judges the same columns: without it the review would
+#: propose a reordered credit forever while the import considered it equal.
+_CREDIT_FIELDS: frozenset[str] = frozenset({"writer", "composer", "lyricist"})
+
+
+def _credit_sets_equal(current: Any, proposed: Any) -> bool:
+    """True when two credit strings name the SAME people, in any order/form."""
+    def names(value: Any) -> set[str]:
+        text = _as_text(value)
+        return {
+            part.strip().casefold()
+            for part in re.split(r"[,;/&]|\s+feat\.?\s+|\s+ft\.?\s+", text)
+            if part.strip()
+        }
+
+    left, right = names(current), names(proposed)
+    if not left and not right:
+        return True
+    return left == right
 
 
 def _album_genre_sets_equal(current: Any, proposed: Any) -> bool:
@@ -735,6 +773,12 @@ def _track_proposals(
             # same spelling on both sides — the reported writer bar showed a
             # raw JSON array opposite a comma string.
             "writer": _genres_text(local.get("writer")),
+            # The same treatment as ``writer``: the column is TEXT but a
+            # multi-name credit, so it is rendered through the tolerant parser
+            # rather than stringified — a raw Python repr on one side and a
+            # comma string on the other is what made ``writer`` re-propose.
+            "composer": _genres_text(local.get("composer")),
+            "lyricist": _genres_text(local.get("lyricist")),
             # Rendered, not merely stringified: a JSONB list rendered with
             # ``str()`` is a Python repr, which is what the review was showing
             # (and mis-comparing) for every genre row.
@@ -752,6 +796,11 @@ def _track_proposals(
             ),
             "mbid": rec_mbid,
             "writer": _genres_text(mb_track.get("writer")),
+            # Both come off the SAME enrichment entry as ``writer`` (the
+            # recording's work relations), and both are multi-name credits, so
+            # they are rendered the same way.
+            "composer": _genres_text(mb_track.get("composer")),
+            "lyricist": _genres_text(mb_track.get("lyricist")),
             # Mirror the SCAN's source: release-GROUP genres for a single-artist
             # release, the RECORDING's genres for a VA compilation. Comparing
             # the group list the scan stored against the recording's single
@@ -803,6 +852,25 @@ def _track_proposals(
             if field == "artist" and _norm(proposed) == _norm(local.get("album_artist")):
                 continue
             current = current_map.get(field, "")
+            # A CREDIT is a set of people, not a string: "Korn, Brian Welch" and
+            # "Brian Welch, Korn" are the same credit, and Navidrome joins them
+            # with "; " where the file tag uses ", ". Comparing raw text
+            # proposed a reorder forever — and the IMPORT already judges these
+            # fields as sets (``reconciliation._PEOPLE_FIELDS``), so the review
+            # disagreed with the code that consumes it.
+            if field in _CREDIT_FIELDS:
+                if _credit_sets_equal(current, proposed):
+                    continue
+                changes.append({
+                    "field": field,
+                    "label": next(
+                        (lbl for fid, lbl, _k in _TRACK_FIELD_SPECS if fid == field),
+                        field,
+                    ),
+                    "current": current,
+                    "proposed": proposed,
+                })
+                continue
             if _norm(proposed) == _norm(current):
                 continue
             # Track/disc numbers are compared numerically-ish: "01" and "1"
