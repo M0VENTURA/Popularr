@@ -1200,7 +1200,19 @@ def _resolve_compilation_flags(
     artist: str,
     album: str,
 ) -> tuple[bool, bool]:
-    """Best-effort ``(is_compilation, is_va_compilation)`` from local data."""
+    """Best-effort ``(is_compilation, is_va_compilation)`` from local data.
+
+    ⚠️ The STORED ``is_compilation`` column is read FIRST. This function only
+    re-derives the verdict when no row carries the flag, because everything it
+    re-derives from — the type tag, a generic album-artist name, the title —
+    was already consulted once when the column was written. Re-deriving from
+    scratch meant a compilation recorded as one could come back from the
+    resolution as a STUDIO album: the star pass then applied the era 5★ slot
+    cap (peak 4 / solid 3 / minor 2), so such an album could never hold more
+    than a handful of 5★ tracks, which is precisely what compilations are
+    exempt from. Most visible on the Star Rating Resync, whose rows carry the
+    column but no way to re-read the album type.
+    """
     row = album_results[0] if album_results else {}
     from services.catalog.album_classification_service import (
         classify_compilation_category,
@@ -1231,6 +1243,15 @@ def _resolve_compilation_flags(
         return True, category == "va"
     if generic_artist:
         return True, True
+
+    # ── The stored verdict ────────────────────────────────────────────────
+    # ``album_stage`` sets this column for every release whose matched type
+    # carries ``+compilation`` / ``+soundtrack``, and the scan runner passes
+    # the same verdict down. A row that says it is a compilation outranks a
+    # heuristic that comes back empty. Checked AFTER the VA and type paths so
+    # the VA subtype is still recovered where the evidence exists.
+    if any(int(r.get("is_compilation") or 0) for r in album_results):
+        return True, False
 
     if not type_text and detect_greatest_hits_album(album=album, artist=artist):
         return True, False
