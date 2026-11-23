@@ -387,6 +387,32 @@ def _genre_entries_by_vote(entries: list[Any]) -> list[str]:
     return list(dict.fromkeys(name for _, _, name in ranked))
 
 
+def _release_types_for_scope(
+    album_context: dict[str, Any] | None,
+    album_result: dict[str, Any] | None,
+) -> tuple[str, ...]:
+    """The album's release-group types, for a genre's ``scope`` check.
+
+    A genre may require a specific release type — ``soundtrack``, ``film_score``
+    and ``video_game_music`` exist only on a Soundtrack release — so the value
+    must reach ``aggregate_genres``. It did not, which meant the rule could
+    never fire during a SCAN; only the resync passed it.
+    """
+    from services.enrichment.genre_scope import release_types
+
+    for source in (album_result, album_context):
+        if not isinstance(source, dict):
+            continue
+        found = release_types(
+            source.get("musicbrainz_albumtype")
+            or source.get("detected_album_type")
+            or source.get("album_type")
+        )
+        if found:
+            return found
+    return ()
+
+
 def _genre_track_limit() -> int:
     """How many MUSICAL genres to write onto one track (default 3).
 
@@ -3471,7 +3497,14 @@ def process_track(
                 # Config-driven so the count is not hard-coded here.
                 max_genres=_genre_track_limit(),
                 context_title=_as_str(effective_track.get("title")),
-                context_album=_as_str(album_context.get("album"))
+                context_album=_as_str(album_context.get("album")),
+                # ⭐ The release-group type. A genre's ``scope`` may require it:
+                # film_score / video_game_music / soundtrack only exist on a
+                # Soundtrack release, and ``musical_theatre`` also accepts an
+                # Audio drama. Without this the scan could never confirm them,
+                # so the rule silently never applied during a real scan — only
+                # the resync (which selects ``musicbrainz_albumtype``) had it.
+                release_types=_release_types_for_scope(album_context, album_result),
             )
             # ⭐ A track must not end up with ONLY an edition/performance
             # marker ("Cover, Remaster"). If every sourced genre was filtered

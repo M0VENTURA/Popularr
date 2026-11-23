@@ -53,21 +53,16 @@ _SELECT_COLUMNS = (
 
 
 def _row_release_types(row: Any) -> tuple[str, ...]:
-    """The release-group secondary types for one stored row.
+    """The release-group types for one stored row.
 
-    ``tracks.musicbrainz_albumtype`` holds the primary type ("Album", "Single",
-    "EP"), while a genre's ``confirm_release_types`` names SECONDARY types
-    ("Soundtrack", "Live", "Compilation", "Audio drama"). The stored column can
-    carry either — MusicBrainz reports "Album + Soundtrack" for a soundtrack —
-    so the value is split on its separators and returned whole, which lets the
-    matcher find "Soundtrack" in either position.
+    Delegates to ``genre_scope.release_types`` so the scan and the resync split
+    the value the same way — the column can hold "Album + Soundtrack" and both
+    paths must agree that it is two types.
     """
+    from services.enrichment.genre_scope import release_types
+
     raw = row.get("musicbrainz_albumtype") if hasattr(row, "get") else None
-    text_value = str(raw or "").strip()
-    if not text_value:
-        return ()
-    parts = re.split(r"[,/+&]|\band\b", text_value, flags=re.IGNORECASE)
-    return tuple(part.strip() for part in parts if part.strip())
+    return release_types(raw)
 
 
 def _has_value(value: Any) -> bool:

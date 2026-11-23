@@ -54,6 +54,28 @@ REASON_UNCONFIRMED = "needs_confirmation"
 #: Release-group secondary types are matched case-insensitively.
 _NORMALISE = str.casefold
 
+#: Separators MusicBrainz uses to join a primary and a secondary type:
+#: "Album + Soundtrack", "Album/Soundtrack", "Album, Soundtrack".
+_RELEASE_TYPE_SPLIT = re.compile(r"[,/+&]|\band\b", re.IGNORECASE)
+
+
+def release_types(value: Any) -> tuple[str, ...]:
+    """Split a stored release type into its parts.
+
+    ``tracks.musicbrainz_albumtype`` holds the primary type ("Album", "Single",
+    "EP"), while a genre's ``confirm_release_types`` names SECONDARY types
+    ("Soundtrack", "Live", "Compilation", "Audio drama"). The column can carry
+    either — MusicBrainz reports "Album + Soundtrack" for a soundtrack — so the
+    value is split and the matcher can find "Soundtrack" in any position.
+
+    ONE implementation: the scan and the resync both read this, and two copies
+    of a separator list would eventually disagree about one of the spellings.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ()
+    return tuple(part.strip() for part in _RELEASE_TYPE_SPLIT.split(text) if part.strip())
+
 
 def _matches_any(patterns: Iterable[str], value: str) -> bool:
     text = str(value or "")
