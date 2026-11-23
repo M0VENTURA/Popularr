@@ -504,6 +504,10 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "copied_individually": "BOOLEAN DEFAULT FALSE",
         "slskd_username": "TEXT", "slskd_transfer_id": "TEXT", "slskd_state": "TEXT", 
         "slskd_queue_position": "INTEGER", "slskd_last_sync_at": "TIMESTAMP",
+        # The "bytes actually moved" clock. ``updated_at`` is bumped by every
+        # progress pass, so a live-but-frozen transfer looked alive forever; this
+        # pair only changes when ``bytesTransferred`` itself changes.
+        "slskd_bytes_seen": "BIGINT", "slskd_progress_at": "TIMESTAMP",
     },
     "upcoming_releases": {
         "release_year": "INTEGER", "source_key": "TEXT",

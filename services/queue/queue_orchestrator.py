@@ -107,13 +107,21 @@ MAINTENANCE_CANDIDATES: tuple[MaintenanceCandidate, ...] = (
         "services.downloads.download_scan_service",
         "check_completed_downloads",
     ),
-    MaintenanceCandidate(
-        "services.downloads.cleanup_engine_service",
-        "cleanup_stale_downloads",
-    ),
+    # ⚠️ BEFORE ``cleanup_stale_downloads``, not after.
+    #
+    # That hook walks the downloads tree and reads every audio file's tags; the
+    # report measured a 44s average and a 12-minute peak, and a hook that times
+    # out is skipped for 600s (``_MAINTENANCE_HOOK_RETRY_SECONDS``). Running the
+    # cheap DB-only stuck sweep after it meant a slow filesystem could postpone
+    # the very job that clears stuck queue items — the reported "nine queue items
+    # have been downloading with no further progress for about 3 days".
     MaintenanceCandidate(
         "services.queue.queue_cleanup_service",
         "cleanup_stuck_items",
+    ),
+    MaintenanceCandidate(
+        "services.downloads.cleanup_engine_service",
+        "cleanup_stale_downloads",
     ),
     MaintenanceCandidate(
         "services.downloads.slskd_reaper_service",

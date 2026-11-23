@@ -400,6 +400,10 @@ class DownloadQueue(Base):
     slskd_state: Mapped[str | None] = mapped_column(String)
     slskd_queue_position: Mapped[int | None] = mapped_column(Integer)
     slskd_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # The "bytes actually moved" clock: written only when the observed byte
+    # count CHANGES, so this ages while a frozen transfer sits there.
+    slskd_bytes_seen: Mapped[int | None] = mapped_column(BigInteger)
+    slskd_progress_at: Mapped[datetime | None] = mapped_column(DateTime)
     search_query: Mapped[str | None] = mapped_column(String)
     source_id: Mapped[str | None] = mapped_column(String)
     status_changed_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))

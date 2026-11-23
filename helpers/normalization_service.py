@@ -930,6 +930,32 @@ def unbracket_ambiguous_edition_marker(value: str) -> str:
     return f"{head} {inner.strip()}"
 
 
+def _bracket_dash_edition_marker(value: str) -> str:
+    """Rewrite a trailing DASH-delimited edition marker into its bracketed form.
+
+    ``"Song -Japanese ver.-"`` -> ``"Song (Japanese ver.)"`` and
+    ``"Song - Deluxe Edition"`` -> ``"Song (Deluxe Edition)"``, so the
+    balanced-group rules downstream can see it.
+
+    Only a tail containing a recognised EDITION keyword converts. That is the
+    whole safeguard: "Song - Part 2" and "AC/DC - Live" are ordinary titles and
+    come back untouched, because neither tail names an edition.
+    """
+    text = str(value or "")
+    if not text.strip():
+        return text
+    m = _EDITION_ANNOTATION_DASH_RE.search(text)
+    if not m:
+        return text
+    inner = m.group(1).strip()
+    if not any(kw in inner.casefold() for kw in _EDITION_ANNOTATION_KEYWORDS):
+        return text
+    head = text[: m.start()].strip()
+    if not head:
+        return text
+    return f"{head} ({inner})"
+
+
 def bracket_trailing_edition_marker(value: str) -> str:
     """Rewrite an unbracketed trailing edition marker into its bracketed form.
 
@@ -971,6 +997,13 @@ _EDITION_ANNOTATION_KEYWORDS = frozenset({
     "edition", "epic", "explicit", "expanded", "extended", "limited",
     "mastered for", "press", "production", "reissue", "repress", "remaster",
     "remastered", "special", "standard", "tour", "ultimate", "version",
+    # LANGUAGE versions. ``_NEUTRAL_STUDIO_ANNOTATIONS`` has always known these
+    # words, but the STRIPPER's keyword set did not, so "-Japanese ver.-" (the
+    # reported form) was recognised by neither path. Abbreviations are listed
+    # explicitly: "ver" is not a substring of "version", so no folding rule
+    # could have derived them.
+    "japanese ver", "jp ver", "jap ver", "korean ver", "kr ver",
+    "english ver", "eng ver", "en ver", "chinese ver", "zh ver",
 })
 
 _ALBUM_EDITION_STRIP_RE = re.compile(
@@ -1005,6 +1038,12 @@ _ALBUM_EDITION_STRIP_RE = re.compile(
     r"(?![^)\]]*\b(?:live|remix|acoustic|unplugged|instrumental|demo|karaoke)\b)"
     r"[^)\]]*?\b(?:edition|deluxe|anniversary|expanded|extended|limited|"
     r"special|bonus|collector(?:'s)?|ultimate|standard|digital|premium|reissue|"
+    # LANGUAGE VERSIONS: "-Japanese ver.-" / "(Korean Version)" name a different
+    # vocal cut, which is an EDITION of the release, not a different song. Listed
+    # as their own alternatives because "ver" is not a substring of "version".
+    r"japanese\s+ver(?:sion)?|jap\s+ver(?:sion)?|jp\s+ver(?:sion)?|"
+    r"korean\s+ver(?:sion)?|kr\s+ver(?:sion)?|english\s+ver(?:sion)?|"
+    r"eng\s+ver(?:sion)?|chinese\s+ver(?:sion)?|"
     r"repress(?:ed|ing)?)\b"
     r"[^)\]]*))"
     r"\s*[\)\]]\s*$",
@@ -1233,6 +1272,14 @@ def strip_album_edition_marker(value: str) -> str:
     # balanced-group rule below would skip — so the annotation would survive
     # into the lookup key. Repair it first.
     original = repair_malformed_annotations(original)
+
+    # The DASH form ("Song -Japanese ver.-", "Song - Deluxe Edition") is rewritten
+    # into its bracketed spelling HERE, for the same reason the unbracketed form
+    # is rewritten below: every rule that follows is balanced-group anchored, so a
+    # dash-delimited marker is otherwise invisible to all of them. Reported as
+    # "-Japanese ver.- is searched as written". Only a recognised EDITION
+    # keyword converts (an ordinary "Song - Part 2" is left alone).
+    original = _bracket_dash_edition_marker(original)
 
     # An UNBRACKETED trailing marker ("X Version") is rewritten into its
     # bracketed form so the rules below can see it at all; every one of them is
@@ -1527,15 +1574,33 @@ def extract_version_info(title: str) -> tuple[str, set[str]]:
 
 _EDITION_ANNOTATION_RE = re.compile(r"[\(\[]([^\)\]]+)[\)\]]\s*$", re.IGNORECASE)
 
+#: The DASH form: "Song -Japanese ver.-", "Song - Deluxe Edition".
+#:
+#: ⚠️ A DOCUMENTED GAP. ``_EDITION_ANNOTATION_RE`` requires brackets, so every
+#: edition decision in the app was blind to a dash-delimited marker — reported as
+#: "-Japanese ver.- is searched as written". ``_NEUTRAL_STUDIO_ANNOTATIONS``
+#: already lists the language tags (``jp ver``, ``japanese ver``, …); only the
+#: extraction could not reach them.
+#:
+#: Deliberately requires the LEADING dash and a trailing one, so a title that
+#: merely contains a hyphen ("Song - Part 2") is not treated as an annotation.
+_EDITION_ANNOTATION_DASH_RE = re.compile(
+    r"\s+-\s*([^-]+?)\s*\.?\s*-?\s*$", re.IGNORECASE
+)
+
 
 def extract_edition_annotation(title: str) -> str | None:
     """Return the normalized trailing edition annotation, or None."""
     if not title:
         return None
+
     m = _EDITION_ANNOTATION_RE.search(title)
-    if not m:
-        return None
-    inner = m.group(1).strip().lower()
+    inner = m.group(1).strip().lower() if m else ""
+    if not inner:
+        dash = _EDITION_ANNOTATION_DASH_RE.search(title)
+        if not dash:
+            return None
+        inner = dash.group(1).strip().lower()
     if not any(kw in inner for kw in _EDITION_ANNOTATION_KEYWORDS):
         return None
     return re.sub(r"[^a-z0-9]+", " ", inner).strip()
@@ -1762,6 +1827,89 @@ def normalize_title_for_lastfm(title: str) -> str:
 def normalize_artist(value: str) -> str:
     value = strip_featured_artist(value)
     return normalize_string(value)
+
+
+def artist_name_key(value: str) -> str:
+    """Comparison key for artist NAMES: ``normalize_artist`` with all spaces removed.
+
+    ⚠️ WHY THIS IS SEPARATE FROM ``normalize_artist``.
+
+    ``normalize_string`` collapses whitespace to one space but never REMOVES it,
+    so ``"Pitch Shifter"`` and ``"Pitchshifter"`` never compared equal — and that
+    is the reported false rejection: the peer's folder was
+    ``Pitchshifter/Pitch Shifter``, three downloads were deleted and the peer
+    blocked for an "artist mismatch", and the queue's own rows use both spellings.
+
+    ``normalize_artist`` is used for STORAGE and for dozens of identity
+    comparisons, so it must keep the space (`"Simon & Garfunkel"` is not
+    `"Simonandgarfunkel"` for display purposes). Only the SEARCH/MATCHING
+    comparisons adopt this key, where the question is "is this the same act?"
+    and the spacing of a band's name is not evidence either way.
+
+    Returns ``""`` for an empty input, so callers can skip it.
+    """
+    return re.sub(r"\s+", "", normalize_artist(value))
+
+
+#: Separators between two credited artists. Deliberately does NOT include a bare
+#: ``&`` inside a name handled below — it splits, and "AC/DC" is protected by
+#: requiring the ``/`` to be flanked by whitespace.
+_ARTIST_CREDIT_SPLIT_RE = re.compile(
+    r"\s*(?:,|;|\s&\s|\s+/\s+|\s&\s|\band\b)\s*",
+    re.IGNORECASE,
+)
+
+
+def split_artist_credit(value: str) -> list[str]:
+    """Split a combined artist credit into the individual artists.
+
+    ``"BTOB, iKON, SF9, THE BOYZ, Stray Kids & ATEEZ"`` -> six names, and
+    ``"Powerwolf feat. X"`` -> ``["Powerwolf", "X"]``.
+
+    ⚠️ THE POINT IS THE SEARCH QUERY. A combined credit was sent to Soulseek
+    verbatim, so the correct file (found under ``BTOB``) was rejected for
+    ``no_artist_evidence`` — no result's artist ever equals the whole joined
+    string. Searching the PRIMARY credit and accepting a match on ANY credit
+    fixes both directions.
+
+    A guest credit is split on its marker (`feat.`/`ft.`/`featuring`/`with`/
+    `w/`) by the same regexes the rest of the app uses, rather than a fourth
+    copy. Order is preserved: ``[0]`` is the primary artist.
+
+    Returns ``[]`` for an empty input. A single artist comes back as a
+    one-element list, so callers never need a fallback branch.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return []
+
+    # Guest credits first: "Powerwolf feat. X & Y" must not become
+    # ["Powerwolf", "X", "Y"] with the feature treated as a peer credit.
+    guest = re.split(
+        r"\s+(?:\[|\()?\s*(?:feat\.?|ft\.?|featuring|with|w/)\s+",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    names: list[str] = []
+    for part in guest:
+        for name in _ARTIST_CREDIT_SPLIT_RE.split(part or ""):
+            cleaned = str(name or "").strip(" .-")
+            # A guest-credit bracket leaves debris like "X)" / "[X".
+            cleaned = cleaned.strip("[]()")
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+    return names
+
+
+def primary_artist_credit(value: str) -> str:
+    """The FIRST credited artist, or the input unchanged.
+
+    The search query uses this: a combined credit searches as its primary act,
+    which is what a file is actually filed under.
+    """
+    names = split_artist_credit(value)
+    return names[0] if names else str(value or "").strip()
 
 
 def clean_artist_name_for_storage(value: str) -> str:

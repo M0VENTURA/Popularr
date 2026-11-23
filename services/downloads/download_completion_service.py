@@ -2093,11 +2093,17 @@ def _sync_download_progress(active: list[dict[str, Any]], downloading: list[dict
         if not transfer:
             continue
         try:
-            from db.repositories.queue import update_queue_item
-            update_queue_item(
+            from db.repositories.queue import record_download_progress
+            record_download_progress(
                 item.get("id"),
                 progress=transfer.get("progress"),
                 speed=transfer.get("averageSpeed"),
+                # The byte count drives ``slskd_progress_at``: if these bytes
+                # differ from the last observation the marker is refreshed, and
+                # if they do not it is left to age. That is what makes a
+                # frozen transfer detectable at all — ``updated_at`` cannot
+                # distinguish "bytes moved" from "row touched".
+                bytes_seen=transfer.get("bytesTransferred"),
             )
         except Exception:
             pass

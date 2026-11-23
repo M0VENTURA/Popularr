@@ -13,11 +13,12 @@ Architecture:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Mapping, Tuple
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db.engine import db_session
 from db.repositories import queue as queue_repository
@@ -30,7 +31,12 @@ logger = structlog.get_logger(__name__)
 # =============================================================================
 
 _STUCK_SEARCH_SECONDS = 300
-_STUCK_DOWNLOAD_SECONDS = 6 * 3600
+#: Was 6 HOURS. Nothing touched a downloading row for that long, so a frozen
+#: transfer survived a whole working day — and because this hook runs late in
+#: maintenance (and maintenance could be starved by a slow filesystem walk), the
+#: 6-hour window was routinely postponed further. One hour is still comfortably
+#: longer than any legitimate single-file transfer.
+_STUCK_DOWNLOAD_SECONDS = 3600
 _STUCK_MOVING_MINUTES = 10
 
 
@@ -43,14 +49,52 @@ def _retry_delay_minutes() -> int:
         return 30
 
 
+def _no_progress_window_seconds() -> float:
+    """The no-progress window, in seconds (see ``slskd_reaper_service``).
+
+    Read here too so BOTH stuck-item paths agree on what "frozen" means: the
+    reaper cancels the transfer while this sweeper fails the row, and a
+    disagreement would leave each one waiting for the other.
+    """
+    try:
+        from services.downloads.slskd_reaper_service import _no_progress_minutes
+
+        return float(_no_progress_minutes()) * 60.0
+    except Exception:
+        return 20.0 * 60.0
+
+
 def reset_abandoned_items() -> dict[str, int]:
-    """Reset items left in 'searching'/'processing' by a previous worker.
+    """Reset items left mid-flight by a previous worker.
 
     Run at worker startup. Rows that already have a downloaded file are left
     alone: putting one back to 'queued' would make it unclaimable (the claim
     requires ``file_path IS NULL``) and it would sit in the queue forever.
+
+    ⚠️ ``downloading`` IS INCLUDED, and that is what clears the reported "nine
+    queue items have been 'downloading' with no further progress for about 3
+    days. Every worker restart reports downloading=9."
+
+    A ``downloading`` row's transfer belongs to the PREVIOUS process: slskd is
+    holding it, but nobody is polling it. Nothing else in the app touches that
+    status at startup, so the count was reported verbatim by every restart and
+    the only escape was a 6-hour ``cleanup_stuck_items`` pass that maintenance
+    starvation could postpone indefinitely. Two cases are resettable and one is
+    not:
+
+    * no ``found_filename`` yet — the row was marked downloading before a
+      transfer was even recorded (``download_pipeline_service`` writes the
+      status before the enqueue is confirmed), so there is nothing to resume;
+    * a ``found_filename`` that is not on disk — the download was deleted,
+      moved or never landed, so the row is waiting for a file that will never
+      arrive. This is the "deleted on 20 Nov but never reset" case.
+
+    A ``found_filename`` that IS on disk is left alone: the completion pass will
+    import it, and resetting it to ``queued`` would re-download a file that is
+    already here.
     """
     reset = 0
+    downloading_reset = 0
     try:
         with db_session() as session:
             result = session.execute(
@@ -63,12 +107,76 @@ def reset_abandoned_items() -> dict[str, int]:
                 """)
             )
             reset = int(result.rowcount or 0)
+
+        # ── downloading ──────────────────────────────────────────────────
+        # Existence is checked in Python: ``found_filename`` is a REMOTE path
+        # (sometimes relative to the music root), so a SQL-side test is not
+        # possible and a wrong one would silently re-download live transfers.
+        try:
+            from services.metadata.tag_file_service import resolve_music_file_path
+        except Exception:
+            resolve_music_file_path = None  # type: ignore[assignment]
+
+        with db_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT id, found_filename
+                    FROM download_queue
+                    WHERE status = 'downloading'
+                      AND file_path IS NULL
+                """)
+            ).fetchall() or []
+            candidates = [dict(r._mapping) for r in rows]
+
+        abandoned_ids: list[int] = []
+        for row in candidates:
+            found = str(row.get("found_filename") or "").strip()
+            if not found:
+                abandoned_ids.append(row["id"])
+                continue
+            on_disk = False
+            if resolve_music_file_path is not None:
+                try:
+                    resolved = resolve_music_file_path(found)
+                    on_disk = bool(resolved) and os.path.isfile(resolved)
+                except Exception:
+                    on_disk = False
+            if not on_disk:
+                abandoned_ids.append(row["id"])
+
+        if abandoned_ids:
+            with db_session() as session:
+                result = session.execute(
+                    text("""
+                        UPDATE download_queue
+                        SET status = 'queued',
+                            failure_reason = 'reset: download abandoned by a previous worker',
+                            found_filename = NULL,
+                            slskd_transfer_id = NULL,
+                            slskd_bytes_seen = NULL,
+                            slskd_progress_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE CAST(id AS TEXT) IN :ids
+                    """).bindparams(bindparam("ids", expanding=True)),
+                    {"ids": [str(i) for i in abandoned_ids]},
+                )
+                downloading_reset = int(result.rowcount or 0)
+
         if reset:
             logger.warning("Reset abandoned queue items at worker startup", count=reset)
-        return {"abandoned_reset": reset}
+        if downloading_reset:
+            logger.warning(
+                "Reset abandoned DOWNLOADING queue items at worker startup",
+                count=downloading_reset,
+                queue_ids=sorted(abandoned_ids)[:20],
+            )
+        return {
+            "abandoned_reset": reset,
+            "downloading_reset": downloading_reset,
+        }
     except Exception as exc:
         logger.exception("reset_abandoned_items failed", error=str(exc))
-        return {"abandoned_reset": 0, "error": str(exc)}
+        return {"abandoned_reset": 0, "downloading_reset": 0, "error": str(exc)}
 
 
 _STUCK_COLUMNS = (
@@ -182,13 +290,27 @@ def cleanup_stuck_items() -> dict[str, Any]:
                 )
 
         # ── downloading ──────────────────────────────────────────────────
+        #
+        # TWO clocks, deliberately. ``updated_at`` catches a row nothing has
+        # touched at all; ``slskd_progress_at`` catches the case the report
+        # describes — a progress poll keeps touching the row (so ``updated_at``
+        # stays fresh) while the byte count never moves. Whichever is older
+        # wins, and ``slskd_bytes_seen``/``slskd_progress_at`` are cleared so the
+        # retry starts with a clean marker.
         where = (
             "status = 'downloading' "
-            "AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds)"
+            "AND ("
+            "updated_at < CURRENT_TIMESTAMP - make_interval(secs => :seconds) "
+            "OR (slskd_progress_at IS NOT NULL "
+            "AND slskd_progress_at < CURRENT_TIMESTAMP - make_interval(secs => :no_progress))"
+            ")"
         )
-        select_params = {"seconds": _STUCK_DOWNLOAD_SECONDS}
-        update_params = {
+        select_params = {
             "seconds": _STUCK_DOWNLOAD_SECONDS,
+            "no_progress": int(_no_progress_window_seconds()),
+        }
+        update_params = {
+            **select_params,
             "delay": _retry_delay_minutes(),
             # ``next_retry_at`` is an explicit UTC wall clock everywhere else;
             # the session's CURRENT_TIMESTAMP is not assumed.
@@ -206,6 +328,9 @@ def cleanup_stuck_items() -> dict[str, Any]:
                     # Wait before the auto-retry picks it up, instead of
                     # re-queuing it on the very next cycle.
                     "next_retry_at = :now_utc + make_interval(mins => :delay), "
+                    # The next attempt is a different candidate; a stale marker
+                    # would reap it instantly.
+                    "slskd_bytes_seen = NULL, slskd_progress_at = NULL, "
                     "updated_at = CURRENT_TIMESTAMP WHERE " + where
                 ),
                 update_params,

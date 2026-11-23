@@ -2438,6 +2438,14 @@ def get_slskd_timeouts() -> dict[str, Any]:
         "long_retry_delay_minutes": int(slskd_config.get("long_retry_delay_minutes", 1440)),
         "remotely_queued_timeout_minutes": int(slskd_config.get("remotely_queued_timeout_minutes", 60)),
         "active_state_timeout_minutes": int(slskd_config.get("active_state_timeout_minutes", 240)),
+        # How long a transfer may move NO BYTES before it counts as dead. The
+        # ``*_timeout_minutes`` above all measure a timestamp that every progress
+        # poll refreshes, so a peer that stops sending after accepting the
+        # request is invisible to them; this is the only window that sees it.
+        # ``0`` disables the check.
+        "no_progress_timeout_minutes": float(
+            slskd_config.get("no_progress_timeout_minutes", 20)
+        ),
         "inter_item_delay_seconds": int(slskd_config.get("inter_item_delay_seconds", 5)),
         "state_timeouts": slskd_config.get("state_timeouts", {
             "Requested": 30,

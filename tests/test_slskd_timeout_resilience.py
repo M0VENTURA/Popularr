@@ -339,15 +339,36 @@ class TestSoulseekCandidateDurationScoring:
 # ---------------------------------------------------------------------------
 
 class TestPipelineYearGuard:
-    def test_year_mismatch_rejects(self):
-        from services.downloads.download_pipeline_service import _year_mismatch_rejects
-        assert _year_mismatch_rejects("Artist - Album [2012]/track.mp3", "2024") is True
-        assert _year_mismatch_rejects("Artist - Album [2024]/track.mp3", "2024") is False
-        assert _year_mismatch_rejects("Artist - Album (2012)/track.mp3", "2011") is False
-        assert _year_mismatch_rejects("Artist - Album [2012]/track.mp3", None) is False
+    """A year disagreement is a PENALTY, not a rejection.
 
-    def test_scorer_rejects_wrong_year_candidate(self):
-        from services.downloads.download_pipeline_service import _score_result
+    It used to be a hard reject and cost 670 candidates whose artist AND title
+    matched strongly — Völund Smed "Österled" / "Öga För Öga" / "Fast Besluten",
+    Æther Realm, Truth Corroded — because the peer held a different release of
+    the same album (a 2017 edition against the 2003 original).
+    """
+
+    def test_year_mismatch_is_a_penalty(self):
+        from services.downloads.download_pipeline_service import (
+            YEAR_MISMATCH_PENALTY,
+            _year_mismatch_penalty,
+        )
+
+        assert _year_mismatch_penalty("Artist - Album [2012]/track.mp3", "2024") == (
+            YEAR_MISMATCH_PENALTY
+        )
+        # Within a year is not a disagreement at all.
+        assert _year_mismatch_penalty("Artist - Album [2024]/track.mp3", "2024") == 0.0
+        assert _year_mismatch_penalty("Artist - Album (2012)/track.mp3", "2011") == 0.0
+        assert _year_mismatch_penalty("Artist - Album [2012]/track.mp3", None) == 0.0
+
+    def test_scorer_penalises_wrong_year_candidate(self):
+        """The wrong-year candidate still scores, just LOWER — so an
+        artist+title-strong file is downloadable when it is the only match."""
+        from services.downloads.download_pipeline_service import (
+            YEAR_MISMATCH_PENALTY,
+            _score_result,
+        )
+
         good = _score_result(
             {"filename": "Spice Girls - Holler (2000).mp3", "bitrate": 320},
             "Spice Girls", "Holler", expected_year="2000",
@@ -357,5 +378,10 @@ class TestPipelineYearGuard:
             "Spice Girls", "Holler", expected_year="2000",
         )
         assert good > 0
-        assert bad == 0.0
+        assert bad > 0, "a year difference must not discard a strong match"
+        assert good - bad == YEAR_MISMATCH_PENALTY
+        assert bad >= 45.0, (
+            "the penalised score must still clear the acceptance threshold, or "
+            "the penalty is a rejection in disguise"
+        )
 

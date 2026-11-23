@@ -81,11 +81,15 @@ class TestAMatchIsLoggedWhenItSucceeds:
         """CONTROL — the WARNING summary must survive (it is the other half)."""
         src = PIPELINE.read_text(encoding="utf-8")
         assert "No result met min_score" in src
-        for gate in ("year_mismatch", "no_artist_evidence", "title_mismatch",
-                     "album_mismatch"):
+        for gate in ("no_artist_evidence", "title_mismatch", "album_mismatch"):
             assert f'_note_reject(rejects, "{gate}")' in src, (
                 f"the {gate} gate no longer reports why it rejected"
             )
+        # The year is a PENALTY now, not a gate — it must still be counted so the
+        # summary explains a lower score, but under its own name.
+        assert '_note_reject(rejects, "year_penalty")' in src, (
+            "the year penalty is no longer reported in the miss summary"
+        )
         # ``below_floor`` is counted directly rather than through the helper.
         assert 'rejects["below_floor"] = below_floor' in src
 

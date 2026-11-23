@@ -304,6 +304,80 @@ _SLSKD_TRACKNUM_RE = re.compile(r"\s+-\s+\d{1,3}\s+-\s+")
 
 _DEFAULT_BACKOFF_TIER_HOURS = (4, 12, 24)
 
+#: Score cost of a year disagreement.
+#:
+#: Measured, not guessed. An exact artist+title+album match with a 1991-vs-2019
+#: year difference scores 50.0; against ``min_score`` = 45.0 that left only 5
+#: points of headroom, so an 8-point penalty silently turned the "penalty" back
+#: into the rejection it was meant to replace. 4.0 keeps such a file selectable
+#: (46.0) while still guaranteeing a correctly-dated copy wins the tie.
+YEAR_MISMATCH_PENALTY = 4.0
+
+#: How many searches IN A ROW may return zero results before the service is
+#: treated as down rather than the music as absent.
+#:
+#: Reported: 34 searches returned 0 results between 05:00 and 06:59, for tracks
+#: that are trivial to find (Bullet for My Valentine, Rise Against, Le Tigre),
+#: and all of them were then logged as "persistent miss, retrying Thursday 27
+#: Nov". Soulseek had been disconnected for 8 hours the day before and slskd was
+#: still recovering. A per-ITEM miss cannot see that; a streak can.
+_EMPTY_STREAK_LIMIT = int(os.environ.get("SLSKD_EMPTY_STREAK_LIMIT", "5"))
+
+#: Consecutive zero-result searches, PROCESS-WIDE, reset on any result. Kept on
+#: the module because the streak must span items: five separate no-result tracks
+#: are far more likely to be an outage than five unlucky searches.
+_empty_search_streak = 0
+_empty_streak_tripped_at: float | None = None
+
+
+def _bump_empty_streak(had_results: bool) -> int:
+    """Update the process-wide empty-search streak; returns the new value."""
+    global _empty_search_streak, _empty_streak_tripped_at
+
+    if had_results:
+        _empty_search_streak = 0
+        _empty_streak_tripped_at = None
+        return 0
+
+    _empty_search_streak += 1
+    if _empty_search_streak >= _EMPTY_STREAK_LIMIT and _empty_streak_tripped_at is None:
+        _empty_streak_tripped_at = time.time()
+        logger.warning(
+            "Search service returned no results repeatedly — pausing searches "
+            "instead of recording misses",
+            streak=_empty_search_streak,
+            limit=_EMPTY_STREAK_LIMIT,
+        )
+        try:
+            from helpers.logging_config import log_activity
+
+            log_activity(
+                "infrastructure",
+                f"{_empty_search_streak} consecutive searches returned nothing — "
+                "treating the search service as unavailable rather than recording misses.",
+                streak=_empty_search_streak,
+            )
+        except Exception:
+            pass
+    return _empty_search_streak
+
+
+def _search_service_looks_down() -> bool:
+    """True while the empty-search streak is at or past its limit.
+
+    A single search is then SKIPPED rather than attempted-and-recorded-as-a-miss,
+    so an outage cannot consume retry attempts or stamp a weekly miss date.
+    """
+    return _empty_search_streak >= _EMPTY_STREAK_LIMIT
+
+
+def reset_empty_search_streak() -> None:
+    """Clear the streak — exposed so a restart or a config change can re-probe."""
+    global _empty_search_streak, _empty_streak_tripped_at
+
+    _empty_search_streak = 0
+    _empty_streak_tripped_at = None
+
 
 def _search_backoff_hours() -> tuple[int, ...]:
     try:
@@ -525,16 +599,67 @@ def build_search_query(item: dict) -> str:
     title = (item.get("title") or "").strip()
     stored = (item.get("search_query") or "").strip()
 
+    # ── A combined credit searches as its PRIMARY artist ──────────────────
+    # "BTOB, iKON, SF9, THE BOYZ, Stray Kids & ATEEZ" is not a band name; the
+    # file is filed under BTOB. Sending the joined string matched nothing and
+    # the correct result was then rejected for `no_artist_evidence`.
+    try:
+        from helpers.normalization_service import primary_artist_credit
+
+        artist = primary_artist_credit(artist) or artist
+    except Exception:
+        pass
+
+    # ── Edition text must not be part of the QUERY ───────────────────────
+    # "(20th Anniversary Brexit Edition)", "(acoustic Alt. version)",
+    # "-Japanese ver.-" were all sent verbatim, and a peer names a file after
+    # the bare title. The annotated form survives in the fallback list (see
+    # ``_build_fallback_search_queries``), so it still disambiguates.
+    #
+    # ⚠️ ``strip_album_edition_marker`` ONLY — not
+    # ``normalize_title_for_compare``, which lowercases. A search query is sent
+    # to Soulseek as typed; lowercasing it is a separate behaviour change.
+    bare_title = title
+    try:
+        from helpers.normalization_service import strip_album_edition_marker
+
+        bare_title = (strip_album_edition_marker(title) or title).strip() or title
+    except Exception:
+        bare_title = title
+
     if artist.lower() in _GENERIC_COMPILATION_ARTISTS:
-        query = title or stored
+        query = bare_title or stored
     else:
         clean_artist = _FEAT_SUFFIX_RE.sub("", artist).strip()
+
+        # ── A RELEASE QUEUED AS A TRACK ──────────────────────────────────
+        # Reported: "Turmion Kätilöt – Resodance" and "Ice Nine Kills – A Very
+        # Vicious Christmas" have title == album, so every result was rejected
+        # as `title_mismatch` even though the correct EP was found. Searching
+        # `Artist - Album` is the honest reading of such a row: it is a release,
+        # not a track, and it is at least findable.
+        album = (item.get("album") or "").strip()
+        _title_is_the_album = bool(
+            album
+            and _sanitize_slskd_query(album).casefold()
+            == _sanitize_slskd_query(bare_title).casefold()
+            and not str(item.get("duration") or "").strip()
+        )
+
         if stored:
             query = stored
+        elif _title_is_the_album and clean_artist:
+            logger.warning(
+                "Queue item's title is its album name — searching the release",
+                queue_id=item.get("id"),
+                artist=artist,
+                title=title,
+            )
+            query = f"{clean_artist} - {bare_title}"
         elif clean_artist:
-            query = f"{clean_artist} - {title}"
+            query = f"{clean_artist} - {bare_title}"
         else:
-            query = title
+            query = bare_title
 
     return _sanitize_slskd_query(query)
 
@@ -640,6 +765,13 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
 
     _add(title)
 
+    # The FULL annotated title, LAST. ``build_search_query`` searches the bare
+    # title because a peer names a file after it; the edition text is only
+    # useful to DISAMBIGUATE between results, so it belongs at the end of the
+    # fallback list rather than at the front of the query.
+    if artist:
+        _add(f"{artist} - {title}")
+
     stripped_all = _strip_all_query_punctuation_for_slskd(primary_query)
     if stripped_all:
         _add(stripped_all)
@@ -647,18 +779,33 @@ def _build_fallback_search_queries(item: dict, primary_query: str) -> list[str]:
     return fallbacks[:_MAX_FALLBACKS]
 
 
-def _year_mismatch_rejects(filename: str, expected_year: Any) -> bool:
+def _year_mismatch_penalty(filename: str, expected_year: Any) -> float:
+    """Points to subtract when a candidate's year disagrees with the request.
+
+    ⚠️ THIS USED TO BE A HARD REJECT (670 of them). The reported cases —
+    Völund Smed "Österled" / "Öga För Öga" / "Fast Besluten", Æther Realm,
+    Truth Corroded — all had the artist AND title matching strongly; the peer
+    simply held a different release of the same album (a 2017 edition against the
+    2003 original), so the year was the ONLY disagreement and the file was
+    discarded.
+
+    A year is weak evidence compared to a name. It is now a PENALTY: large enough
+    that a correctly-dated candidate always wins the tie, small enough that a
+    strong artist+title match still clears ``min_score`` (45.0) on its own.
+    """
     if not expected_year:
-        return False
+        return 0.0
     year_str = re.search(r"\d{4}", str(expected_year))
     if not year_str:
-        return False
+        return 0.0
     queue_year = int(year_str.group(0))
     path_year_match = re.search(r"[\(\[]((?:19|20)\d{2})[\)\]]", str(filename or ""))
     if not path_year_match:
-        return False
+        return 0.0
     path_year = int(path_year_match.group(1))
-    return abs(queue_year - path_year) > 1
+    if abs(queue_year - path_year) <= 1:
+        return 0.0
+    return YEAR_MISMATCH_PENALTY
 
 
 def _note_reject(rejects: dict[str, int] | None, reason: str) -> None:
@@ -701,10 +848,16 @@ def _score_result(
     filename = str(result.get("filename", ""))
     parts = _parse_filename_parts(filename)
 
-    if _year_mismatch_rejects(filename, expected_year):
-        logger.debug("Rejected candidate — year mismatch", filename=filename[:180], expected_year=expected_year)
-        _note_reject(rejects, "year_mismatch")
-        return 0.0
+    # A year disagreement is a PENALTY, not a rejection — see
+    # ``_year_mismatch_penalty``. Applied to the final score below.
+    _year_penalty = _year_mismatch_penalty(filename, expected_year)
+    if _year_penalty:
+        logger.debug(
+            "Year differs — penalising, not rejecting",
+            filename=filename[:180], expected_year=expected_year,
+            penalty=_year_penalty,
+        )
+        _note_reject(rejects, "year_penalty")
 
     exp_artist = _sanitize_slskd_query(expected_artist or "")
     exp_title = _sanitize_slskd_query(expected_title or "")
@@ -723,10 +876,29 @@ def _score_result(
     from helpers.config_helpers import _FEAT_SUFFIX_RE
     credit_artist = _FEAT_SUFFIX_RE.sub("", expected_artist or "").strip() or expected_artist
 
-    art_score = _similarity(str(parts.get("artist") or ""), credit_artist)
+    # ⚠️ A COMBINED CREDIT IS SEVERAL ARTISTS, AND A FILE NAMES ONE OF THEM.
+    #
+    # The reported case: "BTOB, iKON, SF9, THE BOYZ, Stray Kids & ATEEZ" was
+    # searched and scored as that ONE string, so the correct BTOB file was
+    # rejected for ``no_artist_evidence`` — no candidate's artist ever equals the
+    # whole joined credit. Score against the strongest single credit.
+    try:
+        from helpers.normalization_service import split_artist_credit
+
+        credit_names = split_artist_credit(credit_artist) or [credit_artist]
+    except Exception:
+        credit_names = [credit_artist]
+
+    art_score = max(
+        (_similarity(str(parts.get("artist") or ""), name) for name in credit_names),
+        default=0.0,
+    )
     if art_score > 0.7:
         score += 30 * min(1.0, art_score)
-    elif _normalise(credit_artist) in _normalise(filename):
+    elif any(
+        _normalise(name) and _normalise(name) in _normalise(filename)
+        for name in credit_names
+    ):
         score += 20
 
     parsed_artist = str(parts.get("artist") or "")
@@ -829,7 +1001,22 @@ def _score_result(
     }:
         gate_artist = credit_artist
         norm_gate = _normalise(gate_artist)
-        
+
+        # The gate must accept a match on ANY credited artist, for the same
+        # reason the score does: the file is named after one of them.
+        try:
+            from helpers.normalization_service import (
+                artist_name_key as _artist_key,
+                split_artist_credit as _split_credits,
+            )
+
+            _gate_keys = [
+                _artist_key(n) for n in (_split_credits(gate_artist) or [gate_artist])
+            ]
+        except Exception:
+            _gate_keys = []
+        _gate_keys = [k for k in _gate_keys if k]
+
         norm_filename = _normalise(filename)
         path_scope = norm_filename
         if parsed_title:
@@ -846,11 +1033,32 @@ def _score_result(
             if len(w) >= 3
         ]
 
+        # "Pitch Shifter" vs "Pitchshifter": the key ignores spacing entirely,
+        # which is the reported false "artist mismatch" (the peer's folder was
+        # literally "Pitchshifter/Pitch Shifter").
+        #
+        # ⚠️ Only the REQUESTED artist's keys count. Testing the PARSED artist
+        # against the filename is always true — it is the filename — and it
+        # would accept "A Pretty Song - Heaven Knows.flac" for "The Pretty
+        # Reckless", which is the exact wrong-artist grab this gate exists for.
+        try:
+            from helpers.normalization_service import artist_name_key as _key
+
+            _scope_key = re.sub(r"\s+", "", _normalise(artist_scope))
+        except Exception:
+            _scope_key = ""
+
+        _key_evidenced = bool(
+            _scope_key
+            and any(k and k in _scope_key for k in _gate_keys)
+        )
+
         if _artist_script_ambiguous:
             artist_evidenced = (
                 art_score >= 0.4
                 or _title_core_match
                 or norm_gate in norm_filename
+                or _key_evidenced
                 or _normalise(parsed_artist) in norm_filename
                 or (
                     _HANGUL_CJK_RE.search(norm_gate or "")
@@ -860,6 +1068,7 @@ def _score_result(
         else:
             artist_evidenced = (
                 art_score >= 0.6
+                or _key_evidenced
                 or norm_gate in _normalise(artist_scope)
                 or (len(significant_words) >= 2 and all(w in artist_scope_tokens for w in significant_words))
                 or (len(artist_words_3plus) >= 2 and all(w in artist_scope_tokens for w in artist_words_3plus))
@@ -1046,6 +1255,10 @@ def _score_result(
                 score += 3
         except (TypeError, ValueError):
             pass
+
+    # The year disagreement, applied last so it can never be masked by a bonus.
+    if _year_penalty:
+        score -= _year_penalty
 
     return round(score, 1)
 
@@ -1365,6 +1578,7 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 _rejected_dropped += _dropped
                 all_results.extend(results)
                 consecutive_empty = consecutive_empty + 1 if not results else 0
+                _bump_empty_streak(bool(results))
 
                 best = _select_best_result(
                     results,
@@ -1413,6 +1627,31 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 duration_seconds=elapsed,
                 notes="no_results",
             )
+
+            # ⚠️ AN OUTAGE MUST NOT BECOME A MISS.
+            #
+            # 34 searches returned nothing in two hours for trivially findable
+            # tracks, and every one was stamped "persistent miss, retrying
+            # Thursday 27 Nov" — a wasted week each, and a retry_count that
+            # pushed them past the backoff tiers. When the streak says the
+            # service is down, wait instead of scheduling a miss: the same shape
+            # as ``search_disconnected``, which deliberately does not count an
+            # attempt.
+            if _search_service_looks_down():
+                log_unified(
+                    f"[QUEUE] {expected_artist} - {expected_title} → search "
+                    f"service unavailable ({_empty_search_streak} empty in a row), "
+                    "not counted as a miss"
+                )
+                _log_queue_event(
+                    "queued",
+                    f"{expected_artist} - {expected_title} → search service "
+                    "unavailable; retry shortly",
+                    queue_id,
+                )
+                search_disconnected(item, queue_id, expected_artist, expected_title)
+                return {"success": False, "status": "search_service_down", "skipped": True}
+
             log_unified(f"[QUEUE] {expected_artist} - {expected_title} → failed: no_results ({elapsed:.0f}s)")
             _log_queue_event("failed", f"{expected_artist} - {expected_title} → failed: no_results ({elapsed:.0f}s)", queue_id)
             _schedule_search_retry(queue_id, item, f"no_results ({elapsed:.0f}s)")

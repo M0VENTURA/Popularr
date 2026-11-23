@@ -75,6 +75,7 @@ UPDATE_ALLOWED_COLUMNS = frozenset({
     "file_path", "matched_file_path", "music_file_path", "found_filename",
     "progress", "speed",
     "slskd_username", "slskd_transfer_id", "is_manual_download",
+    "slskd_bytes_seen", "slskd_progress_at",
     "retry_count", "retry_delay_minutes", "next_retry_at",
     "failure_reason",
     "release_date",
@@ -302,6 +303,77 @@ def update_queue_item(queue_id: int, **kwargs: Any) -> dict[str, Any] | None:
     except Exception as e:
         logger.error("Update queue item failed", queue_id=queue_id, error=str(e))
         return None
+
+
+def record_download_progress(
+    queue_id: int,
+    *,
+    progress: Any = None,
+    speed: Any = None,
+    bytes_seen: Any = None,
+) -> bool:
+    """Sync a downloading row's progress WITHOUT mis-driving its staleness clock.
+
+    ⚠️ THIS IS THE WHOLE POINT OF THE ``slskd_progress_at`` COLUMN.
+
+    ``update_queue_item`` stamps ``updated_at = CURRENT_TIMESTAMP`` on every
+    write, and every stale-detection path reads ``updated_at``. So a progress
+    poll that learned nothing still refreshed the clock, and a transfer that had
+    stopped moving bytes looked alive forever — the reported "nine queue items
+    are 'downloading' with no further progress for about 3 days".
+
+    ``slskd_bytes_seen`` / ``slskd_progress_at`` are therefore written ONLY when
+    the observed byte count CHANGES. An unchanged poll updates ``progress`` and
+    ``speed`` (for the UI) but leaves the marker alone, so it ages.
+
+    Returns ``True`` when the marker moved.
+    """
+    if not queue_id:
+        return False
+
+    updates: dict[str, Any] = {}
+    if progress is not None:
+        updates["progress"] = progress
+    if speed is not None:
+        updates["speed"] = speed
+
+    set_clauses = [f"{key} = :{key}" for key in updates]
+    params: dict[str, Any] = dict(updates)
+    params["id"] = queue_id
+
+    # ``IS DISTINCT FROM`` is NULL-safe on PostgreSQL and handles the first
+    # observation (NULL -> value) without a second round trip.
+    moved_clause = ""
+    if bytes_seen is not None:
+        moved_clause = (
+            "slskd_bytes_seen IS DISTINCT FROM :bytes_seen"
+        )
+        set_clauses.extend([
+            "slskd_bytes_seen = :bytes_seen",
+            "slskd_progress_at = CURRENT_TIMESTAMP",
+        ])
+        params["bytes_seen"] = int(bytes_seen)
+
+    if not set_clauses:
+        return False
+
+    query = text(f"""
+        UPDATE download_queue
+        SET {', '.join(set_clauses)}
+        WHERE id = :id
+        {f'AND {moved_clause}' if moved_clause else ''}
+        RETURNING slskd_progress_at
+    """)
+
+    try:
+        with db_session() as session:
+            row = session.execute(query, params).fetchone()
+            return row is not None
+    except Exception as e:
+        logger.debug(
+            "Record download progress failed", queue_id=queue_id, error=str(e)
+        )
+        return False
 
 
 def claim_queue_item(queue_id: int, status: str = "searching") -> dict[str, Any] | None:

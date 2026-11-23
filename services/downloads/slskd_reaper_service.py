@@ -27,6 +27,32 @@ logger = structlog.get_logger(__name__)
 STALL_ZERO_PROGRESS_MINUTES = 15
 STALL_MID_TRANSFER_MINUTES = 60
 
+#: No BYTES moved for this long ⇒ the transfer is dead, whatever its state
+#: string says. This is deliberately much shorter than the arms above: a peer
+#: that has accepted the request and then stopped is the reported failure mode
+#: ("each track was sent to the same file from peer TheCookFeelsBraveNearby four
+#: times over about 7 hours"), and ``startedAt``/``updated_at`` can never expose
+#: it — see ``_no_progress_minutes``.
+DEFAULT_NO_PROGRESS_MINUTES = 20.0
+
+
+def _no_progress_minutes() -> float:
+    """The configured no-progress window, tolerant of a broken config.
+
+    ``0`` disables the check — returned as ``0.0`` so the caller's
+    ``age < window`` comparison is never true for a real age, and
+    :func:`_no_progress_stalled` exits early.
+    """
+    try:
+        from helpers.config_helpers import get_slskd_timeouts
+
+        value = get_slskd_timeouts().get("no_progress_timeout_minutes")
+        if value is not None:
+            return max(0.0, float(value))
+    except Exception:
+        pass
+    return DEFAULT_NO_PROGRESS_MINUTES
+
 
 def _started_minutes_ago(started_at: Any) -> Optional[float]:
     """Convert a slskd ``startedAt`` ISO timestamp to minutes since start.
@@ -41,6 +67,59 @@ def _started_minutes_ago(started_at: Any) -> Optional[float]:
         return (datetime.now(timezone.utc) - started).total_seconds() / 60
     except (TypeError, ValueError):
         return None
+
+
+def _marker_minutes_ago(marker: Any) -> Optional[float]:
+    """Minutes since the row's ``slskd_progress_at`` marker.
+
+    ``None`` means "no marker yet" — a first observation, or a row queued before
+    :mod:`036_download_queue_progress_marker`. Callers must fall back to the
+    older ``startedAt`` logic rather than treating it as stalled.
+    """
+    if not marker:
+        return None
+    if isinstance(marker, datetime):
+        when = marker
+    else:
+        try:
+            when = datetime.fromisoformat(str(marker).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() / 60
+
+
+def _no_progress_stalled(item: Optional[dict], transfer: dict) -> bool:
+    """True when the queue row has seen no new bytes for the configured window.
+
+    ⚠️ THIS IS THE ONLY CHECK THAT CAN SEE A FROZEN TRANSFER.
+
+    ``progress`` is a snapshot and ``startedAt`` is when the peer ACCEPTED the
+    request; neither changes when a peer stops sending. ``slskd_progress_at`` is
+    written only when ``bytesTransferred`` itself changes
+    (``db.repositories.queue.record_download_progress``), so it ages while the
+    transfer sits there. That is what turns the reported "same file from the same
+    peer four times in seven hours, no failure or timeout logged" into a
+    detectable stall.
+
+    Requires the owning queue row: without it there is no marker to read, so
+    callers keep the old ``startedAt`` behaviour.
+    """
+    if not item:
+        return False
+    window = _no_progress_minutes()
+    if window <= 0:
+        return False
+    age = _marker_minutes_ago(item.get("slskd_progress_at"))
+    if age is None:
+        return False
+    if age < window:
+        return False
+    # A genuinely finished transfer is not stalled; it is waiting for the
+    # completion pass to import it.
+    progress = int(transfer.get("progress") or 0)
+    return progress < 100
 
 
 def _normalise_path(path: Any) -> str:
@@ -93,7 +172,13 @@ def reap_stalled_transfers() -> dict[str, int]:
 
             progress = int(transfer.get("progress") or 0)
             speed = int(transfer.get("averageSpeed") or 0)
-            stalled = (
+
+            # Resolve the owning row FIRST: it carries the no-progress marker,
+            # and the whole point is that a frozen transfer must be reaped long
+            # before ``startedAt`` says 60 minutes.
+            item = _find_owning_item(transfer, active_items)
+
+            stalled = _no_progress_stalled(item, transfer) or (
                 progress <= 0 and age_minutes >= STALL_ZERO_PROGRESS_MINUTES
             ) or (
                 0 < progress < 100 and speed <= 0 and age_minutes >= STALL_MID_TRANSFER_MINUTES
@@ -135,7 +220,6 @@ def reap_stalled_transfers() -> dict[str, int]:
                     progress=progress,
                 )
 
-            item = _find_owning_item(transfer, active_items)
             if item:
                 if username and filename:
                     try:

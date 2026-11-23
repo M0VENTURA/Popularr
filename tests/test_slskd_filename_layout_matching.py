@@ -171,9 +171,22 @@ def test_wrong_artist_in_folder_is_still_rejected() -> None:
     assert _score("The Jesus and Mary Chain/Darklands/Heaven Knows.mp3", item) == 0.0
 
 
-def test_year_mismatch_is_still_rejected() -> None:
+def test_year_mismatch_is_penalised_not_rejected() -> None:
+    """A different year must LOWER the score, not discard the file.
+
+    Reported: Völund Smed, Æther Realm and Truth Corroded were all found with the
+    artist and title matching, but the peer held another release of the album, and
+    the year alone rejected them (670 candidates over four days).
+    """
+    from services.downloads.download_pipeline_service import YEAR_MISMATCH_PENALTY
+
     item = {"artist": "Metallica", "title": "Enter Sandman", "album": "Metallica", "year": 1991}
-    assert _score("Metallica/Metallica [2019]/01. Enter Sandman.mp3", item) == 0.0
+    wrong_year = _score("Metallica/Metallica [2019]/01. Enter Sandman.mp3", item)
+    right_year = _score("Metallica/Metallica [1991]/01. Enter Sandman.mp3", item)
+
+    assert wrong_year > 0.0, "a year difference must not reject a matching file"
+    assert right_year - wrong_year == YEAR_MISMATCH_PENALTY
+    assert right_year > wrong_year, "the correctly-dated copy must win"
 
 
 def test_select_best_result_picks_the_correct_file_from_a_mixed_pool() -> None:

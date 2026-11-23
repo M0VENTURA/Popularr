@@ -176,14 +176,48 @@ def delete_mismatched_download(
     item_id: str,
     reason: str,
 ) -> bool:
-    """Delete a mismatched downloaded file safely."""
+    """Delete a mismatched downloaded file safely.
+
+    ⚠️ THE QUEUE ROW IS RELEASED TOO. This helper used to delete the file and
+    touch nothing else, so a caller that used it instead of the completion
+    service's own ``_delete_mismatched_download`` left the row in
+    ``downloading`` forever — waiting for a file it had just deleted. The
+    reported "three Pitch Shifter tracks, deleted on 20 Nov but never reset" is
+    exactly that shape.
+
+    Deleting the wrong file is a FAILED ATTEMPT, not a neutral one, so the row is
+    failed through ``mark_failed`` — which re-queues it with a backoff rather
+    than leaving it mid-flight.
+    """
     downloads_root: str = resolve_downloads_dir()
-    return _safe_delete(
+    deleted = _safe_delete(
         file_path=file_path,
         item_id=item_id,
         reason=reason,
         root=downloads_root,
     )
+    if deleted:
+        _release_queue_row(item_id, reason)
+    return deleted
+
+
+def _release_queue_row(item_id: str, reason: str) -> None:
+    """Return a queue row to the retry cycle after its file was deleted."""
+    try:
+        queue_id = int(str(item_id))
+    except (TypeError, ValueError):
+        return
+    try:
+        from db.repositories.queue import mark_failed
+
+        mark_failed(queue_id, f"deleted: {reason}")
+    except Exception as exc:
+        logger.debug(
+            "Could not release queue row after deletion",
+            queue_id=queue_id,
+            reason=reason,
+            error=str(exc),
+        )
 
 
 # ==============================================================================
