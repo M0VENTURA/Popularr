@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlparse
 import structlog
 import yaml
 from quart import (
-    Blueprint, flash, jsonify, redirect, render_template, request,
+    Blueprint, flash, jsonify, make_response, redirect, render_template, request,
     Response, session, url_for,
 )
 from sqlalchemy import text
@@ -4560,6 +4560,43 @@ def _sanitize_config_sections(config: dict) -> dict:
                 api_services[service] = {}
 
     return cleaned
+
+
+@ui_bp.route("/config/export", methods=["GET"])
+async def config_export_route() -> Any:
+    """Download the configuration with every credential replaced by a marker.
+
+    An export exists to be SHARED — attached to a bug report, diffed between
+    installs, or kept as a snapshot before retuning the scoring. So passwords,
+    tokens, API keys and account names are replaced with ``<redacted>``; the
+    marker still distinguishes "configured" from "not configured", which is what
+    a support thread actually needs.
+
+    ``?format=yaml`` (the default) is diffable; ``?format=json`` is for tooling.
+    Both carry the same payload, including which settings differ from the shipped
+    defaults — the audit the page otherwise makes you do by hand.
+    """
+    from helpers.config_export import build_config_export
+
+    try:
+        config = read_config_from_disk()
+    except Exception as exc:
+        logger.warning("Config export could not read config", error=str(exc))
+        return jsonify({"error": "Could not read config.yaml"}), 500
+
+    payload = build_config_export(config)
+
+    fmt = str(request.args.get("format", "yaml")).strip().lower()
+    if fmt == "json":
+        return jsonify(payload)
+
+    body = yaml.safe_dump(payload, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    # Quart's ``make_response`` is a coroutine (unlike Flask's), so a sync view
+    # would return the coroutine and every header assignment would fail.
+    response = await make_response(body)
+    response.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
+    response.headers["Content-Disposition"] = 'attachment; filename="popularr-config-export.yaml"'
+    return response
 
 
 @ui_bp.route("/config/sandbox")

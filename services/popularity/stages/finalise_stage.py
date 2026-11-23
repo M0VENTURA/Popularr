@@ -2045,6 +2045,52 @@ def _assign_stars(
     return base_stars
 
 
+def star_rating_reason(track: dict[str, Any]) -> str:
+    """One human-readable line explaining the tier this track ended at.
+
+    The rules already write their verdict onto the track (``_force_floor``,
+    ``_album_curve_stars``, ``_live_reason``, ``_ratio_5star_reason``,
+    ``_era_5star``, ``_lock_honoured``, ``_dedicated_single_floor``) but only for
+    the log. This reads those SAME fields — it never re-derives a rating — so a
+    Preview can show why a change happened instead of a bare 4★ → 3★.
+
+    Order matches the documented rule order, so the first clause is the step that
+    actually decided the tier.
+    """
+    stars = int(track.get("stars") or 0)
+    parts: list[str] = []
+
+    confidence = str(track.get("single_confidence") or "").strip().casefold()
+    if confidence == "user":
+        return "5★ · user rating wins (never capped)"
+    if track.get("_lock_honoured"):
+        parts.append("catalogue-top lock honoured")
+    if int(track.get("_force_floor") or 0) == 5:
+        parts.append("forced 5★ (artist top % by raw listeners)")
+    elif int(track.get("_force_floor") or 0) == 4:
+        parts.append("floored at 4★ (artist top % by raw listeners)")
+    if track.get("_live_reason"):
+        parts.append(f"live album: {track['_live_reason']}")
+    if track.get("_album_curve_stars") is not None:
+        parts.append(f"album curve put it at {int(track['_album_curve_stars'])}★")
+    if track.get("_ratio_5star_reason"):
+        parts.append(f"album-shape gate: {track['_ratio_5star_reason']}")
+    if track.get("_dedicated_single_floor"):
+        parts.append("dedicated single floor 4★")
+    if confidence in ("high", "medium"):
+        parts.append(f"{confidence}-confidence single")
+    if track.get("_era_5star"):
+        parts.append("era-slot 5★ candidate")
+
+    album_z = track.get("_computed_album_z")
+    artist_z = track.get("_computed_artist_z")
+    if album_z is not None and artist_z is not None:
+        parts.append(f"album_z={float(album_z):.2f}, artist_z={float(artist_z):.2f}")
+
+    detail = "; ".join(parts) if parts else "z-band base tier"
+    return f"{stars}★ · {detail}"
+
+
 # ---------------------------------------------------------------------------
 # 3-step scaling model helpers
 # ---------------------------------------------------------------------------

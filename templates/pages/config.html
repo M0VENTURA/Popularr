@@ -127,6 +127,39 @@
         <!-- ===== TAB 1: SYSTEM & USERS ===== -->
         <div class="tab-pane fade show active" id="tab-system" role="tabpanel">
 
+  {# ── Export Settings ─────────────────────────────────────────────────────
+     Deliberately the FIRST card on this tab: it is a whole-config action, not
+     a setting, and it is what an operator reaches for before changing anything
+     (snapshot first) or when asking for support (attach the export).
+     Credentials and account names come out as "<redacted>" but the marker still
+     distinguishes "configured" from "not configured". #}
+  <div class="card shadow-sm mb-3" id="config-export">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-download"></i> Export Settings</h5>
+      <small class="text-muted">Every setting in this page as a file — safe to share</small>
+    </div>
+    <div class="card-body">
+      <p class="text-muted small mb-3">
+        Downloads the complete configuration: <strong>all</strong> settings, including the ones
+        still at their defaults, plus a list of which values differ from the shipped default.
+        Passwords, API keys, tokens and account names are replaced with
+        <code>&lt;redacted&gt;</code> — the marker still tells you whether one is configured, so the
+        file is safe to attach to a bug report. Usernames are masked for the same reason.
+      </p>
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        <a href="/config/export" class="btn btn-sm btn-outline-primary">
+          <i class="bi bi-filetype-yaml"></i> Download YAML
+        </a>
+        <a href="/config/export?format=json" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-filetype-json"></i> Download JSON
+        </a>
+        <small class="text-muted">
+          YAML diffs cleanly between two snapshots; JSON is for tooling.
+        </small>
+      </div>
+    </div>
+  </div>
+
   {% set navidrome_users = config.get('navidrome_users', []) %}
   {% if navidrome_users and navidrome_users|length > 1 %}
   <div class="card shadow-sm mb-3" id="user-context">
@@ -2280,6 +2313,73 @@
         <!-- ===== TAB: STAR RATINGS ===== -->
         <div class="tab-pane fade" id="tab-stars" role="tabpanel">
 
+      {# ── The order the rules actually run in ──────────────────────────────
+           Read from services/popularity/stages/finalise_stage.py at the lines
+           below. This is the answer to "which rule wins when two disagree":
+           the FIRST matching step returns, and the ordered caps afterwards can
+           only ever demote. Keep the line references current when the function
+           moves; tests/test_star_rule_order.py pins the sequence. #}
+      <div class="alert alert-secondary mb-3 py-2">
+        <details>
+          <summary class="fw-semibold" style="cursor:pointer;">
+            <i class="bi bi-list-ol"></i> The order the star rules run in — and which one wins
+          </summary>
+          <ol class="small text-muted mt-2 mb-0 ps-3">
+            <li class="mb-1">
+              <strong>A user's own rating always wins.</strong>
+              <code>single_confidence == "user"</code> returns 5★ before any rule is
+              evaluated, and the caps below treat it as protected
+              (<code>_assign_stars</code> L1515).
+            </li>
+            <li class="mb-1">
+              <strong>Live albums</strong> are rated on artist-z
+              (<code>_live_album_stars</code>, L1523) and return there. Compilations
+              take their own path next (L1635); everything below is a regular album.
+            </li>
+            <li class="mb-1">
+              <strong>Global 5★ catalogue lock.</strong> A pre-pass flags the artist's
+              catalogue-top tracks. A flagged track returns 5★ if it clears the 5★
+              <em>album-z and artist-z</em> bounds, otherwise 4★ (L1567). Skipped in a
+              popularity-only scan, so those scans cap regular albums at 4★.
+            </li>
+            <li class="mb-1">
+              <strong>Forced artist percentile</strong> — top 3% by raw listeners
+              returns 5★, top 10% returns 4★ (L1603). This is the failsafe against
+              within-album normalisation and short-circuits every later rule.
+            </li>
+            <li class="mb-1">
+              <strong>Base tier</strong>: the <em>Album Star Curve</em> if enabled and the
+              album has enough scored tracks, otherwise the z-score bands
+              (L1940-1986). The curve replaces the base only.
+            </li>
+            <li class="mb-1">
+              <strong>5★ promotion</strong>: a standout (album-z and artist-z above the
+              5★ bounds, plus a top-10% catalogue flag) AND organic reach AND clear of
+              the album-shape gate returns 5★ (L1988). The
+              <em>Album Standout Ratios</em> gate only applies here, and only to old
+              minor-era albums.
+            </li>
+            <li class="mb-1">
+              <strong>Dedicated-single floor</strong>: a confirmed single release cannot
+              sit below 4★ (L2033).
+            </li>
+            <li class="mb-1">
+              <strong>Then the ordered caps, which can only demote</strong> —
+              live-album slots, then the era 5★/4★ slots, then the minor-era penalty,
+              then the short-track cap (L6881-6968). Caps are applied
+              <em>after</em> the whole album is rated, because a slot limit is a
+              property of the album, not of one track.
+            </li>
+          </ol>
+          <p class="small text-muted mt-2 mb-0">
+            <strong>Protected from every cap:</strong> a user rating, a
+            <code>_lock_honoured</code> catalogue-top track, a forced-percentile 5★, and
+            (on a penalised minor-era album) a genuine standout.
+          </p>
+        </details>
+      </div>
+
+
   <div class="card shadow-sm mb-3" id="single-detection-zscore">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
       <h5 class="mb-0"><i class="bi bi-sliders"></i> Single Detection &amp; Star Ratings</h5>
@@ -2410,7 +2510,7 @@
         <div class="col-12 col-md-3">
           <div class="border rounded p-3 h-100">
             <h6 class="text-muted mb-2">⭐ 1★</h6>
-            <small class="form-text text-muted d-block mt-2">Album z below the 2★ band (<strong>-1.2</strong>) → filler / outlier. There is no separate 1★ boundary to configure — everything below the 2★ band is 1★.</small>
+            <small class="form-text text-muted d-block mt-2">Album z below the 2★ band ({{ config.get('single_detection', {}).get('star_2', {}).get('album_z', -1.2) }}) → filler / outlier. There is no separate 1★ boundary to configure — everything below the 2★ band is 1★.</small>
           </div>
         </div>
       </div>
@@ -2685,9 +2785,10 @@
           <small class="form-text text-muted">Default: <strong>Disabled</strong> — enabling re-rates every album on the next scan, so preview with the resync below first.</small>
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
+          {% set _curve5 = config.get('single_detection', {}).get('album_star_curve', {}).get('curve_5star_percentile', 0.85) %}
           <label class="form-label form-label-sm" for="album_star_curve_curve_5star_percentile">5★ Album Percentile</label>
           <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_curve_5star_percentile" placeholder="0.85" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('curve_5star_percentile', 0.85) }}">
-          <small class="form-text text-muted">Top 15% of the album. Default: <strong>0.85</strong></small>
+          <small class="form-text text-muted">Top {{ ((((1 - _curve5) * 100) | round(4)) | round(0, 'ceil') | int) }}% of the album. Default: <strong>0.85</strong> (top 15%)</small>
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="album_star_curve_curve_4star_percentile">4★ Album Percentile</label>
@@ -2707,7 +2808,7 @@
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="album_star_curve_catalogue_cap_5star">5★ Artist Catalogue Percentile</label>
           <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="album_star_curve_catalogue_cap_5star" placeholder="0.85" value="{{ config.get('single_detection', {}).get('album_star_curve', {}).get('catalogue_cap_5star', 0.85) }}">
-          <small class="form-text text-muted">A 5★ must also sit in the artist's top 15% overall. <strong>0</strong> disables. Default: <strong>0.85</strong></small>
+          <small class="form-text text-muted">A 5★ must also sit in the artist's top {{ ((((1 - config.get('single_detection', {}).get('album_star_curve', {}).get('catalogue_cap_5star', 0.85)) * 100) | round(4)) | round(0, 'ceil') | int) }}% overall. <strong>0</strong> disables. Default: <strong>0.85</strong> (top 15%)</small>
         </div>
         <div class="col-12 col-sm-6 col-lg-3">
           <label class="form-label form-label-sm" for="album_star_curve_catalogue_cap_4star">4★ Artist Catalogue Percentile</label>

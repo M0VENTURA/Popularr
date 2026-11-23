@@ -374,6 +374,13 @@ def _compute_stars_for_album(
         "star_ratings": int(posted.get("star_ratings") or 0),
         "navidrome_synced": int(posted.get("navidrome_synced") or 0),
     }
+
+    # ⭐ WHY, not just WHAT. The rules record their verdict on the track
+    # (``_force_floor``, ``_album_curve_stars``, ``_era_5star``, …) and until now
+    # only the log read them. A preview that says "4 → 3" without saying which
+    # cap did it makes the ten overlapping 5★ paths impossible to audit.
+    from services.popularity.stages.finalise_stage import star_rating_reason
+
     rows = [
         {
             "track_id": str(r.get("track_id") or ""),
@@ -381,6 +388,7 @@ def _compute_stars_for_album(
             "before": before.get(str(r.get("track_id") or ""), 0),
             "after": after.get(str(r.get("track_id") or ""), 0),
             "lastfm_listeners": int(r.get("lastfm_listeners") or 0),
+            "reason": star_rating_reason(r),
         }
         for r in album_results
     ]
@@ -642,6 +650,13 @@ def resync_star_ratings(
     tracks_changed = 0
     changed_rows: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    # ⭐ LIBRARY STAR HISTOGRAM — the fastest way to see whether a change made
+    # the library too harsh or too generous. Counted over EVERY rated track, not
+    # just the changed ones, so it describes the resulting library rather than
+    # the diff. Albums that failed still count toward ``errors``.
+    star_histogram_after: dict[int, int] = {n: 0 for n in range(1, 6)}
+    star_histogram_before: dict[int, int] = {n: 0 for n in range(1, 6)}
+    five_star_albums: list[dict[str, Any]] = []
 
     logger.info(
         "Star resync started",
@@ -680,11 +695,31 @@ def resync_star_ratings(
 
         tracks_total += summary["tracks"]
         tracks_changed += summary["changed"]
+        _album_five = 0
         for row in rows:
+            _before_stars = int(row.get("before") or 0)
+            _after_stars = int(row.get("after") or 0)
+            if 1 <= _before_stars <= 5:
+                star_histogram_before[_before_stars] += 1
+            if 1 <= _after_stars <= 5:
+                star_histogram_after[_after_stars] += 1
+            if _after_stars == 5:
+                _album_five += 1
             if row["before"] != row["after"]:
                 row["artist"] = group_artist
                 row["album"] = group_album
                 changed_rows.append(row)
+        if _album_five:
+            five_star_albums.append({
+                "artist": group_artist,
+                "album": group_album,
+                "five_star_tracks": _album_five,
+                "tracks": len(rows),
+            })
+
+    # Sorted most-5★-first, so "which albums carry the top end" is the first
+    # thing a preview answers.
+    five_star_albums.sort(key=lambda a: (-a["five_star_tracks"], a["artist"], a["album"]))
 
     elapsed = round(time.monotonic() - started, 2)
     logger.info(
@@ -724,6 +759,15 @@ def resync_star_ratings(
         "sync_navidrome": bool(sync_navidrome),
         "playlists": playlists,
         "velocity": velocity_report,
+        # ⭐ Library shape after the run, plus which albums carry the 5★ top end.
+        # A change that makes the library too harsh or too generous shows up here
+        # immediately instead of after a scan.
+        "star_histogram": {
+            "before": star_histogram_before,
+            "after": star_histogram_after,
+            "total": sum(star_histogram_after.values()),
+        },
+        "five_star_albums": five_star_albums[:50],
     }
 
 

@@ -85,6 +85,64 @@
   }
 
   /**
+   * Render the library star distribution plus the albums carrying the 5★ top end.
+   *
+   * This is the fastest read on "did that change make the library too harsh or
+   * too generous": the BEFORE and AFTER columns sit next to each other, so a
+   * curve that shifted 40 tracks into 1★ is obvious without reading a single
+   * per-track row.
+   */
+  function starHistogramHtml(histogram, fiveStarAlbums) {
+    if (!histogram || !histogram.after) return '';
+    const before = histogram.before || {};
+    const after = histogram.after || {};
+    const total = Number(histogram.total || 0);
+    if (!total) return '';
+
+    const rows = [5, 4, 3, 2, 1].map(function (n) {
+      const b = Number(before[n] || 0);
+      const a = Number(after[n] || 0);
+      const pctBefore = total ? (b / total) * 100 : 0;
+      const pctAfter = total ? (a / total) * 100 : 0;
+      const delta = a - b;
+      const deltaText = delta === 0
+        ? '<span class="text-muted">—</span>'
+        : '<span class="text-' + (delta > 0 ? 'success' : 'danger') + '">'
+          + (delta > 0 ? '+' : '') + delta + '</span>';
+      return '<tr>'
+        + '<td class="text-nowrap">' + '★'.repeat(n) + '</td>'
+        + '<td class="text-end">' + b + ' <span class="text-muted small">(' + pctBefore.toFixed(1) + '%)</span></td>'
+        + '<td class="text-end">' + a + ' <span class="text-muted small">(' + pctAfter.toFixed(1) + '%)</span></td>'
+        + '<td class="text-end">' + deltaText + '</td>'
+        + '</tr>';
+    }).join('');
+
+    const albums = Array.isArray(fiveStarAlbums) ? fiveStarAlbums : [];
+    const albumRows = albums.slice(0, 20).map(function (a) {
+      return '<tr><td>' + esc(a.artist || '') + '</td><td>' + esc(a.album || '') + '</td>'
+        + '<td class="text-center">' + Number(a.five_star_tracks || 0) + ' / '
+        + Number(a.tracks || 0) + '</td></tr>';
+    }).join('');
+
+    return '<div class="row g-3 mb-3">'
+      + '<div class="col-12 col-lg-5">'
+      + '<div class="small fw-semibold mb-1">Library star distribution (' + total + ' rated tracks)</div>'
+      + '<table class="table table-sm mb-0"><thead><tr>'
+      + '<th>Rating</th><th class="text-end">Before</th><th class="text-end">After</th><th class="text-end">Δ</th>'
+      + '</tr></thead><tbody>' + rows + '</tbody></table>'
+      + '</div>'
+      + '<div class="col-12 col-lg-7">'
+      + '<div class="small fw-semibold mb-1">Albums by 5★ count (top 20)</div>'
+      + (albumRows
+        ? '<div style="max-height:12rem;overflow:auto"><table class="table table-sm mb-0"><thead><tr>'
+          + '<th>Artist</th><th>Album</th><th class="text-center">5★</th></tr></thead><tbody>'
+          + albumRows + '</tbody></table></div>'
+        : '<div class="text-muted small">No 5★ tracks.</div>')
+      + '</div>'
+      + '</div>';
+  }
+
+  /**
    * Preview or apply a star-rating resync.
    *
    * Re-rates from STORED popularity data — no Last.fm/ListenBrainz calls.
@@ -156,10 +214,15 @@
       const changed = Array.isArray(data.changed_tracks) ? data.changed_tracks : [];
       const rows = changed.slice(0, 200).map(t => {
         const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
-        return '<tr><td>' + esc(t.title || '') + '</td>'
+        // WHY the tier moved. Without this the preview is a list of numbers and
+        // the ten overlapping 5★ rules cannot be audited against real data.
+        const reason = t.reason
+          ? '<div class="small text-muted">' + esc(t.reason) + '</div>'
+          : '';
+        return '<tr><td>' + esc(t.title || '') + reason + '</td>'
           + '<td class="text-muted">' + esc(label) + '</td>'
           + '<td class="text-end">' + Number(t.lastfm_listeners || 0).toLocaleString() + '</td>'
-          + '<td class="text-center">' + t.before + '★ → <strong>' + t.after + '★</strong></td></tr>';
+          + '<td class="text-center text-nowrap">' + t.before + '★ → <strong>' + t.after + '★</strong></td></tr>';
       }).join('');
 
       setOut(
@@ -172,6 +235,7 @@
           ? ' <span class="text-danger">' + data.failed.length + ' album(s) failed.</span>'
           : '')
         + '</div>'
+        + starHistogramHtml(data.star_histogram, data.five_star_albums)
         + (rows
           ? '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
             + '<thead><tr><th>Track</th><th>Album</th><th class="text-end">Listeners</th><th class="text-center">Change</th></tr></thead>'
