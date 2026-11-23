@@ -3219,6 +3219,73 @@ async def album_detail(album_path: str) -> Any:
                         error=str(_wide_err),
                     )
 
+            # ── Phase 2d: push the FINAL GENRES to the audio files ───────────
+            #
+            # ⭐ A SAVED GENRE EDIT USED TO STAY IN THE DATABASE.
+            #
+            # ``_apply_album_track_genres`` writes ``tracks.genres`` only — the
+            # file's genre tag belonged to the popularity scan, which syncs it
+            # DB → file via ``sync_album_file_tags``. But the scan only runs on
+            # the next popularity pass, so until then Navidrome (which reads the
+            # FILES) kept showing the old genres while the page showed the new
+            # ones. Reported as "Final Genres show this, but they haven't been
+            # pushed to the tracks in Navidrome", and visible in the raw tags:
+            # track 01 carried the container's own "Nu Metal/Alternative Metal/
+            # Industrial Metal" while the album page listed a different set.
+            #
+            # Re-uses an existing writer rather than adding a second one, so the
+            # file tag and the database keep ONE definition of the value.
+            # Album-level, not per track: ``apply_genres_to_album`` resolves each
+            # row's path, writes the file and the column together, and reports
+            # what it could not reach.
+            # ⚠️ ONLY WHEN A GENRE ACTUALLY CHANGED. ``genres_str`` is set on
+            # every save of an album with a genre box, so keying off it ran the
+            # whole album's tag pass on every unrelated edit (a title fix would
+            # re-read and rewrite every file). ``genre_only_writes`` counts the
+            # tracks this save actually wrote genres to.
+            #
+            # ⚠️⚠️ THE FILE WRITE, NOT ``sync_album_file_tags``.
+            #
+            # That helper is the SCAN's, and its "active genre cleanup" re-derives
+            # every track's genres from its own source columns and UPDATEs the
+            # database before writing files. Called from a page save it silently
+            # replaced the list the user had just chosen: the album fill wrote
+            # "Rock, Pop" onto a bare track and the cleanup immediately reverted
+            # it to the track's own "Metalcore"
+            # (``test_album_save_genre_precedence`` caught exactly that).
+            #
+            # So this pushes the value that is NOW IN THE DATABASE onto the files,
+            # and nothing else. ``apply_genres_to_album`` is the existing writer
+            # that does precisely that — DB and files in one pass, one definition.
+            if genre_only_writes:
+                try:
+                    from services.metadata.album_service import (
+                        apply_genres_to_album,
+                    )
+
+                    _push = apply_genres_to_album(
+                        new_artist or artist_name,
+                        new_title or album_name,
+                        [
+                            g.strip()
+                            for g in re.split(r"[,;/\\]+", genres_str or "")
+                            if g.strip()
+                        ],
+                    ) or {}
+                    logger.info(
+                        "Album save: final genres pushed to files",
+                        artist=artist_name, album=album_name,
+                        files=_push.get("updated"),
+                        failed=_push.get("failed"),
+                    )
+                except Exception as _genre_file_err:
+                    # Never fatal — the DB is correct and the next scan retries.
+                    logger.warning(
+                        "Album save: pushing genres to files failed",
+                        artist=artist_name, album=album_name,
+                        error=str(_genre_file_err),
+                    )
+
             # ── Do-not-search-album-release flag ─────────────────────────────
             # A custom album (not on MusicBrainz/Discogs) can be marked so the
             # album-release lookups are skipped. Written ALBUM-WIDE AFTER the

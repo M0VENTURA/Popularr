@@ -220,6 +220,40 @@ def _genre_names(value: Any) -> set[str]:
     return {_norm(name) for name in _genre_list(value)}
 
 
+def _album_genre_sets_equal(current: Any, proposed: Any) -> bool:
+    """True when the STORED album genres are all still offered by MusicBrainz.
+
+    ⭐ A SUBSET TEST, NOT SET EQUALITY — this is what stops "Genres" being
+    proposed after every save.
+
+    Reported: *"Whenever looking up an album on the album page, genres is always
+    picked up as new. … If the top 3 are only saved, then it doesn't need to
+    compare all genres, only the ones that are used."*
+
+    ``current`` for this field is ``tracks.genres``: the FINAL genres the scanner
+    chose, capped at ``get_genre_track_limit()``. The proposed side is the raw
+    union of every release-group, release and recording tag — measured on
+    Untouchables, 3 stored against 14 offered. Under set equality those can
+    never agree, so the bar appeared on every lookup and NO save could clear it:
+    the spare 11 were never going to be written.
+
+    Trimming the proposed side to N is NOT the fix either — the union is
+    ordered group-first, so "first 3" picks ``Alternative Rock`` over the
+    ``Industrial Metal`` the scan actually kept. The question that has an answer
+    is whether the album still supports what is STORED: if every stored genre is
+    still offered, nothing the save can write has changed.
+
+    A genre that has genuinely left the release still reports, because it is no
+    longer in the proposed set. Extra offered genres are not a change — they are
+    the ones the scan deliberately did not take.
+    """
+    stored = _genre_names(current)
+    offered = _genre_names(proposed)
+    if not stored:
+        return not offered
+    return stored <= offered
+
+
 def _genre_sets_equal(current: Any, proposed: Any) -> bool:
     """True when both sides list the SAME genres, regardless of order.
 
@@ -449,7 +483,13 @@ def _album_level_proposals(
         # "Rock, Metal" vs "Metal, Rock" is not a change (see
         # ``_genre_sets_equal``). The track-level spec covers this via the
         # generic loop; album genres bypass that loop, so it is applied here too.
-        if form_field == "album_genres" and _genre_sets_equal(
+        #
+        # ⭐ ALBUM genres use the SUBSET rule, not set equality: the proposed
+        # side is an untrimmed union of every provider list while the stored side
+        # is the scanner's capped choice, so equality would re-propose on every
+        # lookup and no save could ever clear it. See
+        # ``_album_genre_sets_equal``.
+        if form_field == "album_genres" and _album_genre_sets_equal(
             current.get(form_field), proposed
         ):
             continue
