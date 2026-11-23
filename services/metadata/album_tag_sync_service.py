@@ -421,14 +421,43 @@ def _db_tag_candidates(
 # MusicBrainz release match
 # ---------------------------------------------------------------------------
 
-def _resolve_mb_release(tracks: list[dict[str, Any]]) -> tuple[str, dict[tuple[int, int], dict[str, Any]], int]:
-    release_mbid = ""
-    for t in tracks:
-        release_mbid = str(
+def _dominant_album_id(tracks: list[dict[str, Any]] | None) -> str:
+    """The ONE MusicBrainz release id an album's files should all carry.
+
+    ⚠️ AN ALBUM ID IS AN ALBUM-LEVEL FACT. The file fill used to read
+    ``track["musicbrainz_albumid"]`` per row, so one row still holding a
+    DIFFERENT release id put that id back on its own file. Navidrome's default
+    album PID prefers ``musicbrainz_albumid``, so the album the user had just
+    merged split again — with the database correct the whole time. Reported as
+    "something is still updating Navidrome files and splitting them after they
+    are correctly merged".
+
+    Measured on the reported pair (Korn / Untouchables), both files of the same
+    album, sharing one release-group id:
+
+        here-to-stay.mp3                 musicbrainz_albumid: 3c8d8b38-…
+        here-to-stay-(t-rays-mix).mp3    musicbrainz_albumid: 2606ffe5-…
+
+    Majority wins, because a merge leaves the corrected id on the rows the save
+    wrote; an even split falls back to the first non-empty id in scan order,
+    which is at least stable. A single-id album is unaffected.
+    """
+    counts: dict[str, int] = {}
+    for t in tracks or []:
+        mid = str(
             t.get("musicbrainz_albumid") or t.get("musicbrainz_album_mbid") or ""
         ).strip()
-        if release_mbid:
-            break
+        if mid:
+            counts[mid] = counts.get(mid, 0) + 1
+    if not counts:
+        return ""
+    if len(counts) == 1:
+        return next(iter(counts))
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _resolve_mb_release(tracks: list[dict[str, Any]]) -> tuple[str, dict[tuple[int, int], dict[str, Any]], int]:
+    release_mbid = _dominant_album_id(tracks)
     if not release_mbid:
         return "", {}, 0
 
@@ -1012,6 +1041,48 @@ def sync_album_file_tags(
     
     release_mbid, mb_index, mb_count = _resolve_mb_release(tracks)
     perfect = bool(release_mbid) and _is_perfect_match(tracks, mb_index, mb_count)
+
+    # ⚠️ Stamp the ALBUM's id onto every row, not each row's own.
+    #
+    # ``_db_tag_candidates`` reads ``musicbrainz_albumid`` from the ROW, and that
+    # field is in ``_FILE_IDENTITY_TAGS`` — written with force semantics. A row
+    # still carrying a different release id therefore wrote it back to its own
+    # file, and Navidrome (whose album PID prefers this tag) split the album the
+    # user had just merged. One album, one release id.
+    if release_mbid:
+        _strays: list[str] = []
+        for _t in tracks:
+            _row_id = str(
+                _t.get("musicbrainz_albumid") or _t.get("musicbrainz_album_mbid") or ""
+            ).strip()
+            if _row_id != release_mbid:
+                if _t.get("id") is not None and _row_id:
+                    _strays.append(str(_t.get("id")))
+                _t["musicbrainz_albumid"] = release_mbid
+                _t["musicbrainz_album_mbid"] = release_mbid
+
+        # Converge the rows as well. Leaving the database disagreeing with the
+        # files it just rewrote is how the next pass re-introduces the split.
+        if _strays:
+            try:
+                with db_session() as session:
+                    session.execute(
+                        text(
+                            "UPDATE tracks SET musicbrainz_albumid = :mid, "
+                            "musicbrainz_album_mbid = :mid "
+                            "WHERE CAST(id AS TEXT) IN :ids"
+                        ).bindparams(bindparam("ids", expanding=True)),
+                        {"mid": release_mbid, "ids": sorted(_strays)},
+                    )
+                logger.info(
+                    "Converged a stray album release id",
+                    artist=artist, album=album,
+                    album_mbid=release_mbid, rows=len(_strays),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Stray album id convergence failed", error=str(exc),
+                )
 
     # The scan reports corrected track ids under their DB ``id``; the freshly
     # loaded rows carry the same ids, but normalise anyway (ids are cast to
