@@ -19,48 +19,57 @@ from sqlalchemy import text
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-class TestAlbumOwnershipIsScopedToTheAlbum:
-    """The cross-artist poisoning: one VA row claimed every same-titled album."""
+class TestAlbumArtistResolution:
+    """VA must survive a re-import, and must not be invented.
 
-    def _resolve(self, *, artist, album_id, existing):
+    ⚠️ An earlier version of this file asserted a per-album-ID key. That was
+    WRONG: the prefetch is already scoped by the artist being imported, so it
+    cannot observe another artist's album, and the ID key broke the one thing the
+    map is FOR — preserving a stored "Various Artists" on re-import.
+    """
+
+    def _resolve(self, *, artist, existing=None, from_state="", **kw):
         from services.scanning.navidrome_import import album_artist_from_sources
 
         return album_artist_from_sources(
-            api_album_artist=artist,
-            album_artist_from_artist_view=artist,
+            api_album_artist=kw.get("api", artist),
+            album_artist_from_artist_view=kw.get("view", ""),
             canonical_artist_name=artist,
             album_name="Essential Alternative",
-            existing_album_artists=existing,
-            album_id=album_id,
+            existing_album_artists=existing or {},
+            album_artist_from_state=from_state,
         )
 
-    def test_another_albums_va_row_does_not_claim_this_one(self):
-        poisoned = {"id:nav-111": "Various Artists"}
+    @pytest.mark.parametrize(
+        "stored", ["Various Artists", "various artists", "Original Soundtrack"]
+    )
+    def test_a_stored_va_is_preserved(self, stored):
         assert self._resolve(
-            artist="Weezer", album_id="nav-222", existing=poisoned
-        ) == "Weezer", (
-            "a VA row for a DIFFERENT album that happens to share a title must "
-            "not decide this album's owner — that is the reported merge"
-        )
+            artist="Evanescence", existing={"Evanescence": stored}
+        ) == "Various Artists", "the whole point of the stored value"
 
-    def test_the_albums_own_va_identity_is_still_honoured(self):
+    def test_an_ordinary_artist_is_not_forced_to_va(self):
+        assert self._resolve(artist="Evanescence") == "Evanescence"
+
+    def test_another_artists_row_cannot_claim_this_one(self):
+        """The map is artist-scoped, so a different key must not be consulted."""
         assert self._resolve(
-            artist="HIM", album_id="nav-111",
-            existing={"id:nav-111": "Various Artists"},
+            artist="Evanescence", existing={"Gorillaz": "Various Artists"}
+        ) == "Evanescence"
+
+    @pytest.mark.parametrize("kw", [
+        {"api": "Various Artists"},
+        {"view": "Various Artists"},
+    ])
+    def test_a_va_source_still_resolves_to_various_artists(self, kw):
+        assert self._resolve(artist="Evanescence", **kw) == "Various Artists"
+
+    def test_an_explicit_state_value_wins(self):
+        assert self._resolve(
+            artist="Evanescence",
+            existing={"Evanescence": "Evanescence"},
+            from_state="Various Artists",
         ) == "Various Artists"
-
-    def test_a_va_source_still_resolves_to_various_artists(self):
-        assert self._resolve(
-            artist="Various Artists", album_id="nav-333", existing={}
-        ) == "Various Artists"
-
-    def test_keying(self):
-        from services.scanning.navidrome_import import _album_scope_key
-
-        assert _album_scope_key("nav-1", "X") == "id:nav-1"
-        assert _album_scope_key("", "Some Album") == "name:Some Album"
-        # Two different albums with one title must not share a key.
-        assert _album_scope_key("nav-1", "X") != _album_scope_key("nav-2", "X")
 
 
 class TestTheReadAndWriteVocabulariesAgree:
@@ -141,7 +150,45 @@ class TestTheExportShowsAlbumOwnership:
         assert rows["Fallen"]["album_artist"] == "Evanescence"
 
 
-class TestThePlaylistColumnIsPopulated:
+class TestABadTitleRegexIsNotSilent:
+    """The reported config had an unclosed group and the failure was swallowed."""
+
+    @staticmethod
+    def _exclude(title: str, pattern: str) -> bool:
+        from services.catalog.album_classification_service import (
+            should_exclude_track_from_stats,
+        )
+
+        return should_exclude_track_from_stats(
+            title=title, exclude_title_regex=pattern
+        )
+
+    def test_an_invalid_pattern_does_not_raise(self):
+        bad = r"(?i)(^intro$|\bintro$|interlude|\[intro\]|\(intro\|[untitled]))"
+        assert isinstance(self._exclude("Intro", bad), bool)
+
+    def test_the_warning_fires_once(self, monkeypatch):
+        import services.catalog.album_classification_service as acs
+
+        calls = []
+        monkeypatch.setattr(acs.logger, "warning",
+                            lambda *a, **k: calls.append(k.get("pattern")))
+        bad = "(unclosed"
+        acs._WARNED_BAD_REGEX.discard(bad)
+        for _ in range(50):
+            acs.should_exclude_track_from_stats(
+                title="Intro", exclude_title_regex=bad
+            )
+        assert calls == [bad], (
+            "a bad regex is tested once per title; warning per track would be "
+            "hundreds of thousands of lines"
+        )
+
+    def test_a_valid_pattern_still_excludes(self):
+        good = r"(?i)(^intro$|\bintro$|interlude|\(intro\))"
+        assert self._exclude("Intro", good) is True
+        assert self._exclude("Golden Ratio (Interlude)", good) is True
+        assert self._exclude("A Real Song", good) is False
     """The export now syncs the index itself instead of waiting for a full scan."""
 
     def test_the_column_renders_from_the_index(self, db_session):

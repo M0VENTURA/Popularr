@@ -52,19 +52,24 @@ existing_album_artists[strip_album_edition_marker(str(album))] = str(album_artis
 existing_album_artist = existing_album_artists.get(album_name, "")
 ```
 
-Album names are not unique. One "Various Artists" row for *any* album called
-`Essential Alternative` made **every** artist's album of that name resolve to
-Various Artists on the next import. Measured:
+Album names are not unique, so a title-keyed lookup answered with an arbitrary
+artist's row. **This is not, however, the reported merge:** the prefetch that
+builds the map is already scoped by `WHERE ... = :artist` on the artist being
+imported, so it cannot observe another artist's album. The practical consequence
+was the OPPOSITE of a merge — the guard could miss, so a stored "Various Artists"
+was *not* preserved on re-import.
 
-```
-existing='Various Artists'     artist=Weezer -> 'Various Artists'   ← wrong
-existing='Original Soundtrack' artist=Weezer -> 'Various Artists'   ← wrong
-```
+Ownership is now keyed by the artist being imported, which is what the map
+actually holds, plus an optional `album_artist_from_state` for a caller that has
+resolved the album itself. Verified: a stored "Various Artists" /
+"various artists" / "Original Soundtrack" is preserved, a genuine compilation
+resolves to VA, and an ordinary artist is not forced to VA.
 
-Ownership is now keyed by the album ID (`id:<navidrome album id>`), with the
-stripped name only as a fallback for a row that has no id. After the fix the same
-input gives `'Weezer'`, while an album that genuinely IS a compilation still
-resolves to `'Various Artists'`.
+⚠️ An intermediate version of this change keyed the map by album ID. That was
+WRONG and is reverted: the map has no album id (the `tracks` table has none), so
+the `id:` keys were never written, VA preservation broke entirely, and the test
+asserted the broken behaviour. The regression is now covered by
+`TestAlbumArtistResolution::test_a_stored_va_is_preserved`.
 
 The read and write vocabularies were also inconsistent: `_has_various_artist_part`
 treats `"soundtrack"` as VA but `VA_ALBUM_ARTIST_VARIANTS` (which gates the write)
@@ -78,20 +83,37 @@ exist ONLY on that compilation. That is a genuine Various-Artists collection, no
 tracks being moved into one. Worth stating plainly: the symptom named is real in
 the mechanism above, but the album named is legitimate.
 
-## 3. Recommended corrections
+## 3. Corrections made in code
 
-* **`filters.exclude_title_regex` is an invalid regex** —
-  `(?i)(...\(intro\|[untitled]))` has one `)` too few, and `[untitled]` is a
-  character class, not the word. `album_classification_service.py:218` calls
-  `re.search` inside a bare `except Exception: pass`, so it fails SILENTLY and
-  intro/interlude exclusion never fires. Suggested:
-  `(?i)(^intro$|\bintro$|interlude|\[intro\]|\(intro\)|^untitled$)`.
+* **A bad `exclude_title_regex` is no longer silent.**
+  `album_classification_service.should_exclude_track_from_stats` wrapped
+  `re.search` in a bare `except Exception: pass`, so ANY malformed pattern —
+  including the reported `(?i)(...\(intro\|[untitled]))`, which is one `)` short
+  and uses `[untitled]` as a character class — disabled intro/interlude exclusion
+  everywhere with no symptom except wrong stats. It now catches `re.error` and
+  reports it ONCE per pattern (`warn_once_per_bad_regex`): the check runs once per
+  title, so an unguarded warning would be hundreds of thousands of lines.
+
+* **The fast-skip path read a differently-keyed dict.**
+  `existing_album_tracks` is populated under `strip_album_edition_marker(album)`
+  but was read with the raw name, so an album carrying an edition marker dropped
+  out of `navidrome_track_ids` on the fast-skip path and the cleanup below then
+  treated its tracks as removed from Navidrome. Both sides now strip.
+
+## 4. Corrections that need YOUR config, not code
+
+* **`filters.exclude_title_regex` is invalid** in the exported config:
+  `(?i)(^intro$|\bintro$|interlude|\[intro\]|\(intro\|[untitled]))`. One `)` too
+  few, and `[untitled]` is a character class. The shipped default
+  (`_INTRO_INTERLUDE_TITLE_RE`) is correct, so replacing the value with the
+  default — or `(?i)(^intro$|\bintro$|interlude|\[intro\]|\(intro\)|^untitled$)`
+  — restores the filter. The code change above only makes the breakage visible.
 * **The scan has not finished.** Of 812 artists alphabetically after "Stray Kids",
-  688 have never been scanned. Finishing it is the highest-value single action
-  here — nothing that reads the library can be trusted until it does.
-* 44 rows with a blank album, 111 blank track numbers, 505 blank genres (494 with
-  no genre source at all), 568 duplicated `(artist, album, disc, track)` positions,
-  and 2 zero-duration tracks.
+  688 have never been scanned. Nothing that reads the library can be trusted until
+  it does; this is not a code change.
+* Data quality (informational, no code fix attempted): 44 rows with a blank album,
+  111 blank track numbers, 505 blank genres (494 with no genre source at all), 568
+  duplicated `(artist, album, disc, track)` positions, 2 zero-duration tracks.
 
 ---
 

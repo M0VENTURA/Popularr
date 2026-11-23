@@ -14,6 +14,41 @@ from helpers.normalization_service import normalize_title_for_lookup
 
 logger = structlog.get_logger(__name__)
 
+#: Patterns this process has already complained about. A bad
+#: ``filters.exclude_title_regex`` is compiled once per title, so an unguarded
+#: warning would be one line per track — hundreds of thousands of them. The
+#: MESSAGE is what matters, not the count.
+_WARNED_BAD_REGEX: set[str] = set()
+
+
+def warn_once_per_bad_regex(exc: Exception, pattern: str) -> None:
+    """Report an unusable title regex ONCE, then stay quiet about it.
+
+    A malformed ``filters.exclude_title_regex`` used to be indistinguishable from
+    a working one: the ``re.search`` call was wrapped in a bare
+    ``except Exception: pass``, so intro/interlude exclusion silently never
+    fired. The only visible symptom was the wrong stats.
+    """
+    key = str(pattern or "")
+    if key in _WARNED_BAD_REGEX:
+        return
+    _WARNED_BAD_REGEX.add(key)
+    logger.warning(
+        "filters.exclude_title_regex is not a valid regex — intro/interlude "
+        "exclusion is DISABLED until it is fixed",
+        pattern=key,
+        error=str(exc),
+    )
+    try:
+        from helpers.logging_config import log_unified
+
+        log_unified(
+            f"[CLASSIFY] filters.exclude_title_regex is invalid ({exc}) — "
+            f"intro/interlude exclusion is disabled. Pattern: {key}"
+        )
+    except Exception:
+        pass
+
 COMPILATION_TYPES = {"compilation", "soundtrack", "various artists"}
 
 ALBUM_TYPE_KEYS: tuple[str, ...] = (
@@ -217,6 +252,15 @@ def should_exclude_track_from_stats(
             if exclude_title_regex:
                 if re.search(exclude_title_regex, title, re.IGNORECASE):
                     return True
+        except re.error as exc:
+            # ⚠️ LOUD, because this silently disabled the whole filter.
+            #
+            # The reported config was `(?i)(...\(intro\|[untitled]))` — one ")"
+            # short, and `[untitled]` is a character class rather than the word.
+            # `re.search` raised on EVERY title and the bare `except` swallowed
+            # it, so intro/interlude exclusion never fired for anybody, with no
+            # symptom anywhere except "interludes still pollute the stats".
+            warn_once_per_bad_regex(exc, exclude_title_regex)
         except Exception:
             pass
 
