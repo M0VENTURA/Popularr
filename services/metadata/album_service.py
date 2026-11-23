@@ -987,6 +987,25 @@ def apply_album_wide_ids(
         # writes the old id back.
         _mark_local_correction(cleared_ids)
 
+        # ⚠️ The missing list described the release this album no longer claims.
+        #
+        # Reported: "I had an album that was previously linked to an MBID so it
+        # filled in the missing releases, I removed the MBID ... but the missing
+        # releases are still showing." Removing the MBID is what makes those rows
+        # stale, so they go with it; a CSV tracklist (``release_id IS NULL``) and
+        # a rejected track (``ignored``) are preserved.
+        try:
+            from services.metadata.album_lookup_skip_service import (
+                release_missing_tracks_for_cleared_mbid,
+            )
+
+            release_missing_tracks_for_cleared_mbid(artist, album)
+        except Exception as exc:
+            logger.debug(
+                "Missing-track release after MBID clear failed",
+                artist=artist, album=album, error=str(exc),
+            )
+
         files_updated = _clear_album_id_file_tags(artist, album)
         return {"rows_updated": rows_updated, "files_updated": files_updated}
 
