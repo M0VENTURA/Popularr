@@ -3060,8 +3060,13 @@ async function pollGenrePlaylistResync(silent) {
      Plus "Find a setting": filters the settings in the ACTIVE tab by label,
      help text and placeholder; section headings that lose every card hide too.
      ══════════════════════════════════════════════════════════════════════════ */
-  const CFG_DEFAULT_ATTR = 'data-config-default';
-  const CFG_LOADED_ATTR = 'data-config-loaded';
+  // ``dataset`` keys are the camelCased form of the attribute name, and assigning
+  // a key containing '-' throws (it is a DOMStringMap, not a plain object). The
+  // hyphenated string was used as the key here, which threw a SyntaxError from
+  // snapshotConfigLoadedValues() — inside the DOMContentLoaded listener, BEFORE
+  // every preview button was bound, so all three Preview buttons were dead.
+  const CFG_DEFAULT_ATTR = 'configDefault';   // data-config-default
+  const CFG_LOADED_ATTR = 'configLoaded';     // data-config-loaded
 
   function configFieldCurrent(el) {
     if (el.type === 'checkbox') return el.checked ? '1' : '0';

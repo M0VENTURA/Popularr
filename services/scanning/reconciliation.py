@@ -735,10 +735,19 @@ def find_adoptable_track_id(
     compatible = [row for row in candidates if _corroborates(row)]
     if len(compatible) == 1:
         return _text(compatible[0].get("id")), "recording_mbid"
-    logger.warning(
-        "Ambiguous Navidrome ID adoption — recording MBID did not uniquely corroborate",
-        new_id=new_id, mbid=mbid, candidates=len(candidates),
-    )
+    if compatible:
+        logger.warning(
+            "Ambiguous Navidrome ID adoption — several rows share the recording MBID",
+            new_id=new_id, mbid=mbid, candidates=len(compatible),
+        )
+    else:
+        # One candidate that fails corroboration is a REJECTION, not an
+        # ambiguity: calling it "ambiguous" sent readers looking for a second
+        # row that was never there.
+        logger.info(
+            "Rejected Navidrome ID adoption — recording MBID did not corroborate",
+            new_id=new_id, mbid=mbid, candidates=len(candidates),
+        )
     return None
 
 
