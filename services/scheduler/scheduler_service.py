@@ -60,6 +60,11 @@ class ResilientSQLAlchemyJobStore(SQLAlchemyJobStore):
     _RETRIES = 3
     _RETRY_DELAY = 1.0
 
+    #: Last ``get_next_run_time`` that actually reached the database. Served while
+    #: the jobstore is unreachable so the APScheduler main loop keeps running —
+    #: see ``get_next_run_time``.
+    _last_next_run_time: Any = None
+
     def _execute(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
         # Do not add jobstore connections to a recovering PostgreSQL. The
         # global breaker is opened by the first connection failure; every
@@ -152,7 +157,45 @@ class ResilientSQLAlchemyJobStore(SQLAlchemyJobStore):
         return self._execute(super().get_due_jobs, now)
 
     def get_next_run_time(self) -> Any:
-        return self._execute(super().get_next_run_time)
+        """The earliest pending run — NEVER raises.
+
+        ⚠️ THIS KILLED THE WHOLE SCHEDULER.
+
+        APScheduler's ``BlockingScheduler._main_loop`` calls
+        ``jobstore.get_next_run_time()`` at the top of every iteration and has no
+        handler for an exception there:
+
+            Exception in thread APScheduler:
+            ...
+            sqlalchemy.exc.OperationalError: ... FATAL: the database system is in
+            recovery mode
+
+        So a Postgres restart — a transient condition measured at ~350 occurrences
+        in four days — took the scheduler THREAD down, and with it every job
+        (scans, playlists, the queue watchdog, the heartbeat). ``_execute`` retries
+        a transient error up to ``_RETRIES`` times and then ``reraise=True``, which
+        is right for a write and wrong for this read: the loop only needs an
+        answer, and "nothing is due" is a safe one that is re-asked on the next
+        iteration, moments later.
+
+        Returning the last known value (or ``None``) keeps the loop alive; the job
+        execution path still retries and reports properly.
+        """
+        try:
+            value = self._execute(super().get_next_run_time)
+            self._last_next_run_time = value
+            return value
+        except Exception as exc:
+            if not self._is_transient(exc):
+                # A schema/permission fault is real — do not paper over it.
+                raise
+            logger.warning(
+                "Jobstore unavailable while reading the next run time — "
+                "keeping the scheduler loop alive",
+                error=str(exc),
+                using_last_known=self._last_next_run_time is not None,
+            )
+            return self._last_next_run_time
 
     def get_all_jobs(self) -> Any:
         return self._execute(super().get_all_jobs)
