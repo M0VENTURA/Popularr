@@ -2336,6 +2336,33 @@ def _resync_limit(payload: dict[str, Any]) -> int | None:
         return None
 
 
+@misc_api_bp.route("/popularity/mixed-rips", methods=["GET"])
+async def api_popularity_mixed_rips() -> Any:
+    """Releases whose files disagree about identity-relevant tags.
+
+    Two rips of one release share ``musicbrainz_albumid`` but can disagree about
+    ``releasedate``. Navidrome's DEFAULT album PID ignores the date in favour of
+    the MBID, but a customised PID rule includes it — so such a folder is one
+    album in Navidrome and was split in Popularr. This lists the candidates so
+    the split folders can be found without opening Get Info on each one.
+
+    Read-only: it never writes anything.
+    """
+    from services.popularity.mixed_rip_audit import find_mixed_rip_albums
+
+    def _run() -> Any:
+        return find_mixed_rip_albums()
+
+    try:
+        # Blocking: it reads every scored row. Keep it off the event loop, as
+        # the collection popularity export is.
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        logger.error("Mixed-rip audit failed", error=str(exc), exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "mixed_rips": result, "count": len(result)})
+
+
 @misc_api_bp.route("/genres/playlist-resync/preview", methods=["POST"])
 async def api_genre_playlist_resync_preview() -> Any:
     """STEP 1 — start the comparison in the BACKGROUND and return immediately.

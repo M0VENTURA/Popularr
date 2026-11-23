@@ -178,12 +178,19 @@ class TestBothFilterSitesUseTheSameRule:
             Path(__file__).resolve().parent.parent
             / "services" / "popularity" / "stages" / "load_stage.py"
         ).read_text(encoding="utf-8")
-        assert "album_names_match(album_filter, album)" in src, (
+        # The rule must be the SHARED tolerant matcher, not an exact comparison.
+        # It is now applied to every title in the release: albums are grouped by
+        # MusicBrainz id, so a merged release carries several spellings and the
+        # filter must be able to name any of them.
+        assert "album_names_match(album_filter, title)" in src, (
             "the popularity load stage must use the same rule, or it re-skips "
             "the album the Navidrome import just accepted"
         )
         assert "album.lower().strip() != album_filter.lower().strip()" not in src, (
             "the exact comparison is the defect; it must not survive"
+        )
+        assert "for title in (album_titles.get(identity) or {album})" in src, (
+            "a merged release must be findable by any of its titles"
         )
 
     def test_the_import_reports_an_ambiguous_filter(self):

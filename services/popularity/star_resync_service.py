@@ -44,6 +44,7 @@ from sqlalchemy import text
 import structlog
 
 from db.engine import db_session
+from services.popularity.album_identity import album_identity
 
 logger = structlog.get_logger(__name__)
 
@@ -200,6 +201,12 @@ _TRACK_COLUMNS = (
     "duration",
     "file_path",
     "musicbrainz_albumtype",
+    # ⭐ The album identity key. Without this the resync fell back to the
+    # (album_artist, album) name strings for every row and split one
+    # MusicBrainz release into two albums whenever its files disagreed about
+    # the title — the same split Navidrome does NOT make.
+    "musicbrainz_albumid",
+    "musicbrainz_album_mbid",
     "spotify_album_type",
     "disc_number",
     "track_number",
@@ -226,6 +233,10 @@ def _row_to_track(row: Any) -> dict[str, Any]:
         "album_artist": str(_get("album_artist") or ""),
         "year": _get("year") or _get("release_year"),
         "release_year": _get("release_year"),
+        # Needed by album_identity: a release's MBID, not its title, is what
+        # decides one album.
+        "musicbrainz_albumid": str(_get("musicbrainz_albumid") or ""),
+        "musicbrainz_album_mbid": str(_get("musicbrainz_album_mbid") or ""),
         "lastfm_listeners": int(_get("lastfm_listeners") or 0),
         "listenbrainz_listens": int(_get("listenbrainz_listens") or 0),
         # ``popularity_score`` is what _assign_stars prefers. Do not fabricate
@@ -279,13 +290,17 @@ def _load_album_groups(
         "ORDER BY COALESCE(NULLIF(album_artist, ''), artist), album, disc_number, track_number"
     )
 
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     with db_session() as session:
         rows = session.execute(text(sql), params).fetchall() or []
     for row in rows:
         track = _row_to_track(row)
-        key_artist = (track["album_artist"] or track["artist"]).strip()
-        groups[(key_artist, track["album"].strip())].append(track)
+        # ⭐ By album IDENTITY. Two files of one release can disagree about the
+        # album title ("Here to Stay" vs "Here to Stay (T Ray's mix)") while
+        # carrying the same musicbrainz_albumid; grouping on the name split
+        # them, leaving the re-release a one-track album whose album-relative
+        # star rating could not mean anything.
+        groups[album_identity(track)].append(track)
 
     if limit_albums:
         keys = list(groups)[: int(limit_albums)]
@@ -491,9 +506,12 @@ def _apply_velocity_adjustments(
     # One pass to build each artist's catalogue, keyed the same way the rating
     # path keys an artist (album_artist when present).
     by_artist: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for (group_artist, _group_album), rows in groups.items():
+    for rows in groups.values():
         for row in rows:
-            by_artist[group_artist].append(row)
+            # Keyed the same way the rating path keys an artist.
+            by_artist[
+                str(row.get("album_artist") or row.get("artist") or "").strip()
+            ].append(row)
 
     tracks = 0
     collisions = 0
@@ -622,11 +640,13 @@ def resync_star_ratings(
     # (every loaded album), not just the album being rated. Building it from
     # the rows already in hand avoids a second query per album.
     artist_score_map: dict[str, list[float]] = defaultdict(list)
-    for (group_artist, _group_album), rows in groups.items():
+    for rows in groups.values():
         for r in rows:
             score_value = float(r.get("popularity_score") or r.get("final_score") or 0)
             if score_value > 0:
-                artist_score_map[group_artist].append(score_value)
+                artist_score_map[
+                    str(r.get("album_artist") or r.get("artist") or "").strip()
+                ].append(score_value)
 
     options: dict[str, Any] = {
         "write_file_tags": bool(write_file_tags),
@@ -665,7 +685,14 @@ def resync_star_ratings(
         artist=artist, album=album,
     )
 
-    for (group_artist, group_album), album_results in groups.items():
+    for album_results in groups.values():
+        # The display artist/album come from the rows: the grouping key is the
+        # release IDENTITY (which can be ("mbid", id) or ("name", artist, album)),
+        # not a fixed pair of strings.
+        group_artist = str(
+            album_results[0].get("album_artist") or album_results[0].get("artist") or ""
+        ).strip()
+        group_album = str(album_results[0].get("album") or "").strip()
         albums_done += 1
         if progress is not None:
             try:

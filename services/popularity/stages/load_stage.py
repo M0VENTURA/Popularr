@@ -18,6 +18,7 @@ from db.repositories.library import (
 )
 from helpers.logging_config import log_unified
 from helpers.normalization_service import album_names_match
+from services.popularity.album_identity import album_identity
 
 logger = structlog.get_logger(__name__)
 
@@ -137,7 +138,22 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
     # Group in QUERY order. Python dicts preserve insertion order and the query
     # sorts by filing artist, then album, then disc/track — the same order the
     # per-artist/per-album queries produced.
-    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    #
+    # ⭐ KEYED BY ALBUM IDENTITY, NOT BY NAME. Grouping on the two human strings
+    # split one MusicBrainz release whenever its files disagreed about the album
+    # title — measured: "Here to Stay" and "Here to Stay (T Ray's mix)" share
+    # ``musicbrainz_albumid`` and Navidrome files them as ONE album, while
+    # Popularr rated the re-release as a one-track album (no distribution, so
+    # its album-relative star rating meant nothing). ``album_identity`` prefers
+    # the MBID exactly as Navidrome's default album PID does, and falls back to
+    # the name tuple only when there is no MBID.
+    #
+    # The DISPLAY name stays the first name seen for the release, so logs,
+    # playlists and the album page read the same as before.
+    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    display_name: dict[tuple[str, ...], str] = {}
+    # Every title seen for the release, for the album filter below.
+    album_titles: dict[tuple[str, ...], set[str]] = {}
     for row in rows:
         artist = (
             str(row.get("album_artist") or "").strip()
@@ -146,7 +162,10 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
         album = str(row.get("album") or "")
         if not artist or not album.strip():
             continue
-        grouped.setdefault(artist, {}).setdefault(album, []).append(row)
+        identity = album_identity(row)
+        grouped.setdefault(identity, []).append(row)
+        display_name.setdefault(identity, album)
+        album_titles.setdefault(identity, set()).add(album)
 
     try:
         from helpers.config_helpers import get_feature
@@ -163,7 +182,15 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
     resume_hit = False if resume_from else True
     resume_key = _artist_key(resume_from) if resume_from else ""
 
-    for artist, albums in grouped.items():
+    for identity, tracks in grouped.items():
+        # The filing artist comes from the tracks themselves — the grouping key
+        # is the release identity, not an (artist, album) pair.
+        artist = (
+            str(tracks[0].get("album_artist") or "").strip()
+            or str(tracks[0].get("artist") or "").strip()
+        )
+        album = display_name.get(identity, "")
+
         if not resume_hit:
             # Punctuation-tolerant resume match: "D'Artagnan" vs "dArtagnan"
             # must resolve to the same stored artist, otherwise every artist
@@ -182,51 +209,56 @@ def load_candidates(options: dict[str, Any]) -> list[dict[str, Any]]:
             else:
                 continue
 
-        for album, tracks in albums.items():
-            # ⚠️ Must use the SAME rule as ``should_skip_album`` does for the
-            # Navidrome import: the two gate one album scan in sequence, so an
-            # exact comparison here would re-skip the very album the import
-            # just accepted (Navidrome's "17" vs the page's "17: Greatest
-            # Hits"), leaving the popularity stage with nothing to score.
-            if album_filter and not album_names_match(album_filter, album):
-                continue
+        # ⚠️ Must use the SAME rule as ``should_skip_album`` does for the
+        # Navidrome import: the two gate one album scan in sequence, so an
+        # exact comparison here would re-skip the very album the import
+        # just accepted (Navidrome's "17" vs the page's "17: Greatest
+        # Hits"), leaving the popularity stage with nothing to score.
+        # A merged release carries several titles; the filter must be able
+        # to name any of them ("Here to Stay (T Ray's mix)" still finds the
+        # release whose display name is "Here to Stay").
+        if album_filter and not any(
+            album_names_match(album_filter, title)
+            for title in (album_titles.get(identity) or {album})
+        ):
+            continue
 
-            if not tracks:
-                continue
+        if not tracks:
+            continue
 
-            if len(tracks) < min_tracks:
-                logger.debug(
-                    "[LOAD_STAGE] Skipping album below minimum track count",
-                    artist=artist,
-                    album=album,
-                    track_count=len(tracks),
-                    min_tracks=min_tracks,
-                )
-                continue
+        if len(tracks) < min_tracks:
+            logger.debug(
+                "[LOAD_STAGE] Skipping album below minimum track count",
+                artist=artist,
+                album=album,
+                track_count=len(tracks),
+                min_tracks=min_tracks,
+            )
+            continue
 
-            # Album-type resolution for the album row: prefer a CONSISTENT
-            # stored type (persisted by the album stage after the MB
-            # release-group lookup).  Live/alternate detection then treats the
-            # matched type as authoritative and only falls back to title
-            # heuristics when no type is stored yet (first scan).
-            _mb_types = {
-                str(t.get("musicbrainz_albumtype") or "").strip()
-                for t in tracks
-                if str(t.get("musicbrainz_albumtype") or "").strip()
-            }
-            _sp_types = {
-                str(t.get("spotify_album_type") or "").strip()
-                for t in tracks
-                if str(t.get("spotify_album_type") or "").strip()
-            }
-            candidates.append({
-                "artist": artist,
-                "album": album,
-                "album_artist": artist,
-                "spotify_album_type": next(iter(_sp_types)) if len(_sp_types) == 1 else None,
-                "musicbrainz_album_type": next(iter(_mb_types)) if len(_mb_types) == 1 else None,
-                "tracks": tracks,
-            })
+        # Album-type resolution for the album row: prefer a CONSISTENT
+        # stored type (persisted by the album stage after the MB
+        # release-group lookup).  Live/alternate detection then treats the
+        # matched type as authoritative and only falls back to title
+        # heuristics when no type is stored yet (first scan).
+        _mb_types = {
+            str(t.get("musicbrainz_albumtype") or "").strip()
+            for t in tracks
+            if str(t.get("musicbrainz_albumtype") or "").strip()
+        }
+        _sp_types = {
+            str(t.get("spotify_album_type") or "").strip()
+            for t in tracks
+            if str(t.get("spotify_album_type") or "").strip()
+        }
+        candidates.append({
+            "artist": artist,
+            "album": album,
+            "album_artist": artist,
+            "spotify_album_type": next(iter(_sp_types)) if len(_sp_types) == 1 else None,
+            "musicbrainz_album_type": next(iter(_mb_types)) if len(_mb_types) == 1 else None,
+            "tracks": tracks,
+        })
 
     if artist_filter and not candidates:
         logger.info(

@@ -2412,6 +2412,63 @@ return '<div class="row g-3 mb-3">'
 }
 
 
+
+/* ── Mixed-Rip Audit ──────────────────────────────────────────────────────
+   Lists releases whose files disagree about identity-relevant tags. A folder
+   that is one album to Navidrome (default PID: the MusicBrainz id wins) but
+   several here is exactly the "saved the album but it is still split"
+   report. Read-only. */
+async function runMixedRipAudit() {
+  const out = document.getElementById('mixed_rip_audit_output');
+  const btn = document.getElementById('mixed_rip_audit_btn');
+  if (!out) return;
+  if (btn) btn.disabled = true;
+  out.innerHTML = '<span class="text-muted small">Scanning…</span>';
+
+  try {
+    const resp = await fetch('/api/popularity/mixed-rips', { cache: 'no-store' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      out.innerHTML = '<span class="text-danger small">'
+        + escapeHtml(data.error || ('HTTP ' + resp.status)) + '</span>';
+      return;
+    }
+    const rows = Array.isArray(data.mixed_rips) ? data.mixed_rips : [];
+    if (!rows.length) {
+      out.innerHTML = '<div class="alert alert-success py-2 mb-0 small">'
+        + 'No mixed rips found — every MusicBrainz release has consistent tags.</div>';
+      return;
+    }
+
+    const body = rows.map(function (r) {
+      const conflicts = Object.keys(r.conflicts || {}).map(function (k) {
+        const values = (r.conflicts[k] || []).map(function (v) {
+          return v === '' ? '<em>(blank)</em>' : escapeHtml(v);
+        }).join(' | ');
+        return '<div class="small"><span class="text-muted">' + escapeHtml(k) + ':</span> '
+          + values + '</div>';
+      }).join('');
+      return '<tr><td>' + escapeHtml(r.artist || '') + '</td>'
+        + '<td class="small">' + (r.albums || []).map(esc).join('<br>') + '</td>'
+        + '<td class="text-center">' + Number(r.tracks || 0) + '</td>'
+        + '<td>' + conflicts + '</td></tr>';
+    }).join('');
+
+    out.innerHTML = '<div class="alert alert-warning py-2 mb-2 small">'
+      + '<strong>' + rows.length + '</strong> release(s) carry conflicting tags. '
+      + 'Retag the whole folder in one Picard pass (Clear existing tags), then run a '
+      + '<strong>full</strong> Navidrome scan — quick scans do not re-derive album IDs.'
+      + '</div>'
+      + '<div style="max-height:26rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+      + '<thead><tr><th>Artist</th><th>Album titles</th><th class="text-center">Tracks</th>'
+      + '<th>Conflicting tags</th></tr></thead><tbody>' + body + '</tbody></table></div>';
+  } catch (err) {
+    out.innerHTML = '<span class="text-danger small">' + escapeHtml(String(err)) + '</span>';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function runStarResync(dryRun) {
   const out = document.getElementById('star_resync_output');
   const setOut = (html) => { if (out) out.innerHTML = html; };
@@ -3274,6 +3331,8 @@ async function pollGenrePlaylistResync(silent) {
     initConfigDirtyTracking();
     initConfigSettingsSearch();
     initGenreVocabularyViews();
+  const mixedRipBtn = document.getElementById('mixed_rip_audit_btn');
+  if (mixedRipBtn) mixedRipBtn.addEventListener('click', runMixedRipAudit);
   }
 
 document.addEventListener('DOMContentLoaded', function() {

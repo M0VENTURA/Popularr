@@ -2266,6 +2266,32 @@
     </div>
   </div>
 
+  <!-- Mixed-Rip Audit -->
+  <div class="card shadow-sm mb-3" id="mixed-rip-audit">
+    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
+      <h5 class="mb-0"><i class="bi bi-collection-fill"></i> Mixed-Rip Audit</h5>
+      <small class="text-muted">Releases whose files disagree about the tags Navidrome may key an album on</small>
+    </div>
+    <div class="card-body">
+      <p class="text-muted small mb-3">
+        Two rips of one release share a <code>musicbrainz_albumid</code> but can disagree about
+        <code>releasedate</code>, <code>originaldate</code>, <code>media</code> or even the album title.
+        Navidrome's <strong>default</strong> album rule prefers the MusicBrainz ID and ignores the date,
+        so that folder is one album there — but a customised PID rule that includes the release date,
+        or a library that has not had a full scan since a retag, splits it. This lists the releases
+        where more than one value exists within one MBID, so the folders that <em>will</em> split can be
+        found before someone has to open Get Info on each of them.
+      </p>
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        <button type="button" class="btn btn-sm btn-outline-primary" id="mixed_rip_audit_btn">
+          <i class="bi bi-search"></i> Find Mixed Rips
+        </button>
+        <small class="text-muted">Read-only — nothing is written.</small>
+      </div>
+      <div id="mixed_rip_audit_output" class="mt-2"></div>
+    </div>
+  </div>
+
   <!-- Popularity Weights Section -->
   <div class="card shadow-sm mb-3" id="popularity-weights">
     <div class="card-header bg-secondary bg-opacity-10 border-bottom">
