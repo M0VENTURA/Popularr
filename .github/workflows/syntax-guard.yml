@@ -46,8 +46,8 @@ jobs:
       - name: 🔎 Every Python file must parse
         run: python tools/check_remote_syntax.py --worktree
 
-      - name: 🚪 The app must import  (catches import-time damage a parse can miss)
-        if: always()
+      - name: 🚪 The app must import (catches import-time damage a parse can miss)
+        if: success() || failure()
         env:
           DATABASE_URL: sqlite:///:memory:
           SECRET_KEY: ci-not-a-real-secret
