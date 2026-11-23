@@ -40,6 +40,16 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "rank",
     "title",
     "artist",
+    # ⚠️ ``album_artist`` IS THE ALBUM'S OWNER, and without it a "this album is
+    # filed under the wrong artist" problem is invisible in this file.
+    #
+    # Reported: "many albums somehow got merged into the Various Artists albums
+    # such as Spotify - Essential Alternative". ``artist`` on a compilation is the
+    # PER-TRACK performer, so a merged album and a genuine Various-Artists
+    # compilation look IDENTICAL in the export — which is exactly why it could not
+    # be diagnosed from it. The album-level credit is the column that tells them
+    # apart.
+    "album_artist",
     "album",
     "disc_number",
     "track_number",
@@ -103,7 +113,7 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
 #: values are monotonic in each other (the remap is order-preserving), so the
 #: album file reads out in the same relative order as the artist file.
 _POPULARITY_REPORT_SELECT = """
-    SELECT title, artist, album, disc_number, track_number, year,
+    SELECT title, artist, album_artist, album, disc_number, track_number, year,
            listenbrainz_genres, musicbrainz_genres, lastfm_tags,
            discogs_genres, genres,
            raw_score, final_score, popularity, stars, duration,
@@ -202,6 +212,43 @@ def _genre_cell(value: Any) -> str:
     types reading out as ``"Rock; Pop"``.
     """
     return "; ".join(parse_genre_value(value))
+
+
+def ensure_playlist_index() -> dict[str, int]:
+    """Make the ``playlists_included_in`` column meaningful before an export.
+
+    ⚠️ WHY THE EXPORT HAS TO DO THIS ITSELF.
+
+    The column reads ``playlist_entries``, which is only populated by
+    ``sync_playlist_index`` — and that runs from the scan's FINALISE stage. So on
+    a library whose scan is still in progress (or stopped part-way), every row in
+    every popularity export came out blank, which reads as "this track is in no
+    playlist" rather than "the index has not been synced".
+
+    The sync is incremental: every playlist whose Navidrome ``changed`` stamp has
+    not moved is skipped WITHOUT a request, so a settled library costs one
+    ``fetch_all_playlists`` call. That is affordable per export and much more
+    useful than a silently blank column.
+
+    One definition, called by all three scopes (collection / artist / album), so
+    the column can never be populated for one export and blank for another.
+
+    Never raises: the export is the point, and a Navidrome outage must not cost
+    the whole file.
+    """
+    try:
+        from services.playlists.playlist_index_service import sync_playlist_index
+
+        stats = sync_playlist_index()
+        logger.info("Playlist index refreshed for the popularity report", **stats)
+        return stats
+    except Exception as exc:
+        logger.warning(
+            "Playlist index refresh before the popularity report failed — "
+            "the playlists_included_in column may be blank",
+            error=str(exc),
+        )
+        return {}
 
 
 def build_popularity_report(*, artist: str | None = None, album: str | None = None) -> str:

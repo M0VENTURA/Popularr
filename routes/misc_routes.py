@@ -2058,8 +2058,26 @@ async def api_collection_popularity_report() -> Any:
     """
     from services.popularity.popularity_report_service import (
         build_collection_popularity_report,
+        ensure_playlist_index,
         popularity_report_filename,
     )
+
+    # ⚠️ THE PLAYLIST COLUMN NEEDS THE INDEX, AND THE INDEX ONLY SYNCS AT THE END
+    # OF A FULL SCAN.
+    #
+    # Reported: "does the report show which playlists each track belongs to as it
+    # is meant to" — no, every row was blank. `playlists_included_in` reads
+    # `playlist_entries`, which is populated by `sync_playlist_index` from the
+    # scan's finalise stage. A scan still in progress (or one that stopped
+    # part-way) therefore exports a column of blanks, and the report silently
+    # reads as "this track is in no playlist".
+    #
+    # Failure is non-fatal and must stay that way: the export is the point, and
+    # a Navidrome outage must not cost the whole file.
+    try:
+        await asyncio.to_thread(ensure_playlist_index)
+    except Exception as exc:
+        logger.debug("Playlist index refresh failed before the report", error=str(exc))
 
     try:
         report = await asyncio.to_thread(build_collection_popularity_report)

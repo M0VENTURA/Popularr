@@ -30,6 +30,7 @@ from services.metadata import artist_metadata_service as metadata
 from services.metadata import artist_alias_service as alias_service
 from services.popularity.popularity_report_service import (
     build_popularity_report,
+    ensure_playlist_index,
     popularity_report_filename,
 )
 from services.enrichment.musicbrainz_service import get_shared_mb_client
@@ -898,6 +899,16 @@ async def api_artist_popularity_report() -> Any:
 
     # The query reads every track the artist owns, so it runs OFF the event
     # loop — the async ratchet exempts a handler only when it offloads.
+    #
+    # ``ensure_playlist_index`` is the same call the collection export makes: the
+    # ``playlists_included_in`` column reads the playlist index, which otherwise
+    # only syncs at the end of a FULL scan — so an in-progress library exported a
+    # column of blanks. Incremental, and failure is non-fatal.
+    try:
+        await asyncio.to_thread(ensure_playlist_index)
+    except Exception as exc:
+        logger.debug("Playlist index refresh failed before the report", error=str(exc))
+
     try:
         report = await asyncio.to_thread(build_popularity_report, artist=artist)
     except Exception as exc:

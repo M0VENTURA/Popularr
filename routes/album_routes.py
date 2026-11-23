@@ -52,6 +52,7 @@ from services.enrichment.discogs_service import lookup_discogs_album
 from services.downloads.download_matching_service import get_musicbrainz_release_tracks
 from services.popularity.popularity_report_service import (
     build_popularity_report,
+    ensure_playlist_index,
     popularity_report_filename,
 )
 
@@ -1064,6 +1065,14 @@ async def api_album_popularity_report() -> Any:
 
     # Reads every track on the album, so it runs OFF the event loop — the
     # async ratchet exempts a handler only when it offloads.
+    #
+    # Same index refresh as the artist and collection exports: the
+    # ``playlists_included_in`` column is otherwise blank until a full scan ends.
+    try:
+        await asyncio.to_thread(ensure_playlist_index)
+    except Exception as exc:
+        logger.debug("Playlist index refresh failed before the report", error=str(exc))
+
     try:
         report = await asyncio.to_thread(
             build_popularity_report, artist=artist, album=album

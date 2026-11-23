@@ -76,6 +76,11 @@ log_unified = log_navidrome_import
 
 VA_ALBUM_ARTIST_VARIANTS = frozenset({
     "various artists", "various", "v/a", "va", "compilation", "original soundtrack",
+    # A bare ``soundtrack`` is album-artist-like on dozens of OST rips, and
+    # ``_has_various_artist_part`` (which READS the stored value) already treats
+    # it as one. Leaving it out here meant the read and the write disagreed: a
+    # row could be recognised as Various Artists and then not written as one.
+    "soundtrack", "ost",
 })
 
 # ── Album-level dedupe for one full import run ──────────────────────────────
@@ -379,9 +384,27 @@ def album_artist_from_sources(
     canonical_artist_name: str,
     album_name: str,
     existing_album_artists: dict[str, str],
+    album_id: str = "",
 ) -> str:
-    """Resolve album_artist while preserving existing Various Artists-style values."""
-    existing_album_artist = existing_album_artists.get(album_name, "")
+    """Resolve album_artist while preserving existing Various Artists-style values.
+
+    ⚠️ THE EXISTING VALUE IS SCOPED TO *THIS* ALBUM, NOT TO ITS NAME.
+
+    Reported: "many albums somehow got merged into the Various Artists albums such
+    as Spotify - Essential Alternative".
+
+    ``existing_album_artists`` used to be keyed by the bare album NAME, so a
+    compilation called e.g. "Essential Alternative" under one artist made EVERY
+    artist's album of that name resolve to Various Artists — ``artist`` is the
+    per-track performer, so the export cannot show it, and the merge looks like
+    tracks being pulled into a "Various Artists" album. Album names are not
+    unique ("Greatest Hits" exists a thousand times over); the album ID is.
+    """
+    existing_album_artist = (
+        existing_album_artists.get(_album_scope_key(album_id, album_name), "")
+        if album_id
+        else ""
+    )
     existing_is_va = _has_various_artist_part(existing_album_artist)
 
     # A VA component is authoritative even when the album endpoint reports
@@ -407,6 +430,19 @@ def album_artist_from_sources(
         or canonical_artist_name
     )
     return album_artist_value
+
+
+def _album_scope_key(album_id: str, album_name: str) -> str:
+    """The key an album's stored ``album_artist`` is remembered under.
+
+    The album ID when there is one, because two artists may own albums with the
+    SAME title — keying on the title let one artist's "Various Artists"
+    compilation decide the owner of every other artist's album of that name.
+    """
+    ident = str(album_id or "").strip()
+    if ident:
+        return f"id:{ident}"
+    return f"name:{strip_album_edition_marker(str(album_name or ''))}"
 
 
 def fetch_album_tracks_safe(
@@ -590,7 +626,13 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
                 existing_album_tracks.setdefault(album_key, set()).add(str(track_id))
                 existing_album_rows.setdefault(album_key, []).append(row_dict)
             if album and album_artist:
-                existing_album_artists[strip_album_edition_marker(str(album))] = str(album_artist)
+                # Keyed by the album's IDENTITY, not its title — see
+                # ``_album_scope_key``. ``row_dict`` has no album_id column, so
+                # the stored album name is the only stable part of the key the
+                # prefetch can produce; ``album_artist_from_sources`` only reads
+                # the ``id:`` keys, so a name-keyed entry is never consulted for
+                # a DIFFERENT album that happens to share a title.
+                existing_album_artists[_album_scope_key("", str(album))] = str(album_artist)
             # Any critical field still empty → this album needs a re-import
             # when ``filter_missing`` is on (all four ARE on the wire, so a
             # re-import genuinely fills them).
@@ -1037,6 +1079,7 @@ def scan_artist_to_db(
                 canonical_artist_name=canonical_artist_name,
                 album_name=album_name,
                 existing_album_artists=existing_album_artists,
+                album_id=str(album_id),
             )
             logger.info(
                 "Importing album",
