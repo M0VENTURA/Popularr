@@ -176,10 +176,7 @@
       "id": "indie_rock",
       "display": "Indie Rock",
       "parent": "alternative_rock",
-      "specificity": 2,
-      "aliases": [
-        "indie"
-      ]
+      "specificity": 2
     },
     {
       "id": "indie_pop",
@@ -3947,7 +3944,11 @@
         "ignore_tag_position_weighting": true,
         "same_sound_pairs_metal_wins": true
       },
-      "root_fallback_only": true,
+      "root_fallback_only": {
+        "enabled": true,
+        "same_family_only": true,
+        "_comment": "Drop a specificity-0 genre only when a more specific genre from the SAME family is selected (Rock + Hard Rock -> Hard Rock). Punk next to Hard Rock is kept."
+      },
       "restore_parent_if_empty": true,
       "position3_new_family": true,
       "artist_only_same_family": true,

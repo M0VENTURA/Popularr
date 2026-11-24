@@ -2225,6 +2225,27 @@ def get_genre_selection_config() -> dict[str, Any]:
         except (TypeError, ValueError):
             return default
 
+    def _policy_flag(value: Any, default: bool) -> bool:
+        """One flag from a value that may be a bool, a string, or a policy object.
+
+        ⚠️ A DICT IS NOT A BOOL. ``bool({"enabled": False})`` is True, so writing
+        ``root_fallback_only: {enabled: false}`` in the vocabulary would have left
+        the rule switched ON with no error anywhere. ``enabled`` is read
+        explicitly when the value is a mapping.
+        """
+        if isinstance(value, dict):
+            value = value.get("enabled", default)
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().casefold()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+        return default
+
     thresholds = selection.get("thresholds")
     if not isinstance(thresholds, dict):
         thresholds = {}
@@ -2342,7 +2363,22 @@ def get_genre_selection_config() -> dict[str, Any]:
         ),
         # Bare family genres (Rock, Punk, Electronic, Pop) are a FALLBACK only:
         # they take a slot only when nothing more specific qualifies.
-        "root_fallback_only": bool(selection.get("root_fallback_only", True)),
+        #
+        # ⚠️ MAY BE A POLICY OBJECT. The vocabulary now writes
+        # ``{"enabled": true, "same_family_only": true}``, and ``bool()`` on a
+        # non-empty dict is True for ANY dict — so ``{"enabled": false}`` would
+        # have silently left the rule ON. Read ``enabled`` explicitly.
+        "root_fallback_only": _policy_flag(
+            selection.get("root_fallback_only"), True
+        ),
+        # Limit the rule to the SAME family: "Rock + Hard Rock" -> Hard Rock, but
+        # "Punk + Hard Rock" keeps Punk. Requires the vocabulary's dict form.
+        "root_fallback_same_family_only": _policy_flag(
+            (selection.get("root_fallback_only") or {}).get("same_family_only")
+            if isinstance(selection.get("root_fallback_only"), dict)
+            else None,
+            True,
+        ),
         # If condensing leaves no genre for position 1, re-select without it.
         "restore_parent_if_empty": bool(
             selection.get("restore_parent_if_empty", True)

@@ -447,6 +447,17 @@ def _diff(after: list[str], before: list[str]) -> dict[str, Any]:
 # Public: preview
 # ---------------------------------------------------------------------------
 
+def _resolved_int(key: str, default: int = 0) -> int:
+    """One ``playlists`` integer, or *default* when unreadable."""
+    try:
+        from helpers.config_helpers import get_config
+
+        raw = ((get_config() or {}).get("playlists") or {}).get(key, default)
+        return int(raw) if raw is not None else default
+    except (TypeError, ValueError, Exception):
+        return default
+
+
 def preview_genre_playlist_resync(
     *, limit_tracks: int | None = None, report_progress: bool = False
 ) -> dict[str, Any]:
@@ -608,6 +619,51 @@ def preview_genre_playlist_resync(
 
     elapsed = round(time.monotonic() - started, 2)
 
+    # ⭐ WHY THE LIST SHRANK, SPLIT INTO THE TWO CAUSES.
+    #
+    # ⚠️ REPORTED: "Playlists shrinking to 48-66 tracks". A bare count_after of 48
+    # says nothing about WHICH rule removed the tracks, and the two possible causes
+    # need opposite responses:
+    #
+    #   * GENRE-DRIVEN — the new Final Genres are a smaller evidence set, so fewer
+    #     tracks qualify. That is the rules working; nothing to fix.
+    #   * BUILDER-DRIVEN — the tracks still qualify but the artist cap, the
+    #     max_tracks slice or the creation threshold removed them. That is a
+    #     CONFIG decision (relax the cap / set a minimum size).
+    #
+    # The split is measurable without re-running either stage: the plan is the
+    # builder's own output, and the genre rewrite is what changed the pool.
+    shrinking: list[dict[str, Any]] = []
+    for change in playlist_changes:
+        after = planned.get(change["name"]) or []
+        before_ids = current.get(_playlist_name_key(change["name"]), [])
+        before_count = len(before_ids)
+        if not before_count or len(after) >= before_count:
+            continue
+        removed_ids = [str(t) for t in (change.get("removed") or [])]
+        # ⭐ THE SPLIT IS DECIDABLE FROM THE TWO ID SETS.
+        #
+        # A removed track whose GENRES this job is rewriting lost its place
+        # because the new genre set no longer qualifies it — genre-driven.
+        # A removed track whose genres are NOT changing still qualifies for the
+        # genre, so the builder dropped it: the artist cap, the max_tracks slice
+        # or the creation threshold. That is the config lever.
+        genre_driven = sum(1 for tid in removed_ids if tid in proposed_by_id)
+        builder_driven = len(removed_ids) - genre_driven
+        shrinking.append({
+            "name": change["name"],
+            "count_before": before_count,
+            "count_after": len(after),
+            "lost": before_count - len(after),
+            "genre_driven": genre_driven,
+            "builder_driven": builder_driven,
+            # The knobs that explain a builder-driven loss, so the report does not
+            # send the reader hunting through Config.
+            "max_tracks": _resolved_int("genre_playlists_max_tracks"),
+            "max_per_artist": _resolved_int("genre_playlists_max_per_artist"),
+            "create_threshold": _resolved_int("genre_playlists_create_threshold"),
+        })
+
     result = {
         "ok": True,
         "dry_run": True,
@@ -619,6 +675,7 @@ def preview_genre_playlist_resync(
             "tracks_detail": changed_tracks,
         },
         "playlist_changes": playlist_changes,
+        "shrinking_playlists": shrinking,
         "unmanaged_playlists": unmanaged,
         "summary": totals,
     }
@@ -870,6 +927,44 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
             )
 
         written = int(written or 0) + covers_written
+
+        # ⭐ THE ESSENTIAL COLLECTIONS ARE GENRE/STAR DERIVED TOO — and they were
+        # the ONE managed family this resync never rebuilt.
+        #
+        # ⚠️ REPORTED: "should there be a different Artist - Playlist resync
+        # option on the config page to rebuild the artist essential playlists
+        # with the earlier adjustments?" There was no such path at all: this job
+        # rebuilt the genre top-tracks and the covers family, and an Essential
+        # Collection only moved on a full scan. So changing the Essential rules
+        # and pressing "Apply & Rebuild" left every artist playlist untouched.
+        #
+        # It runs through the SAME reconcile pass the scan uses
+        # (``_refresh_all_essential_collections``), so the preview/apply and the
+        # scan cannot disagree about what an Essential Collection is.
+        essential_written = 0
+        try:
+            from services.popularity.stages.finalise_stage import (
+                _refresh_all_essential_collections,
+            )
+            from helpers.config_helpers import get_config as _get_config
+
+            _ess_cfg = (_get_config() or {}).get("playlists") or {}
+            if bool(_ess_cfg.get("essential_playlists_enabled", True)):
+                _write_progress(
+                    running=True, percent=85.0, phase=PHASE_PLAYLISTS,
+                    detail="Rebuilding Essential Collections…", status="running",
+                )
+                essential_written = int(
+                    _refresh_all_essential_collections() or 0
+                )
+        except Exception as exc:
+            # Same rule as the covers pass: a Essential failure must not fail a
+            # job whose genres are already written.
+            logger.warning(
+                "Genre/playlist resync: Essential rebuild failed", error=str(exc)
+            )
+
+        written = int(written or 0) + essential_written
 
         elapsed = round(time.monotonic() - started, 2)
         result = {

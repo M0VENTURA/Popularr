@@ -175,6 +175,51 @@ _TRACK_AFFILIATION_FILTER_TAGS: frozenset[str] = frozenset(
     _FILTER_TAGS - frozenset({"christmas", "holiday"})
 )
 
+#: Which ``is_*`` column owns each track-affiliation marker.
+#:
+#: ⭐ THE FLAG IS THE AUTHORITATIVE STORE, NOT THE GENRE LIST. The vocabulary's
+#: ``attributes`` block says these are "never genre slots… is_* booleans on the
+#: tracks table remain the authoritative store", so a marker is kept in
+#: ``genres`` only when its own flag is set on THAT row.
+#:
+#: ⚠️ REPORTED: "Live, Acoustic and Cover stored as genres". They were appended
+#: from title/source heuristics with NO reference to the flags, so a row could
+#: carry a "Cover" genre with is_cover = 0. ``_FILTER_TAGS`` cannot be deleted
+#: outright: the Covers and Acoustic playlists and the album blend still read the
+#: markers, and Christmas/Soundtrack/Comedy are genuine markers. The mapping makes
+#: the marker AGREE with the flag instead.
+_MARKER_FLAG_COLUMNS: dict[str, str] = {
+    "live": "is_live",
+    "acoustic": "is_acoustic",
+    "unplugged": "is_acoustic",
+    "cover": "is_cover",
+    "remix": "is_remix",
+    "remixed": "is_remix",
+}
+
+
+def marker_flag_allows(marker: str, row: dict[str, Any] | None) -> bool:
+    """True when *marker* may be written into this row's ``genres``.
+
+    A marker with no owning flag (Christmas, Soundtrack, Comedy, Remaster,
+    Instrumental, Orchestral, Symphonic) is always allowed — those are vocabulary
+    ``slot: "marker"`` genres or album properties, not per-recording affiliations.
+
+    ⚠️ A MISSING KEY FAILS OPEN. Callers pass different row shapes (a playlist row
+    from ``_CURATED_ROWS_SQL``, a pending ``update_payload``); treating an absent
+    column as False would silently delete a legitimate Live tag. Only an explicit
+    falsey value suppresses the marker.
+    """
+    column = _MARKER_FLAG_COLUMNS.get(str(marker or "").strip().lower())
+    if not column or row is None:
+        return True
+    if column not in row:
+        return True
+    value = row.get(column)
+    if isinstance(value, str):
+        return value.strip().casefold() in ("1", "true", "t", "yes")
+    return bool(value)
+
 
 def is_holiday_family_token(value: Any) -> bool:
     """True when ``value`` is any spelling of the holiday family."""
@@ -805,6 +850,7 @@ def _append_extra_genres(
     title: str,
     album: str,
     intercepted_filters: set[str] | None = None,
+    row: dict[str, Any] | None = None,
 ) -> list[str]:
     title_lower = str(title or "").lower()
     context_lower = f"{title or ''} {album or ''}".lower()
@@ -832,12 +878,24 @@ def _append_extra_genres(
     if "remaster" in title_lower or "remaster" in context_lower:
         filters.add("Remaster")
 
-    # Append all safely intercepted filter tags in deterministic order
+    # Append all safely intercepted filter tags in deterministic order.
+    #
+    # ⭐ ORDER IS DETERMINISTIC (sorted) AND A TRACK-AFFILIATION MARKER IS KEPT
+    # ONLY WHEN ITS OWN FLAG SAYS SO (``marker_flag_allows``). The text heuristics
+    # above can be wrong — a title ending "(Live)" on a row whose is_live is 0 was
+    # still given a Live genre — and the flag is the authoritative store.
     existing_lower = {g.lower() for g in genres}
     for f_tag in sorted(filters):
-        if f_tag.lower() not in existing_lower:
-            genres.append(f_tag)
-            existing_lower.add(f_tag.lower())
+        if f_tag.lower() in existing_lower:
+            continue
+        if not marker_flag_allows(f_tag, row):
+            logger.debug(
+                "Genre marker suppressed — its is_* flag is not set",
+                marker=f_tag, title=title,
+            )
+            continue
+        genres.append(f_tag)
+        existing_lower.add(f_tag.lower())
 
     return genres
 
@@ -920,6 +978,7 @@ def _aggregate_genres_v2(
     context_title: str,
     context_album: str,
     release_types: Iterable[str] = (),
+    row: dict[str, Any] | None = None,
 ) -> list[str] | None:
     """The canonical-vocabulary path. ``None`` means "fall back to legacy".
 
@@ -987,6 +1046,9 @@ def _aggregate_genres_v2(
         context_title,
         context_album,
         _collect_intercepted_filter_tags(source_map),
+        # ⚠️ The FLAGS, so a heuristic marker cannot disagree with the row's own
+        # is_live / is_acoustic / is_cover / is_remix columns.
+        row=row,
     )
 
 
@@ -1015,6 +1077,7 @@ def _aggregate_from_sources(
     context_album: str,
     nav_genres: Any = None,
     release_types: Iterable[str] = (),
+    row: dict[str, Any] | None = None,
 ) -> list[str]:
     """Run one engine over one evidence map."""
     if _selection_engine_v2_enabled():
@@ -1024,6 +1087,7 @@ def _aggregate_from_sources(
             context_title=context_title,
             context_album=context_album,
             release_types=release_types,
+            row=row,
         )
         if v2 is not None:
             return v2
@@ -1034,7 +1098,9 @@ def _aggregate_from_sources(
     )
     nav_keys = _normalize_nav_keys(nav_genres)
     top_genres = _rank_genres(votes, spellings, source_hits, max_genres=max_genres, nav_keys=nav_keys)
-    return _append_extra_genres(top_genres, context_title, context_album, intercepted_filters)
+    return _append_extra_genres(
+        top_genres, context_title, context_album, intercepted_filters, row=row
+    )
 
 
 def aggregate_genres(
@@ -1044,6 +1110,7 @@ def aggregate_genres(
     context_album: str = "",
     nav_genres: Any = None,
     release_types: Iterable[str] = (),
+    row: dict[str, Any] | None = None,
 ) -> list[str]:
     """Top genres for one track or album.
 
@@ -1077,6 +1144,7 @@ def aggregate_genres(
             context_album=context_album,
             nav_genres=nav_genres,
             release_types=release_types,
+            row=row,
         )
         if any(
             genre and not is_track_affiliation_tag(genre)
@@ -1092,6 +1160,7 @@ def aggregate_genres(
             context_album=context_album,
             nav_genres=nav_genres,
             release_types=release_types,
+            row=row,
         )
     return _aggregate_from_sources(
         navidrome_map,
@@ -1100,6 +1169,7 @@ def aggregate_genres(
         context_album=context_album,
         nav_genres=nav_genres,
         release_types=release_types,
+        row=row,
     )
 
 

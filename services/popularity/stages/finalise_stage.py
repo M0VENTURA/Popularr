@@ -6219,9 +6219,6 @@ def _create_genre_top_track_playlists(
         if prune_only:
             continue
 
-        if not playlist_exists and qualifying_count < create_threshold:
-            continue
-
         if not create_enabled and not playlist_exists:
             continue
 
@@ -6253,6 +6250,36 @@ def _create_genre_top_track_playlists(
             winners = winners[:max_tracks]
         if interleave_artists:
             winners = _interleave_artists(winners)
+
+        # ⭐ THE CREATION GATE USES THE FINAL TRACK COUNT, NOT THE POOL SIZE.
+        #
+        # ⚠️ REPORTED: "The playlist rebuild also doesn't stick to the minimum
+        # tracks required for playlist creation in the config." The gate used
+        # ``qualifying_count`` — measured BEFORE the artist cap and the
+        # ``max_tracks`` slice — so a genre with 120 qualifying tracks passed a
+        # 100-track threshold and then shipped 48-66 after the cap removed the
+        # rest. The config says how many tracks a playlist must HAVE, so the
+        # number that decides it must be the one that is written.
+        #
+        # ⚠️ Evaluated AFTER the slice but BEFORE rotation: rotation only
+        # reorders survivors, so it cannot change the count.
+        _final_count = len(winners)
+        if not playlist_exists and _final_count < create_threshold:
+            logger.info(
+                "Genre playlist not created — it would be shorter than the "
+                "creation threshold",
+                genre=genre,
+                would_have=_final_count,
+                threshold=create_threshold,
+                qualifying=qualifying_count,
+            )
+            continue
+        # An existing playlist that can no longer reach the DELETE threshold is
+        # removed rather than left as a shrinking stub.
+        if playlist_exists and _final_count < min(delete_threshold, create_threshold):
+            _delete_playlist_from_navidrome(playlist_name)
+            keep_playlist_names.discard(playlist_name)
+            continue
 
         # ⭐ SELF-CHECK BEFORE THE ROTATION, on the actual selection.
         #

@@ -208,6 +208,25 @@ class SelectionSettings:
     #: generic slots to 3.4% and raised the share of acceptable genres on the
     #: labelled tracks from 86% to 93%.
     root_fallback_only: bool = True
+    #: Whether the root fallback is limited to the SAME family.
+    #:
+    #: ⭐ ``true`` (the requested rule): a specificity-0 root is ordered last only
+    #: against a more specific genre OF ITS OWN FAMILY. "Rock + Hard Rock" -> Hard
+    #: Rock, but "Punk" beside "Hard Rock" is KEPT — punk is its own family, so the
+    #: hard rock tells us nothing about whether the punk root is redundant.
+    #:
+    #: ⚠️ ``false`` restores the older, blunter reading: every root is ordered
+    #: last whenever ANY specific genre exists. That is what the first
+    #: implementation did, and it dropped ``Pop`` beside ``Synthpop`` (electronic
+    #: family) and a lone ``Reggae`` beside an unrelated metal genre.
+    root_fallback_same_family_only: bool = True
+    #: ``{0-based position: (allowed evidence levels)}``.
+    #:
+    #: Read from the vocabulary's ``evidence_policy.positions[].requires_levels_any``,
+    #: which the loader previously discarded — so positions 2 and 3 could be filled
+    #: by ARTIST-only evidence, and the same genre then appeared on every track of
+    #: every album by that artist.
+    position_levels: dict[int, tuple[str, ...]] = field(default_factory=dict)
     #: If condensing would leave NO genre at position 1, re-select without it.
     #:
     #: ⚠️ THIS IS A BUG IN THE CURRENT DESIGN, not a preference. On The Trooper,
@@ -537,8 +556,19 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         ``bool("false")`` is True, so a string value written by the page must be
         interpreted rather than coerced — otherwise switching the policy OFF in
         the UI would silently leave it ON.
+
+        ⚠️ A POLICY OBJECT IS ALSO ACCEPTED. ``root_fallback_only`` became
+        ``{"enabled": true, "same_family_only": true}`` in the vocabulary, and a
+        plain ``bool(dict)`` is True for ANY non-empty dict — including
+        ``{"enabled": false}``, which would silently leave the rule ON. The
+        ``enabled`` key is therefore read explicitly when the value is a mapping.
         """
         value = raw.get(key, default)
+        if isinstance(value, dict):
+            return _coerce_flag(value.get("enabled", default), default)
+        return _coerce_flag(value, default)
+
+    def _coerce_flag(value: Any, default: bool) -> bool:
         if isinstance(value, bool):
             return value
         if value is None:
@@ -549,6 +579,71 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         if text in ("0", "false", "no", "off", ""):
             return False
         return default
+
+    def _sub_flag(key: str, sub: str, default: bool) -> bool:
+        """A flag nested inside a policy object, e.g. ``same_family_only``.
+
+        Reads the VOCABULARY's object first (that is where the rule is declared),
+        then config.yaml, so a file edit is honoured without a config copy.
+        """
+        block = _policy_block.get(key)
+        if isinstance(block, dict) and sub in block:
+            return _coerce_flag(block.get(sub, default), default)
+        value = raw.get(key)
+        if not isinstance(value, dict):
+            return default
+        return _coerce_flag(value.get(sub, default), default)
+
+    def _vocab_policy() -> dict[str, Any]:
+        """The vocabulary's ``evidence_policy.collection_policy`` block.
+
+        ⭐ FALLBACK SOURCE FOR THE COLLECTION-POLICY FLAGS. config.yaml wins where
+        it sets a key (an operator override), but the vocabulary's own statement
+        must not be silently ignored — which is what happened before: the file
+        declared these rules and the loader discarded the block.
+        """
+        try:
+            policy = get_vocabulary().evidence_policy or {}
+            block = policy.get("collection_policy") or {}
+            return block if isinstance(block, dict) else {}
+        except Exception:  # pragma: no cover - defensive
+            return {}
+
+    _policy_block = _vocab_policy()
+
+    def _policy_or(sub: str, key: str, default: bool) -> bool:
+        """``collection_policy[sub]`` if the vocabulary states it, else config."""
+        if sub in _policy_block:
+            value = _policy_block[sub]
+            if isinstance(value, dict):
+                return _coerce_flag(value.get("enabled", default), default)
+            return _coerce_flag(value, default)
+        return _bool(key, default)
+
+    def _position_levels() -> dict[int, tuple[str, ...]]:
+        """``{0-based position: allowed levels}`` from ``evidence_policy.positions``.
+
+        ⚠️ THIS RULE WAS DOCUMENTED AND NEVER IMPLEMENTED. ``requires_levels_any``
+        is what stops artist-only evidence filling slots 2 and 3, and without it
+        the same artist tags repeat on every track of every album.
+        """
+        try:
+            policy = get_vocabulary().evidence_policy or {}
+            listed = policy.get("positions") or []
+        except Exception:  # pragma: no cover - defensive
+            return {}
+        out: dict[int, tuple[str, ...]] = {}
+        for entry in listed:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                position = int(entry.get("position")) - 1
+            except (TypeError, ValueError):
+                continue
+            levels = entry.get("requires_levels_any")
+            if isinstance(levels, list) and levels and position >= 0:
+                out[position] = tuple(str(v).strip().lower() for v in levels if str(v).strip())
+        return out
 
     def _companions() -> tuple[str, ...]:
         """The genres kept beside Nu Metal, canonicalised through the vocabulary.
@@ -603,11 +698,21 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         metal_over_rock_mode=_mode("metal_over_rock_mode", "share"),
         metal_over_rock_min_share=_ratio("metal_over_rock_min_share", 0.60),
         metal_over_rock_exclude_roots=_bool("metal_over_rock_exclude_roots", True),
-        root_fallback_only=_bool("root_fallback_only", True),
-        restore_parent_if_empty=_bool("restore_parent_if_empty", True),
-        artist_only_same_family=_bool("artist_only_same_family", True),
+        root_fallback_only=_policy_or("root_fallback_only", "root_fallback_only", True),
+        root_fallback_same_family_only=_sub_flag(
+            "root_fallback_only", "same_family_only", True
+        ),
+        position_levels=_position_levels(),
+        restore_parent_if_empty=_policy_or(
+            "restore_parent_if_empty", "restore_parent_if_empty", True
+        ),
+        artist_only_same_family=_policy_or(
+            "artist_only_same_family", "artist_only_same_family", True
+        ),
         declared_redundancy=_bool("declared_redundancy", True),
-        position3_new_family=_bool("position3_new_family", True),
+        position3_new_family=_policy_or(
+            "position3_new_family", "position3_new_family", True
+        ),
         ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
         umbrella_absorb_min_ratio=_num("umbrella_absorb_min_ratio", 0.60),
         essentia_fallback=_bool("essentia_fallback", True),
@@ -1797,11 +1902,7 @@ def trim_to_final(
     kept_ids = {c.genre_id for c in selected}
     cap = settings.max_genres
 
-    ranked = sorted(
-        candidates,
-        key=lambda c: (c.confidence, c.score, c.specificity),
-        reverse=True,
-    )
+    ranked = _ranked(candidates)
     leader = ranked[0] if ranked else None
     leader_score = leader.score if leader else 0.0
 
@@ -2088,6 +2189,37 @@ def enforce_family_diversity(
 # Selection
 # ---------------------------------------------------------------------------
 
+def _rank_key(candidate: "Candidate") -> tuple:
+    """The ONE ranking key. Score first, then the NAME for a deterministic tie.
+
+    ⚠️ REPORTED: "Genre order changes between tracks". The key used to be
+    ``(confidence, score, specificity)`` with ``reverse=True`` and no final
+    discriminator, so two candidates scoring identically fell back to Python's
+    stable sort — i.e. the INPUT order, which is the iteration order of
+    ``source_map``. Two tracks with the same evidence could therefore list the
+    same genres in different orders, and the order leaked all the way to the
+    written tag.
+
+    Sorting on the display name LAST makes the order a property of the data.
+    ``reverse=True`` would invert it into a Z-descending sort, so the name is
+    negated via a wrapper that sorts ascending on a descending list — see
+    ``_ranked`` below, which sorts ascending on the negated numeric keys instead.
+    """
+    return (-float(candidate.confidence), -float(candidate.score),
+            -int(candidate.specificity), str(candidate.display).casefold(),
+            str(candidate.genre_id))
+
+
+def _ranked(candidates: list["Candidate"]) -> list["Candidate"]:
+    """Rank with ``_rank_key`` — the single implementation.
+
+    ⭐ ONE PLACE. Four near-identical ``sorted(...)`` expressions drifted apart
+    before; every one of them now calls this, so a change to the ranking (like
+    the alphabetical tie-break) applies uniformly and cannot be half-applied.
+    """
+    return sorted(candidates, key=_rank_key)
+
+
 def rank_and_condense(
     candidates: list[Candidate],
     *,
@@ -2103,11 +2235,7 @@ def rank_and_condense(
     (§15) is that a result be explainable, and "why is my genre missing" is
     unanswerable if the losers are discarded before anyone can look at them.
     """
-    return sorted(
-        candidates,
-        key=lambda c: (c.confidence, c.score, c.specificity),
-        reverse=True,
-    )
+    return _ranked(candidates)
 
 
 def remove_family_outliers(
@@ -2257,11 +2385,7 @@ def select_genres(
     """
     settings = settings or _settings_from_config(None)
 
-    ranked = sorted(
-        candidates,
-        key=lambda c: (c.confidence, c.score, c.specificity),
-        reverse=True,
-    )
+    ranked = _ranked(candidates)
 
     # ⭐ BARE FAMILY GENRES ARE A FALLBACK — they are considered LAST.
     #
@@ -2283,8 +2407,25 @@ def select_genres(
     # actually SELECTED, so with this ordering that is the strongest SPECIFIC
     # genre wherever one exists — exactly the yardstick the rule wants.
     if settings.root_fallback_only:
-        _roots = [c for c in ranked if c.specificity == 0 and not c.manual]
-        _specific = [c for c in ranked if not (c.specificity == 0 and not c.manual)]
+        # ⭐ SAME-FAMILY UNLESS DISABLED. A root only loses its precedence to a
+        # specific genre of ITS OWN family: "Rock + Hard Rock" -> Hard Rock, but
+        # "Punk" beside "Hard Rock" is kept, because punk is a different family and
+        # hard rock says nothing about whether the punk root is redundant.
+        _families_with_specific = {
+            (c.family or c.genre_id)
+            for c in ranked
+            if c.specificity > 0 and not c.manual
+        }
+
+        def _is_deferred_root(c: "Candidate") -> bool:
+            if c.specificity != 0 or c.manual:
+                return False
+            if not settings.root_fallback_same_family_only:
+                return True
+            return (c.family or c.genre_id) in _families_with_specific
+
+        _roots = [c for c in ranked if _is_deferred_root(c)]
+        _specific = [c for c in ranked if not _is_deferred_root(c)]
         ranked = _specific + _roots
 
     selected: list[Candidate] = []
@@ -2306,6 +2447,32 @@ def select_genres(
                 floor=floor,
             )
             break
+
+        # ⭐ PER-POSITION EVIDENCE LEVEL — `positions[N].requires_levels_any`.
+        #
+        # ⚠️ REPORTED: "Hard Rock, Post-Rock and Alt Rock on EVERY TRACK of an
+        # album". Artist-level evidence is one tag for the whole act, so when it is
+        # allowed to fill slots 2 and 3 it repeats identically on every track of
+        # every album. Positions 2+ require TRACK or ALBUM evidence — a fact about
+        # the recording or the release — which is what makes a per-track list vary.
+        #
+        # Position 1 is exempt: ``positions[0].requires_levels_any`` includes
+        # "artist", because a track with NO other evidence must still get a genre
+        # (see ``artist_only.max_positions``).
+        #
+        # ⚠️ ``continue``, not ``break``: an artist-only candidate cannot take this
+        # slot, but a properly evidenced candidate behind it can.
+        required_levels = settings.position_levels.get(position) if settings.position_levels else None
+        if required_levels and not candidate.manual:
+            if not (candidate.entities & set(required_levels)):
+                logger.debug(
+                    "Genre lacks the evidence level this position requires",
+                    genre=candidate.display,
+                    position=position + 1,
+                    entities=sorted(candidate.entities),
+                    required=sorted(required_levels),
+                )
+                continue
 
         # ⭐ POSITION-3 CONCESSION — a MetaBrainz pair may fill the LAST slot.
         #
@@ -2403,11 +2570,7 @@ def _apply_local_fallback(
         if candidate.specificity > 0 or len(eligible) == 1
     ] or eligible
 
-    ranked = sorted(
-        eligible,
-        key=lambda c: (c.confidence, c.score, c.specificity),
-        reverse=True,
-    )
+    ranked = _ranked(eligible)
     kept = ranked[: max(1, settings.max_genres)]
 
     # The normal trim already recorded these as "below the floor" / "outside the
@@ -2641,6 +2804,10 @@ def select_album_or_track_genres(
 
     # Musical genres first, markers last — the contract the playlist builder
     # reads. ``_pool_markers`` was split out before the trim.
+    #
+    # ⚠️ ``selected`` KEEPS RANK ORDER ON PURPOSE, because position 1 is the
+    # primary genre and must stay first. Only TIES are alphabetical (see
+    # ``_rank_key``); re-sorting the whole list here would lose the ranking.
     _selected_displays = [c.display for c in selected]
     selected_display_order = _selected_displays + _pool_markers
     _markers = _pool_markers

@@ -311,6 +311,14 @@ class Vocabulary:
     #: ⭐ IN THE JSON SO IT IS EDITABLE, not hardcoded — the protected list is a
     #: statement about how THIS collection's sources spell things.
     tokenizer: dict[str, Any] = field(default_factory=dict)
+    #: The ``evidence_policy`` block, verbatim.
+    #:
+    #: ⚠️ THIS WAS DISCARDED BY THE LOADER. The file documented a dozen selection
+    #: rules — per-position evidence levels, artist-only limits, corroboration and
+    #: dilution weights — and NOTHING read them, so edits there changed no
+    #: behaviour at all. The settings builder now reads the keys it implements;
+    #: this field is what carries them out of the file.
+    evidence_policy: dict[str, Any] = field(default_factory=dict)
 
     def is_noise_value(self, raw: Any) -> bool:
         """True when ``raw`` is listed in the vocabulary's ``noise_values``.
@@ -848,6 +856,10 @@ def _build(
         # ``protected_values`` without re-reading the file (a caller may have
         # built a vocabulary from an override or a test fixture).
         tokenizer=dict(data.get("tokenizer") or {}) if isinstance(data.get("tokenizer"), dict) else {},
+        evidence_policy=(
+            dict(data.get("evidence_policy") or {})
+            if isinstance(data.get("evidence_policy"), dict) else {}
+        ),
     )
 
 

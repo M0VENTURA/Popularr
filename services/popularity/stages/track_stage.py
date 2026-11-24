@@ -3505,6 +3505,10 @@ def process_track(
                 # so the rule silently never applied during a real scan — only
                 # the resync (which selects ``musicbrainz_albumtype``) had it.
                 release_types=_release_types_for_scope(album_context, album_result),
+                # ⭐ The FLAGS. A performance marker (Cover/Live/Acoustic/Remix)
+                # may only be written into ``genres`` when its own is_* column
+                # agrees, so a title heuristic cannot invent one.
+                row=effective_track,
             )
             # ⭐ A track must not end up with ONLY an edition/performance
             # marker ("Cover, Remaster"). If every sourced genre was filtered
