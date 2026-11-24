@@ -7882,6 +7882,11 @@ _CURATED_ROWS_SQL = """
            COALESCE(is_compilation, 0) AS is_compilation,
            COALESCE(is_single, FALSE) AS is_single,
            COALESCE(is_cover, 0) AS is_cover,
+           -- ⭐ The COVER verdict's per-track provenance. Without it the covers
+           -- playlist cannot tell a real cover (this recording) from an
+           -- album-level "cover" genre tag (the release), which is how
+           -- "This Is the New Shit" and "No Class" qualified.
+           original_cover_artist,
            COALESCE(is_acoustic, 0) AS is_acoustic,
            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
@@ -7935,7 +7940,59 @@ def _fetch_curated_playlist_rows(min_stars: int = 4) -> list[dict[str, Any]] | N
     return filtered
 
 
-def _dedupe_curated_pool(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _version_preference_key(row: dict[str, Any]) -> tuple:
+    """Prefer the CANONICAL release of the same track. Sorts BEFORE the score.
+
+    ⚠️ REPORTED: "Wrong version: Faith (edited) is used. The original Faith has
+    the same listener count, so prefer the unedited album version."
+
+    ``"Faith (edited)"`` and ``"Faith"`` are ONE track to a listener. They share a
+    listener count because Last.fm counts the recording, so no popularity tiebreak
+    can separate them — ``(edited)`` won on title order. This key makes the choice
+    explicit instead of accidental.
+
+    Three separate signals, in order:
+      1. not ``(edited)`` / ``(explicit)`` — a censored cut is never preferred;
+      2. NOT a compilation — the album version is the original, the greatest-hits
+         copy is a re-release (same rule the Essential Collection uses);
+      3. a real score — a duplicate row that was never scanned reports 0 listeners,
+         and a 0 must never win a tie against a measured value.
+
+    ⚠️ ``title_had_cover_wording`` is NOT used: that column tracks whether the
+    cover suffix was stripped, which is unrelated to an edited/explicit cut.
+    """
+    title = str(row.get("title") or "").casefold()
+    edited = bool(_EDITED_VERSION_RE.search(title))
+    return (
+        1 if edited else 0,
+        int(row.get("is_compilation") or 0),
+        0 if float(row.get("lastfm_listeners") or 0) > 0
+        or float(row.get("listenbrainz_listens") or 0) > 0 else 1,
+    )
+
+
+#: A censored / altered cut: "Faith (edited)", "Song (explicit)".
+_EDITED_VERSION_RE = re.compile(r"\((?:edited|explicit|clean|uncensored)\)", re.IGNORECASE)
+
+
+def _dedupe_curated_pool(
+    tracks: list[dict[str, Any]],
+    *,
+    prefer_canonical: bool = False,
+) -> list[dict[str, Any]]:
+    """One row per (artist, title).
+
+    ``prefer_canonical=True`` inserts ``_version_preference_key`` FIRST, so an
+    edited or compilation copy of a track never wins over the album original. Off
+    by default: the other curated playlists (acoustic, high-energy, …) keep their
+    existing choice, and turning it on globally would change their contents
+    without anyone asking.
+
+    ⭐ THE KEY NORMALISES THE SUFFIX AWAY. ``_normalise_essential_title`` strips
+    every ``(...)`` group, so "Faith (edited) (George Michael Cover)" and "Faith
+    (George Michael Cover)" are ONE group — which is exactly why the two rows
+    compete at all, and why the tiebreak has to be deliberate.
+    """
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for t in tracks:
         artist_val = str(t.get("artist") or t.get("album_artist") or "")
@@ -7944,7 +8001,8 @@ def _dedupe_curated_pool(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         grouped[key].append(t)
 
     def _tiebreak(item: dict[str, Any]) -> tuple:
-        return (
+        canonical = _version_preference_key(item) if prefer_canonical else ()
+        return canonical + (
             int(item.get("is_live") or 0),
             int(item.get("is_compilation") or 0),
             -int(item.get("stars") or 0),
@@ -7976,6 +8034,8 @@ def _sync_single_curated_playlist(
     cfg: dict[str, Any],
     clear_when_empty: bool = True,
     playlist_listing: dict[int, list[dict[str, Any]]] | None = None,
+    order_by_reach: bool = False,
+    prefer_canonical: bool = False,
 ) -> bool:
     """Push ONE curated playlist so it matches *pool* exactly.
 
@@ -7988,8 +8048,13 @@ def _sync_single_curated_playlist(
 
     ``clear_when_empty=False`` retains the old leave-it-alone behaviour for
     callers that cannot prove the empty pool is real.
+
+    ⚠️ ``order_by_reach`` AND ``prefer_canonical`` ARE OPT-IN, AND ONLY THE COVERS
+    PLAYLISTS SET THEM. This function is shared by EIGHT playlists (covers, covers
+    by genre, acoustic, high-energy, and the rest); changing the shared ordering
+    would silently reselect all of them.
     """
-    winners = _dedupe_curated_pool(pool)
+    winners = _dedupe_curated_pool(pool, prefer_canonical=prefer_canonical)
     if not winners:
         if not clear_when_empty:
             return False
@@ -8028,17 +8093,64 @@ def _sync_single_curated_playlist(
     max_per_artist = _resolve_max_per_artist(cfg)
     interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
 
-    ordered = sorted(winners, key=lambda r: _playlist_order_key(r, order_mode))
-    if max_tracks and max_tracks > 0:
-        ordered = ordered[:max_tracks]
-    # The cap runs AFTER the slice: a capped-out 4-star can no longer push a
-    # 5-star cover out of the list.
-    ordered = _apply_artist_cap(ordered, max_per_artist)
-    if interleave_artists:
-        ordered = _interleave_artists(ordered)
-    winners = _weekly_shuffle(
-        ordered, playlist_key=playlist_name, scope="genre_top_tracks"
-    )
+    if order_by_reach:
+        # ⭐ COVERS ARE A CHART, SO THEY RANK ON REACH — the same rule the genre
+        # Top Tracks builder uses.
+        #
+        # ⚠️ REPORTED: "the playlist's order has essentially no relationship to
+        # listener counts or final scores (correlation about 0 for both), so it
+        # looks shuffled", and "115 of the tracks are rated 5 stars, so tracks
+        # were picked mainly for being the top-rated song on their album".
+        #
+        # Both were true of the old key, which sorted STARS first and then the
+        # ALBUM-RELATIVE score. In a covers list spanning many artists that is the
+        # wrong question: the score is a remap inside one release, so it says
+        # nothing about whether a cover is famous. Reach (Last.fm listeners,
+        # falling back to ListenBrainz) is the only cross-artist number available.
+        #
+        # ⚠️ COMPILATION COPIES SORT LAST, NOT FIRST. A greatest-hits duplicate is
+        # the same recording; preferring the album version keeps the entry that
+        # someone actually looking for the cover would expect.
+        ranked = sorted(
+            winners,
+            key=lambda r: (
+                0 if int(r.get("is_compilation") or 0) == 0 else 1,
+                -_essential_reach(r),
+                -int(r.get("stars") or 0),
+                str(r.get("title") or "").casefold(),
+                str(r.get("id") or ""),
+            ),
+        )
+        # ⭐ THE CAP WALKS DOWN THE RANKING, which is the reported requirement and
+        # what makes a low cap workable here: covers are dominated by a few acts
+        # (Metallica 26 of the 139 most popular, Apocalyptica 15), so each act's
+        # slots go to its BIGGEST covers rather than to whichever survived.
+        ranked = _apply_artist_cap(ranked, max_per_artist)
+        ordered = ranked[:max_tracks] if max_tracks and max_tracks > 0 else ranked
+        if interleave_artists:
+            ordered = _interleave_artists(ordered)
+        # ⚠️ ROTATE WITHIN A POPULARITY BAND, never across the whole list. The old
+        # covers path passed no ``tier_key``, so ``_weekly_shuffle`` fell through
+        # to a WHOLE-LIST shuffle — which on its own made the pushed order
+        # unrelated to the ranking, whatever the sort key said.
+        winners = _weekly_shuffle(
+            ordered,
+            playlist_key=playlist_name,
+            scope="genre_top_tracks",
+            tier_key=_genre_shuffle_band,
+        )
+    else:
+        ordered = sorted(winners, key=lambda r: _playlist_order_key(r, order_mode))
+        if max_tracks and max_tracks > 0:
+            ordered = ordered[:max_tracks]
+        # The cap runs AFTER the slice: a capped-out 4-star can no longer push a
+        # 5-star cover out of the list.
+        ordered = _apply_artist_cap(ordered, max_per_artist)
+        if interleave_artists:
+            ordered = _interleave_artists(ordered)
+        winners = _weekly_shuffle(
+            ordered, playlist_key=playlist_name, scope="genre_top_tracks"
+        )
 
     song_ids = [str(r.get("id") or "").strip() for r in winners if str(r.get("id") or "").strip()]
     if not song_ids:
@@ -8703,6 +8815,8 @@ def _create_genre_covers_playlists(
             max_tracks=max_tracks,
             cfg=cfg,
             playlist_listing=playlist_listing,
+            order_by_reach=True,
+            prefer_canonical=True,
         ):
             written += 1
 
@@ -8716,6 +8830,105 @@ def _create_genre_covers_playlists(
     return written
 
 
+def _covers_min_stars(cfg: dict[str, Any]) -> int:
+    """The star floor the covers ROW FETCH uses.
+
+    ⭐ 4, NOT 3. The old fetch used 3, so a 2-star cover with 39 listeners reached
+    the pool — the reported "Let Me Love You (Love and Death), 39 listeners,
+    2 stars" and "Shock the Monkey, 312 listeners, 1 star, but final score 95".
+    A high score cannot rescue them: that score is the top of their own album, not
+    evidence anyone listens to the cover.
+
+    ⭐ ``0`` DISABLES THE FLOOR (`or` would have made it 4 — see the fallback-cap
+    bug), which is what the resync uses to re-evaluate everything.
+    """
+    raw = cfg.get("covers_min_stars", 4)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 4
+    return max(0, value)
+
+
+def _cover_rows_are_credible(
+    rows: list[dict[str, Any]],
+    *,
+    reasons: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Drop rows whose cover verdict cannot be right.
+
+    ⚠️ REPORTED FALSE COVERS, all of which the flag alone admits:
+
+        Marilyn Manson - This Is the New Shit   (genres "Cover", an MTV2 compilation)
+        Motörhead - No Class                    (mb_genres "Cover; hard rock; …")
+        Limp Bizkit - Take a Look Around (Timbaland remix)  (genres "…; Remix; Cover")
+
+    The first two are an album-level "Cover" tag reaching the track: MusicBrainz
+    tags a COVER ALBUM with the genre "cover", and the album blend then writes it
+    to every track. It is a fact about the release, not the recording. The third
+    is a REMIX — a remix of your own song is not a cover of someone else's.
+
+    ⭐ THE TEST IS PER-TRACK EVIDENCE, which is the only signal that survives.
+    A row is kept when the detector recorded the act it covers
+    (``original_cover_artist``) OR its own title carries the "(X Cover)" suffix.
+    Both are written per recording. A row whose ONLY justification is an
+    album-level genre is dropped.
+
+    ⚠️ IT FAILS OPEN. When NEITHER signal exists for ANY row (an older library, a
+    detector that had not run), the guard does nothing rather than emptying the
+    playlist — the same reasoning as the corroboration gate. It only acts when it
+    can tell a per-track verdict from an album-level one.
+    """
+    if not rows:
+        return rows
+
+    def _per_track_signal(row: dict[str, Any]) -> bool:
+        if str(row.get("original_cover_artist") or "").strip():
+            return True
+        return bool(_COVER_SUFFIX_RE.search(str(row.get("title") or "")))
+
+    if not any(_per_track_signal(row) for row in rows):
+        return rows
+
+    kept: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    for row in rows:
+        if _per_track_signal(row):
+            kept.append(row)
+            continue
+        title = str(row.get("title") or "")
+        # Only a REMIX or a bare album-level tag is rejected; anything else is
+        # kept, because the absence of the two signals is not evidence of a
+        # false positive on its own.
+        genres = str(row.get("genres") or "").casefold()
+        if "remix" in genres or _REMIX_TITLE_RE.search(title):
+            removed.append(row)
+            continue
+        kept.append(row)
+
+    if removed:
+        logger.debug(
+            "Covers: dropped remix rows with no per-track cover evidence",
+            count=len(removed),
+            titles=[str(r.get("title") or "") for r in removed][:10],
+        )
+        if reasons is not None:
+            for row in removed:
+                reasons.append({
+                    "genre": str(row.get("title") or ""),
+                    "id": str(row.get("id") or ""),
+                    "reason": "COVER_REMIX_WITHOUT_EVIDENCE",
+                    "trigger": "genres say Remix",
+                })
+    return kept
+
+
+#: The detector's title suffix: "(George Michael Cover)".
+_COVER_SUFFIX_RE = re.compile(r"\([^)]*\bcover\)\s*$", re.IGNORECASE)
+#: A remix title: "(Timbaland remix)", "[Remix]".
+_REMIX_TITLE_RE = re.compile(r"[\(\[]\s*[^)\]]*\bremix\b", re.IGNORECASE)
+
+
 def _create_covers_playlist(
     cfg: dict[str, Any],
     rows: list[dict[str, Any]] | None = None,
@@ -8727,10 +8940,12 @@ def _create_covers_playlist(
     pl_name = str(cfg.get("covers_playlist_name") or "Great Covers").strip() or "Great Covers"
     max_tracks = max(10, int(cfg.get("covers_max_tracks", 150) or 150))
     if rows is None:
-        rows = _fetch_curated_playlist_rows(min_stars=3)
+        rows = _fetch_curated_playlist_rows(min_stars=_covers_min_stars(cfg))
     if rows is None:
         return False
-    pool = [r for r in rows if int(r.get("is_cover") or 0) == 1]
+    pool = _cover_rows_are_credible(
+        [r for r in rows if int(r.get("is_cover") or 0) == 1]
+    )
 
     # The library-wide playlist remains the default shape; per-genre playlists
     # are ADDITIONAL when the option is enabled.
@@ -8740,6 +8955,8 @@ def _create_covers_playlist(
         max_tracks=max_tracks,
         cfg=cfg,
         playlist_listing=playlist_listing,
+        order_by_reach=True,
+        prefer_canonical=True,
     )
 
     if bool(cfg.get("covers_genre_playlists_enabled", False)):

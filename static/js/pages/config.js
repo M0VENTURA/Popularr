@@ -405,6 +405,10 @@
         covers_playlist_enabled: getChecked('playlists_covers_enabled', false),
         covers_playlist_name: getValue('playlists_covers_name', 'Great Covers') || 'Great Covers',
         covers_max_tracks: parseInt(getValue('playlists_covers_max_tracks', '150'), 10) || 150,
+        // The star floor a cover must reach. Emitted even though the Config page
+        // has no widget for it yet: save_config replaces the whole playlists
+        // section, so an uncollected key would be dropped on every save.
+        covers_min_stars: parseInt(getValue('playlists_covers_min_stars', '4'), 10),
         acoustic_playlist_enabled: getChecked('playlists_acoustic_enabled', false),
         acoustic_playlist_name: getValue('playlists_acoustic_name', 'Acoustic Essentials') || 'Acoustic Essentials',
         acoustic_max_tracks: parseInt(getValue('playlists_acoustic_max_tracks', '150'), 10) || 150,

@@ -1221,6 +1221,8 @@
       covers_playlist_enabled: getChecked('playlists_covers_enabled', false),
       covers_playlist_name: getValue('playlists_covers_name', 'Great Covers') || 'Great Covers',
       covers_max_tracks: parseInt(getValue('playlists_covers_max_tracks', '150'), 10) || 150,
+      // The star floor a cover must reach to be considered at all. 0 disables it.
+      covers_min_stars: parseInt(getValue('playlists_covers_min_stars', '4'), 10),
       // Per-genre Great Covers. Off leaves the single library-wide playlist
       // above as the only one; on adds one playlist per selected main genre.
       covers_genre_playlists_enabled: getChecked('playlists_covers_genre_enabled', false),

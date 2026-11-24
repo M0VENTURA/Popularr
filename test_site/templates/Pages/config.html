@@ -4311,6 +4311,11 @@
             <input type="number" step="1" min="10" max="5000" class="form-control form-control-sm" id="playlists_covers_max_tracks" placeholder="150" value="{{ config.get('playlists', {}).get('covers_max_tracks', 150) }}">
             <span class="help-text">Default: <strong>150</strong></span>
           </div>
+          <div class="input-card">
+            <label for="playlists_covers_min_stars">Minimum Stars</label>
+            <input type="number" step="1" min="0" max="5" class="form-control form-control-sm" id="playlists_covers_min_stars" placeholder="4" value="{{ config.get('playlists', {}).get('covers_min_stars', 4) }}">
+            <span class="help-text">A cover must reach this rating to be considered. <strong>0</strong> disables the floor. Default: <strong>4</strong></span>
+          </div>
         </div>
 
         <div class="setting-card mb-2">

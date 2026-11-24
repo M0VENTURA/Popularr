@@ -1872,6 +1872,11 @@ def get_playlists_config() -> dict[str, Any]:
         "covers_max_tracks": max(
             1, int(p.get("covers_max_tracks", 150) or 150)
         ),
+        # The star floor a cover must reach to be considered at all.
+        # ⭐ 4, NOT 3: at 3 a 2-star cover with 39 listeners reached the pool,
+        # because its ALBUM-relative score was the highest on its own release.
+        # `max(0, ...)` so 0 still means "no floor" rather than being coerced.
+        "covers_min_stars": max(0, int(p.get("covers_min_stars", 4) or 0)),
         # ── Per-genre Great Covers ────────────────────────────────────────
         # Off by default: the library-wide "Great Covers" playlist is the
         # default shape. When on, one playlist per MAIN genre (root vocabulary
