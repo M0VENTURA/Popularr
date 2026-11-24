@@ -127,22 +127,38 @@ class TestOnlyChangedFilesAreRewritten:
         assert fn is not None, "missing the skip predicate"
         return fn
 
+    # The signature is ``(stored_mbid, stored_albumid, stored_rg,
+    # want_mbid, want_rg)``: BOTH release-id spellings are compared, because
+    # ``album_identity`` reads ``musicbrainz_albumid`` while the page reads
+    # ``musicbrainz_album_mbid``.
+
     def test_an_identical_id_is_skipped(self) -> None:
-        assert self._fn()("ABC", "", "ABC", "") is True
+        assert self._fn()("ABC", "ABC", "", "ABC", "") is True
 
     def test_case_and_whitespace_do_not_defeat_the_skip(self) -> None:
-        assert self._fn()(" abc ", "", "ABC", "") is True
+        assert self._fn()(" abc ", " abc ", "", "ABC", "") is True
 
     def test_a_different_id_is_written(self) -> None:
-        assert self._fn()("OLD", "", "NEW", "") is False
+        assert self._fn()("OLD", "OLD", "", "NEW", "") is False
 
     def test_a_stale_release_group_alone_still_writes(self) -> None:
         """Half-corrected is exactly the state that split the album."""
-        assert self._fn()("SAME", "OLD-RG", "SAME", "NEW-RG") is False
+        assert self._fn()("SAME", "SAME", "OLD-RG", "SAME", "NEW-RG") is False
+
+    def test_a_stale_second_spelling_alone_still_writes(self) -> None:
+        """⚠️ THE "STILL SPLIT" STATE.
+
+        The fan-out used to write only ``musicbrainz_album_mbid``. A row whose
+        page spelling already matched but whose ``musicbrainz_albumid`` (the
+        column ``album_identity`` reads) was stale therefore looked "already
+        correct" and its FILE was never rewritten — so Navidrome kept splitting
+        an album Popularr had just saved.
+        """
+        assert self._fn()("NEW", "OLD", "", "NEW", "") is False
 
     def test_an_absent_field_does_not_force_a_write(self) -> None:
         """``want`` empty means "not in this payload", not "clear it"."""
-        assert self._fn()("ABC", "RG1", "ABC", "") is True
+        assert self._fn()("ABC", "ABC", "RG1", "ABC", "") is True
 
     def test_the_prior_value_is_read_before_the_update(self) -> None:
         """⭐ Ordering is the whole correctness argument.

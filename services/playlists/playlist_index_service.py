@@ -566,6 +566,12 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
     transient outage into a permanently empty artist-page section. An
     unenumerable source is a SKIP, never an empty result.
 
+    ⚠️ AND NEITHER IS NO CLIENT. ``clients=[]`` enumerates only file-backed
+    playlists; every server-backed playlist is invisible, so the prune below is
+    refused. Callers that need the server side pass the server-scoped clients —
+    ``refresh_playlist_index`` in the finalise stage is the shared entry point
+    for that.
+
     The same rule applies one level down: a playlist whose contents could not be
     READ is skipped entirely rather than stored as empty, because an empty write
     deletes its rows.
@@ -693,12 +699,34 @@ def sync_playlist_index(clients: list[Any] | None = None) -> dict[str, int]:
         stats["entries"] += int(written.get("entries") or 0)
 
     # Prune only when the enumeration can be trusted (see the docstring).
-    if errors == 0:
+    #
+    # ⚠️ NO CLIENTS MEANS A PARTIAL VIEW, NOT AN EMPTY LIBRARY.
+    #
+    # ``_enumerate`` always reads the file-backed playlists, but the generated
+    # genre/decade/curated playlists live only in Navidrome and are visible only
+    # through a client. A caller that passes ``[]`` (the popularity CSV export
+    # used to, because it resolves its index in another module) therefore sees
+    # NONE of them — and with ``errors == 0`` the prune deleted every one:
+    #
+    #     SELECT playlist_id FROM playlists  ->  [] after every export
+    #
+    # That is exactly the reported "every row of ``playlists_included_in`` is
+    # blank": the export wiped the index and then read it back empty. With no
+    # client supplied there is no proof a server playlist is gone, so deleting
+    # one is never safe. An unchanged library is still fully indexed from the
+    # files it can see; only the destructive half is skipped.
+    if errors == 0 and clients:
         try:
             stats["pruned"] = _repo.delete_playlists_not_in(seen_ids)
         except Exception as exc:
             _logger().warning("Playlist index: prune failed: %s", exc)
             stats["errors"] += 1
+    elif errors == 0 and not clients:
+        _logger().warning(
+            "Playlist index: prune SKIPPED — no Navidrome client was supplied, "
+            "so only file-backed playlists were enumerated; pruning would delete "
+            "every server-backed playlist the caller could not see"
+        )
     elif stored:
         _logger().warning(
             "Playlist index: prune SKIPPED — not every server could be listed, "

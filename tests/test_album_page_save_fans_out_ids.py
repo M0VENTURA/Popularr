@@ -109,6 +109,108 @@ class TestTheAlbumWideFanOut:
         assert "musicbrainz_album_mbid = ''" in body
 
 
+class TestBothReleaseIdSpellings:
+    """The page reads ``_mbid``; ``album_identity`` prefers ``albumid``.
+
+    ⚠️ Writing only the page's spelling left the other stale on every row the
+    page did not display. The FILE was corrected (so Navidrome merged the
+    album) while Popularr kept grouping the row by its old
+    ``musicbrainz_albumid`` — the reported "Korn - Untouchables is STILL
+    split" after a save that appeared to work.
+    """
+
+    def _seed(self, *, mbid: str, albumid: str) -> None:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        with db_session() as session:
+            session.execute(text("DELETE FROM tracks"))
+            session.execute(
+                text(
+                    "INSERT INTO tracks (id, title, artist, album_artist, album, "
+                    "file_path, musicbrainz_album_mbid, musicbrainz_albumid) "
+                    "VALUES ('t1', 'Here to Stay', 'Korn', 'Korn', 'Untouchables', "
+                    "'/music/korn/t1.mp3', :mbid, :albumid)"
+                ),
+                {"mbid": mbid, "albumid": albumid},
+            )
+            session.commit()
+
+    def _stored_ids(self) -> tuple[str, str]:
+        from sqlalchemy import text
+
+        from db.engine import db_session
+
+        with db_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT musicbrainz_album_mbid, musicbrainz_albumid "
+                    "FROM tracks WHERE id = 't1'"
+                )
+            ).fetchone()
+        return (str(row[0] or ""), str(row[1] or ""))
+
+    def _stub_file_writer(self, monkeypatch) -> list[tuple[str, dict]]:
+        import services.metadata.tag_file_service as tag_file_service
+
+        writes: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            tag_file_service,
+            "resolve_music_file_path",
+            lambda value: "/music/korn/t1.mp3",
+        )
+        monkeypatch.setattr(
+            tag_file_service,
+            "update_file_tags",
+            lambda path, tags, **kwargs: writes.append((path, tags)) or True,
+        )
+        return writes
+
+    def test_the_db_update_writes_both_columns(self, monkeypatch) -> None:
+        self._seed(mbid="old-release", albumid="old-release")
+        writes = self._stub_file_writer(monkeypatch)
+
+        album_service.update_album_ids(
+            {
+                "artist": "Korn",
+                "album": "Untouchables",
+                "musicbrainz_release_id": "new-release",
+            }
+        )
+
+        assert self._stored_ids() == ("new-release", "new-release"), (
+            "one release-id spelling was left stale; album_identity reads that "
+            "one and re-splits the album after the save"
+        )
+        assert writes and writes[0][1]["musicbrainz_albumid"] == "new-release"
+
+    def test_one_correct_spelling_does_not_skip_the_file_write(self, monkeypatch) -> None:
+        """A half-corrected row must still be rewritten on the file.
+
+        This is the state the old writer produced: ``_mbid`` already the target,
+        ``albumid`` still the old release. Comparing only ``_mbid`` made the
+        file-write guard say "already correct" and skip the one file that
+        needed fixing.
+        """
+        self._seed(mbid="new-release", albumid="old-release")
+        writes = self._stub_file_writer(monkeypatch)
+
+        album_service.update_album_ids(
+            {
+                "artist": "Korn",
+                "album": "Untouchables",
+                "musicbrainz_release_id": "new-release",
+            }
+        )
+
+        assert writes, (
+            "the file was skipped because only the page's release-id spelling "
+            "was compared"
+        )
+        assert self._stored_ids() == ("new-release", "new-release")
+
+
 class TestThePageSaveFansOutAlbumWide:
     def test_the_save_calls_the_album_wide_writer(self) -> None:
         src = UI_ROUTES.read_text(encoding="utf-8")

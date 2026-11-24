@@ -9582,6 +9582,44 @@ def run_global_playlist_rebuild(*, reason: str = "manual") -> dict[str, float]:
     return _run_global_playlist_rebuild({}, force=True, reason=reason)
 
 
+def refresh_playlist_index() -> dict[str, int]:
+    """Sync the playlist index using the SAME server-scoped clients as a scan.
+
+    ⭐ THIS EXISTS SO NON-SCAN CALLERS DO NOT RESOLVE CLIENTS A SECOND WAY.
+
+    The popularity CSV export needs the index to be current, but it must not
+    build its own Navidrome clients: playlist operations are server-scoped and
+    ``_navidrome_clients`` is the one place that dedupes accounts per server.
+    Resolving them twice is how the duplicate-playlist ping-pong started (see
+    that function's docstring).
+
+    It also fixes the export-time blank column at the source.
+    ``ensure_playlist_index`` used to call ``sync_playlist_index()`` with no
+    clients, which enumerated only file-backed playlists and then PRUNED every
+    Navidrome playlist out of the index — so the report wiped the data it was
+    about to read. Passing the real clients lets the sync see (and preserve) the
+    generated playlists.
+
+    Defined AFTER ``_run_global_playlist_rebuild`` on purpose: that function's
+    sync call is the wiring the scan tests locate by source position, and this
+    helper must not become the first occurrence of the marker.
+
+    Never raises: an unconfigured or unreachable Navidrome must not cost the
+    caller its own work (an export, a page render). Failures are logged and an
+    empty stats dict is returned.
+    """
+    try:
+        from services.playlists.playlist_index_service import sync_playlist_index
+    except Exception as exc:
+        logger.debug("Playlist index refresh unavailable", error=str(exc))
+        return {}
+    try:
+        return sync_playlist_index(_navidrome_clients())
+    except Exception as exc:
+        logger.warning("Playlist index refresh failed", error=str(exc))
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Main entrypoint
 # ---------------------------------------------------------------------------

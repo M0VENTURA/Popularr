@@ -310,6 +310,33 @@ class TestPrune:
             "a transient Navidrome failure must not delete the index"
         )
 
+    def test_a_no_client_sync_does_not_prune_server_playlists(self):
+        """⚠️ THE EXPORT-TIME REGRESSION.
+
+        REPORTED: every row of the popularity CSV's ``playlists_included_in``
+        was blank. The export called ``sync_playlist_index()`` with no clients,
+        so the sync enumerated zero server playlists, counted that as a clean
+        run, and pruned the entire index — the export destroyed the membership
+        it was about to serialise.
+
+        A no-client pass may still index file-backed playlists; it must never
+        delete a server-backed row it cannot see.
+        """
+        entry, detail = _remote("keep", "Keep", song_count=1, tracks=["t1"])
+        svc.sync_playlist_index(
+            [FakeClient(playlists=[entry], details={"keep": detail})]
+        )
+        assert repo.index_sizes()["playlists"] == 1
+
+        stats = svc.sync_playlist_index([])
+
+        assert stats["pruned"] == 0
+        assert repo.index_sizes()["playlists"] == 1, (
+            "a no-client sync deleted a server-backed playlist it could not see"
+        )
+        assert "keep" in repo.stored_changed_map()
+        assert repo.playlist_names_by_track_id().get("t1") == "Keep"
+
     def test_one_broken_server_does_not_stop_a_working_one(self):
         good_entry, good_detail = _remote("g1", "Good", song_count=1, tracks=["t1"])
         good = FakeClient(playlists=[good_entry], details={"g1": good_detail})

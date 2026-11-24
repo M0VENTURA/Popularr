@@ -238,6 +238,17 @@ def ensure_playlist_index() -> dict[str, int]:
     ``fetch_all_playlists`` call. That is affordable per export and much more
     useful than a silently blank column.
 
+    ⚠️ AND WHY IT MUST PASS NAVIDROME CLIENTS.
+
+    This used to call ``sync_playlist_index()`` with no clients. The sync then
+    enumerated ONLY file-backed playlists, saw no errors, and pruned every
+    server-backed playlist out of ``playlists``/``playlist_entries``. The export
+    therefore wiped the membership it was about to serialise, so every row of
+    ``playlists_included_in`` came out blank even when a completed scan had
+    indexed the playlists. ``refresh_playlist_index`` in the finalise stage is
+    the one refresh path that supplies the server-scoped clients, and the sync
+    itself now refuses to prune a no-client (partial) view.
+
     One definition, called by all three scopes (collection / artist / album), so
     the column can never be populated for one export and blank for another.
 
@@ -245,9 +256,31 @@ def ensure_playlist_index() -> dict[str, int]:
     the whole file.
     """
     try:
-        from services.playlists.playlist_index_service import sync_playlist_index
+        try:
+            # The client factory lives in the finalise stage because playlists
+            # are SERVER-scoped and that is where the one-client-per-server
+            # dedupe is defined. Import lazily: this runs only for an explicit
+            # export, never on a page load.
+            from services.popularity.stages.finalise_stage import (
+                refresh_playlist_index,
+            )
 
-        stats = sync_playlist_index()
+            stats = refresh_playlist_index()
+        except Exception as exc:
+            # The canonical factory could not be imported. Still refresh the
+            # file-backed playlists rather than skipping the pass entirely —
+            # safe because a no-client sync no longer prunes.
+            logger.debug(
+                "Playlist client factory unavailable — indexing file-backed "
+                "playlists only",
+                error=str(exc),
+            )
+            from services.playlists.playlist_index_service import (
+                sync_playlist_index,
+            )
+
+            stats = sync_playlist_index()
+
         logger.info("Playlist index refreshed for the popularity report", **stats)
         return stats
     except Exception as exc:

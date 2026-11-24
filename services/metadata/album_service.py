@@ -1063,6 +1063,7 @@ def _clear_album_id_file_tags(artist: str, album: str) -> int:
 
 def _row_already_has_ids(
     stored_album_mbid: Any,
+    stored_albumid: Any,
     stored_release_group_mbid: Any,
     want_album_mbid: str,
     want_release_group_mbid: str,
@@ -1078,6 +1079,13 @@ def _row_already_has_ids(
     must be written, because a partial match is exactly the half-corrected
     state that made the album split in Navidrome in the first place.
 
+    ⚠️ BOTH RELEASE-ID SPELLINGS ARE CHECKED. The page reads
+    ``musicbrainz_album_mbid``; ``album_identity`` (and therefore the scan's
+    album grouping) prefers ``musicbrainz_albumid``. Comparing only the page's
+    spelling let a row whose two columns disagreed count as "already correct",
+    so the file was never rewritten and Popularr kept splitting an album
+    Navidrome had already merged.
+
     An EMPTY ``want`` means "not part of this payload", not "clear it" — the
     clear path never reaches here (it has its own writer).
     """
@@ -1085,6 +1093,8 @@ def _row_already_has_ids(
         return str(value or "").strip().casefold()
 
     if want_album_mbid and _norm(stored_album_mbid) != _norm(want_album_mbid):
+        return False
+    if want_album_mbid and _norm(stored_albumid) != _norm(want_album_mbid):
         return False
     if want_release_group_mbid and _norm(
         stored_release_group_mbid
@@ -1111,7 +1121,20 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     bind_values: dict[str, Any] = {}
     _idx = 0
     if musicbrainz_id:
+        # ⚠️ BOTH SPELLINGS, ALWAYS — for the same reason the CLEAR path above
+        # writes both (``musicbrainz_album_mbid = ''`` AND
+        # ``musicbrainz_albumid = ''``).
+        #
+        # The album page reads ``musicbrainz_album_mbid``; ``album_identity``
+        # (and so the scan's album grouping) prefers ``musicbrainz_albumid``.
+        # Writing only the page's spelling left the other stale on every row
+        # the page did not display. The FILE was corrected, so Navidrome merged
+        # the album, but Popularr kept grouping the row by its old
+        # ``musicbrainz_albumid`` — the reported "album is STILL split" after a
+        # save that appeared to work. It also made the next import report a
+        # false local-vs-remote conflict on that stale column and preserve it.
         updates.append(f"musicbrainz_album_mbid = :v{_idx}")
+        updates.append(f"musicbrainz_albumid = :v{_idx}")
         bind_values[f"v{_idx}"] = musicbrainz_id
         _idx += 1
     if release_group_id:
@@ -1142,21 +1165,21 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         # reads back the NEW value, so the comparison would always say "already
         # correct" and no file would ever be written — silently reintroducing
         # the split-album bug the fan-out exists to fix.
-        _prior_ids: dict[str, tuple[Any, Any]] = {}
+        _prior_ids: dict[str, tuple[Any, Any, Any]] = {}
         _prior_paths: dict[str, Any] = {}
         if file_tag_updates:
             try:
                 for _r in session.execute(
                     text(
                         "SELECT id, file_path, musicbrainz_album_mbid, "
-                        "musicbrainz_releasegroupid FROM tracks "
+                        "musicbrainz_albumid, musicbrainz_releasegroupid FROM tracks "
                         "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
                         "AND LOWER(album) = LOWER(:album)"
                     ),
                     {"artist": artist, "album": album},
                 ).fetchall() or []:
                     _tid = str(_r[0] or "")
-                    _prior_ids[_tid] = (_r[2], _r[3])
+                    _prior_ids[_tid] = (_r[2], _r[3], _r[4])
                     _prior_paths[_tid] = _r[1]
             except Exception as exc:
                 logger.debug("Album id prior-value read failed", error=str(exc))
@@ -1231,9 +1254,12 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 )
                 if not _path:
                     continue
-                _old_album, _old_rg = _prior_ids.get(_tid, (None, None))
+                _old_album, _old_albumid, _old_rg = _prior_ids.get(
+                    _tid, (None, None, None)
+                )
                 if _row_already_has_ids(
-                    _old_album, _old_rg, musicbrainz_id, release_group_id
+                    _old_album, _old_albumid, _old_rg,
+                    musicbrainz_id, release_group_id,
                 ):
                     continue
                 _file_targets.append((_tid, _path))

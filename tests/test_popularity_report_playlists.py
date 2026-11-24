@@ -173,3 +173,32 @@ class TestTheIndexQuery:
         rows = _rows()
         for row in rows:
             assert row["playlists_included_in"] == ""
+
+
+class TestTheExportRefreshesTheIndex:
+    def test_it_uses_the_client_aware_refresh(self, monkeypatch) -> None:
+        """⚠️ REGRESSION: the export used a NO-CLIENT sync and pruned the index.
+
+        ``ensure_playlist_index`` must go through the finalise stage's
+        ``refresh_playlist_index``, which supplies the server-scoped Navidrome
+        clients. Otherwise the sync sees only file-backed playlists and deletes
+        every generated one — leaving this column blank on every row.
+        """
+        import services.popularity.stages.finalise_stage as fs
+
+        from services.popularity import popularity_report_service as svc
+
+        calls: list[str] = []
+
+        def _refresh() -> dict[str, int]:
+            calls.append("refresh")
+            return {"playlists": 4, "entries": 900}
+
+        monkeypatch.setattr(fs, "refresh_playlist_index", _refresh)
+
+        stats = svc.ensure_playlist_index()
+
+        assert calls == ["refresh"], (
+            "the export did not use the client-aware playlist-index refresh"
+        )
+        assert stats == {"playlists": 4, "entries": 900}
