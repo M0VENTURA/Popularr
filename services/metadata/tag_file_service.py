@@ -343,6 +343,78 @@ def _existing_non_empty_fields(file_path: str, tags: Dict[str, Any]) -> set[str]
     return present
 
 
+def _tags_already_match(file_path: str, tags: Dict[str, Any]) -> bool:
+    """True when every value in *tags* is ALREADY the on-disk value.
+
+    ⭐ THIS EXISTS TO AVOID A READ-MODIFY-WRITE THAT WOULD CHANGE NOTHING.
+
+    A genre resync re-derives the genres for every track in the library, but most
+    tracks end up with the SAME genres they already have. ``_write_tags_atomic``
+    discovered that only AFTER paying for it: full ``copy2``, full mutagen
+    rewrite, then a full ``filecmp`` of both files — 3-4 whole-file passes to
+    learn "no change". The reported run did 1000 files in 20 minutes (~1.2 s
+    each), which extrapolates to ~22 hours for 67,000 tracks.
+
+    This reads the tags ONCE (mutagen parses the header; no data frames are
+    touched for audio) and compares. A match returns True and the caller skips
+    the write entirely — typically one small read instead of four large passes.
+
+    ⚠️ STRICT EQUALITY, AND ONLY FOR GENRES. It is deliberately narrow: it is
+    called for the single-value genre case, where "already equal" is unambiguous.
+    A multi-field album-tag payload is NOT routed through this, because per-field
+    normalisation differences (separators, ordering, case) would produce false
+    "unchanged" verdicts and silently skip a real correction.
+    """
+    if not MUTAGEN_AVAILABLE or not tags:
+        return False
+    if set(tags) != {"genres"}:
+        return False
+
+    suffix = Path(file_path).suffix.lower()
+    wanted = str(tags.get("genres") or "").strip()
+    if not wanted:
+        return False
+
+    def _same(values: Any) -> bool:
+        if not values:
+            return not wanted
+        # Stored as one joined string by every writer (see ``write_flac_tags`` /
+        # ``write_id3_tags``), so compare the JOINED form after collapsing
+        # whitespace — a separator difference ("; " vs ", ") still counts as a
+        # change, because the writers normalise on write.
+        joined = "; ".join(str(v).strip() for v in values if str(v).strip())
+        return re.sub(r"\s+", " ", joined).strip().casefold() == re.sub(
+            r"\s+", " ", wanted
+        ).strip().casefold()
+
+    try:
+        if suffix in (".flac", ".ogg", ".opus"):
+            audio = FLAC(file_path) if suffix == ".flac" else _open_ogg(file_path)
+            if audio is None or audio.tags is None:
+                return False
+            return _same(audio.tags.get("genre"))
+        if suffix == ".mp3":
+            tag_obj = ID3(file_path)
+            frames = tag_obj.getall("TCON")
+            if not frames:
+                return not wanted
+            values = []
+            for frame in frames:
+                values.extend(getattr(frame, "text", []) or [])
+            return _same(values)
+        if suffix in (".m4a", ".mp4"):
+            from mutagen.mp4 import MP4  # type: ignore[import-untyped]
+
+            audio = MP4(file_path)
+            if audio.tags is None:
+                return False
+            return _same(audio.tags.get("\u00a9gen"))
+    except Exception as exc:
+        # Unknown is NOT "unchanged": fall through to the real write.
+        logger.debug("Genre pre-check could not read %s: %s", file_path, exc)
+    return False
+
+
 def _write_tags_to_file_impl(
     file_path: str, tags: Dict[str, Any], *, force: bool = False
 ) -> bool:
@@ -432,6 +504,12 @@ def _write_tags_to_file_impl(
         return False
 
     with _path_lock(file_path):
+        # ⭐ BAIL OUT BEFORE THE EXPENSIVE PART. A genre resync re-derives every
+        # track's genres, and the overwhelming majority are unchanged; the
+        # copy+rewrite+compare below would spend 3-4 whole-file passes proving
+        # it. One tag read settles it.
+        if _tags_already_match(file_path, tags):
+            return True
         return _write_tags_atomic(file_path, tags)
 
 

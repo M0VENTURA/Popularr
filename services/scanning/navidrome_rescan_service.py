@@ -67,6 +67,85 @@ MIN_SCAN_INTERVAL_SECONDS = 300.0
 _state_lock = threading.Lock()
 _state: dict[str, Any] = {"running": False, "pending": False, "reason": None}
 
+#: Cross-PROCESS guard: one rescan at a time across every gunicorn worker.
+#:
+#: ⚠️ ``_state_lock`` ABOVE IS ONLY PER-PROCESS, and there are 4 gunicorn workers
+#: by default (``SPTNR_GUNICORN_WORKERS``). Each worker therefore had its own
+#: "running" flag, so four of them could hold four concurrent full-library
+#: rescans against one Navidrome. That is the reported log: repeated
+#: ``getScanStatus`` ``ReadTimeout`` warnings, scans reporting ``count=7737`` then
+#: ``7896``, and "already running — coalesced into follow-up" repeating because
+#: each worker was coalescing only against ITSELF.
+#:
+#: A PostgreSQL advisory lock is the right mechanism: it is held for the life of
+#: the CONNECTION and released automatically if the process dies, which a file
+#: lock or an in-memory flag cannot promise. SQLite (tests) has no advisory locks
+#: and a single-process suite needs none, so the guard degrades to the existing
+#: in-process flag there.
+_RESCAN_LOCK_NAME = "navidrome_rescan"
+
+
+def _claim_rescan_lock() -> tuple[bool, Any]:
+    """``(may_scan, lock_conn)``.
+
+    ``may_scan`` is False ONLY when PostgreSQL says another process already holds
+    the rescan lock. On SQLite — or when the lock machinery is unavailable — it is
+    True with ``lock_conn = None``, because a single-process test suite needs no
+    cross-process guard and refusing to scan there would be wrong.
+
+    The returned connection must stay OPEN for the duration of the scan; closing
+    it releases the lock.
+    """
+    try:
+        from db.utils import get_db_connection_raw, is_postgres_connection
+
+        conn = get_db_connection_raw(reason="navidrome_rescan")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Navidrome rescan lock unavailable", error=str(exc))
+        return True, None
+    try:
+        if not is_postgres_connection(conn):
+            # SQLite (tests): one process, so the in-process flag is enough.
+            conn.close()
+            return True, None
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT pg_try_advisory_lock(hashtext(%s)) AS acquired",
+            (_RESCAN_LOCK_NAME,),
+        )
+        row = cur.fetchone()
+        acquired = bool(row[0]) if row else False
+        conn.commit()
+        if not acquired:
+            conn.close()
+            return False, None
+        return True, conn
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Navidrome rescan lock attempt failed", error=str(exc))
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return True, None
+
+
+def _release_rescan_lock(conn: Any) -> None:
+    """Unlock and close the connection that held the rescan lock."""
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (_RESCAN_LOCK_NAME,))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 #: Set by metadata writers during a scan; drained ONCE at a scan boundary.
 _required_lock = threading.Lock()
 _required: bool = False
@@ -186,6 +265,27 @@ def request_rescan(reason: str = "metadata save") -> bool:
 
 
 def _worker(reason: str) -> None:
+    # ⭐ CROSS-PROCESS: only ONE worker in the whole deployment scans at a time.
+    #
+    # ⚠️ WITHOUT THIS, each of the 4 gunicorn workers ran its own rescan. The
+    # reported log is exactly that shape: "already running — coalesced into
+    # follow-up" repeating, `getScanStatus` timing out, and scans completing with
+    # count=7737 then 7896 — different workers reporting their own runs.
+    #
+    # The lock is held across the WHOLE loop (including the rate-limit sleep) so
+    # a deferred follow-up cannot be picked up by a second process.
+    _may_scan, _lock_conn = _claim_rescan_lock()
+    if not _may_scan:
+        with _state_lock:
+            _state["running"] = False
+            _state["pending"] = False
+            _state["reason"] = None
+        log_unified(
+            "Navidrome rescan already running in another worker — "
+            "not starting a second one"
+        )
+        return
+
     try:
         while True:
             started = monotonic()
@@ -223,6 +323,8 @@ def _worker(reason: str) -> None:
             _state["pending"] = False
             _state["reason"] = None
         raise
+    finally:
+        _release_rescan_lock(_lock_conn)
 
 
 def _run_once(reason: str) -> bool:
