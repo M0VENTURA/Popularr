@@ -1670,6 +1670,17 @@ _NEUTRAL_STUDIO_ANNOTATIONS = frozenset({
 })
 
 
+def is_neutral_studio_annotation(value: str) -> bool:
+    """True when *value*'s trailing annotation names no different recording.
+
+    "Album Version", "Single Version", "Japanese Version" etc. describe the
+    ordinary studio recording, so a request carrying one must not DEMAND a
+    variant marker from the candidate. A non-neutral annotation ("Radio Edit",
+    "Fountains of Wayne Cover") does.
+    """
+    return (extract_edition_annotation(value) or "") in _NEUTRAL_STUDIO_ANNOTATIONS
+
+
 def edition_annotations_compatible(title_a: str, title_b: str) -> bool:
     """True when the edition annotations on two titles are compatible."""
     ann_a = extract_edition_annotation(title_a)

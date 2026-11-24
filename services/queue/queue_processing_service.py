@@ -457,6 +457,21 @@ def add_release_tracks_to_queue_detailed(
                 search_query = f"{track_artist} - {track_title}"
 
                 _mb_meta: dict[str, Any] = {}
+                # ⭐ PRESERVE THE PERFORMER SEPARATELY FROM THE ALBUM ARTIST.
+                #
+                # On a compilation the row's ``artist`` is the track performer
+                # (or, when the release payload omitted it, "Various Artists").
+                # The matcher recovers the real performer from this metadata;
+                # dropping ``track_artist`` here is what made it fall back to
+                # the album credit and search for "Various Artists".
+                if track_artist:
+                    _mb_meta["track_artist"] = track_artist
+                if album_artist or artist:
+                    _mb_meta["album_artist"] = album_artist or artist
+                if album:
+                    _mb_meta["release_title"] = album
+                if track_title:
+                    _mb_meta["track_title"] = track_title
                 if track.get("writer"): _mb_meta["writer"] = track["writer"]
                 # The three writing credits are separate columns/frames. The
                 # release track payload carries all three; dropping composer and

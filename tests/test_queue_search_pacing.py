@@ -83,13 +83,19 @@ class TestFallbackQueriesArePaced:
             {"artist": "A", "title": "B"}, "primary"
         ) == []
 
-    def test_the_rejected_primary_does_not_burn_the_tail(self):
-        """A primary query that FOUND candidates has proved the files exist;
-        a looser query only finds them again."""
+    def test_the_tail_is_bounded_by_the_shared_candidate_budget(self):
+        """A primary that found only rejected candidates no longer ends the tail.
+
+        Reported: difficult searches stopped at exactly 50 with all rejected;
+        the correct file was in a later query's results. The budget is now the
+        shared 200-unique ceiling, and the loop stops early on a qualifying
+        match (or when that ceiling is reached).
+        """
         import inspect
 
         from services.downloads import download_pipeline_service as pipeline
 
         src = inspect.getsource(pipeline.process_queue_item)
-        assert "idx == 0 and results and not best" in src
-        assert "not burning the fallback queries" in src
+        assert "_MAX_UNIQUE_CANDIDATES" in src
+        assert "len(all_results) >= _MAX_UNIQUE_CANDIDATES" in src
+        assert "idx == 0 and results and not best" not in src

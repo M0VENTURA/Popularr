@@ -81,6 +81,35 @@ RESOLVABLE_FIELDS: frozenset[str] = PROTECTED_FIELDS | SAFE_FIELDS
 # Gatekeeper
 # ---------------------------------------------------------------------------
 
+def _same_value(field: str, local_value: Any, remote_value: Any) -> bool:
+    """True when the two values differ only in typography, not in meaning.
+
+    MusicBrainz routinely writes U+2010/U+2011/U+2013 where a file has an ASCII
+    hyphen (reported: "So Long, Good-Bye" vs "So Long, Good‐Bye"), and smart
+    quotes where a tag has straight ones. A raw string compare turned every one
+    of those into a permanent correction. Title uses the shared review rule;
+    other fields fold Unicode punctuation, case and whitespace only, so a real
+    album/artist difference is still a conflict.
+    """
+    local_text = str(local_value or "")
+    remote_text = str(remote_value or "")
+    if local_text == remote_text:
+        return True
+    try:
+        from helpers.normalization_service import (
+            normalize_unicode_punctuation,
+            titles_match_for_review,
+        )
+
+        if str(field or "").casefold() == "title":
+            return bool(titles_match_for_review(local_text, remote_text))
+        left = " ".join(normalize_unicode_punctuation(local_text).casefold().split())
+        right = " ".join(normalize_unicode_punctuation(remote_text).casefold().split())
+        return left == right
+    except Exception:
+        return False
+
+
 def detect_and_record_conflicts(
     track_id: str,
     provider: str,
@@ -102,7 +131,7 @@ def detect_and_record_conflicts(
 
         local_value = local_data.get(field)
 
-        if str(local_value or "") == str(remote_value or ""):
+        if _same_value(field, local_value, remote_value):
             continue
 
         if not local_value or str(local_value).strip() == "":

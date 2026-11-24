@@ -313,6 +313,23 @@ _DEFAULT_BACKOFF_TIER_HOURS = (4, 12, 24)
 #: (46.0) while still guaranteeing a correctly-dated copy wins the tie.
 YEAR_MISMATCH_PENALTY = 4.0
 
+#: Maximum unique candidates evaluated for one queue item across all query
+#: variants (deduplicated by peer + full path).
+#:
+#: Reported: difficult searches stopped at exactly 50 candidates because the
+#: first query's cap was treated as the whole pool. Per-query remains 50; this
+#: is the OVERALL evaluation ceiling, and the loop stops early when a qualifying
+#: match is found.
+_MAX_UNIQUE_CANDIDATES = 200
+
+
+def _candidate_key(result: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(result.get("username") or "").casefold(),
+        str(result.get("filename") or "").casefold(),
+    )
+
+
 #: How many searches IN A ROW may return zero results before the service is
 #: treated as down rather than the music as absent.
 #:
@@ -330,6 +347,78 @@ _empty_search_streak = 0
 _empty_streak_tripped_at: float | None = None
 
 
+#: Backoff tiers for the shared search breaker (seconds).
+#:
+#: Reported: 2,277 "Waiting for search service" events while slskd was down —
+#: every queue item independently discovered the outage. A global pause with
+#: growing waits turns that storm into one probe per tier.
+_SEARCH_BACKOFF_SECONDS = (30, 120, 300, 600, 900)
+
+#: Consecutive INFRASTRUCTURE failures (disconnected / no route) that trip it.
+_INFRA_FAILURE_LIMIT = 3
+
+#: Shared breaker state (process-wide, like the empty-result streak).
+_search_unavailable_until = 0.0
+_search_backoff_level = 0
+_infra_failure_streak = 0
+
+
+def _note_search_success() -> None:
+    """A search produced results — close the breaker and reset the ladder."""
+    global _search_unavailable_until, _search_backoff_level, _infra_failure_streak
+    _search_unavailable_until = 0.0
+    _search_backoff_level = 0
+    _infra_failure_streak = 0
+
+
+def _trip_search_breaker(reason: str) -> None:
+    """Pause ALL searches for the next backoff tier.
+
+    One probe is implicitly allowed: once ``_search_unavailable_until`` passes,
+    ``_search_service_looks_down`` returns False and the next search runs. A
+    success resets the ladder; a failure advances it.
+    """
+    global _search_unavailable_until, _search_backoff_level
+    now = time.time()
+    if now < _search_unavailable_until:
+        return  # already open; do not escalate on every item
+    tier = _SEARCH_BACKOFF_SECONDS[min(_search_backoff_level, len(_SEARCH_BACKOFF_SECONDS) - 1)]
+    _search_unavailable_until = now + tier
+    _search_backoff_level = min(_search_backoff_level + 1, len(_SEARCH_BACKOFF_SECONDS) - 1)
+    logger.warning(
+        "Search service marked unavailable — pausing all searches",
+        reason=reason,
+        pause_seconds=tier,
+        tier=_search_backoff_level,
+    )
+    try:
+        from helpers.logging_config import log_activity
+
+        log_activity(
+            "infrastructure",
+            f"Search service unavailable ({reason}) — all queue searches paused "
+            f"for {tier}s, then one health probe.",
+            pause_seconds=tier,
+        )
+    except Exception:
+        pass
+
+
+def _note_infra_failure(reason: str) -> None:
+    """Count one infrastructure failure; trip after the shared limit."""
+    global _infra_failure_streak
+    if time.time() < _search_unavailable_until:
+        return
+    _infra_failure_streak += 1
+    if _infra_failure_streak >= _INFRA_FAILURE_LIMIT:
+        _trip_search_breaker(reason)
+
+
+def _search_service_retry_seconds() -> int:
+    """Seconds until the breaker's next probe (0 when closed)."""
+    return max(0, int(round(_search_unavailable_until - time.time())))
+
+
 def _bump_empty_streak(had_results: bool) -> int:
     """Update the process-wide empty-search streak; returns the new value."""
     global _empty_search_streak, _empty_streak_tripped_at
@@ -337,46 +426,37 @@ def _bump_empty_streak(had_results: bool) -> int:
     if had_results:
         _empty_search_streak = 0
         _empty_streak_tripped_at = None
+        _note_search_success()
         return 0
 
     _empty_search_streak += 1
     if _empty_search_streak >= _EMPTY_STREAK_LIMIT and _empty_streak_tripped_at is None:
         _empty_streak_tripped_at = time.time()
-        logger.warning(
-            "Search service returned no results repeatedly — pausing searches "
-            "instead of recording misses",
-            streak=_empty_search_streak,
-            limit=_EMPTY_STREAK_LIMIT,
-        )
-        try:
-            from helpers.logging_config import log_activity
-
-            log_activity(
-                "infrastructure",
-                f"{_empty_search_streak} consecutive searches returned nothing — "
-                "treating the search service as unavailable rather than recording misses.",
-                streak=_empty_search_streak,
-            )
-        except Exception:
-            pass
+        _trip_search_breaker("consecutive empty searches")
     return _empty_search_streak
 
 
 def _search_service_looks_down() -> bool:
-    """True while the empty-search streak is at or past its limit.
+    """True while the breaker window is open (or the legacy streak tripped).
 
-    A single search is then SKIPPED rather than attempted-and-recorded-as-a-miss,
-    so an outage cannot consume retry attempts or stamp a weekly miss date.
+    A single search is then SKIPPED rather than attempted, so an outage cannot
+    consume retry attempts, stamp a miss date, or produce one log line per item.
     """
+    if time.time() < _search_unavailable_until:
+        return True
     return _empty_search_streak >= _EMPTY_STREAK_LIMIT
 
 
 def reset_empty_search_streak() -> None:
-    """Clear the streak — exposed so a restart or a config change can re-probe."""
+    """Clear the breaker — exposed so a restart or config change can re-probe."""
     global _empty_search_streak, _empty_streak_tripped_at
+    global _search_unavailable_until, _search_backoff_level, _infra_failure_streak
 
     _empty_search_streak = 0
     _empty_streak_tripped_at = None
+    _search_unavailable_until = 0.0
+    _search_backoff_level = 0
+    _infra_failure_streak = 0
 
 
 def _search_backoff_hours() -> tuple[int, ...]:
@@ -545,20 +625,48 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
 _DISCONNECTED_RETRY_MINUTES = 5
 
 
-def search_disconnected(item: dict, queue_id: int, artist: str, title: str) -> None:
+def search_disconnected(
+    item: dict,
+    queue_id: int,
+    artist: str,
+    title: str,
+    *,
+    retry_seconds: int | None = None,
+) -> None:
+    """Park one queue item behind the shared search breaker.
+
+    ⚠️ The wait is the BREAKER'S remaining window, not a fixed 5 minutes: every
+    item learned the outage independently before, so a disconnected slskd
+    produced thousands of identical waits and log lines. One breaker window is
+    shared, and the items just wait it out.
+    """
+    _note_infra_failure("search service disconnected")
+    wait_seconds = int(
+        retry_seconds
+        if retry_seconds is not None
+        else (_search_service_retry_seconds() or _DISCONNECTED_RETRY_MINUTES * 60)
+    )
+    wait_seconds = max(30, wait_seconds)
     try:
         update_queue_item(
             queue_id,
             status="queued",
-            failure_reason="slskd disconnected — search not attempted",
+            failure_reason="search service unavailable — search not attempted",
             next_retry_at=(
-                datetime.now(timezone.utc) + timedelta(minutes=_DISCONNECTED_RETRY_MINUTES)
+                datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
             ).isoformat(),
         )
     except Exception:
         pass
-    log_unified(f"[QUEUE] {artist} - {title} → slskd disconnected, search skipped")
-    _log_queue_event("queued", f"{artist} - {title} → slskd disconnected, search skipped", queue_id)
+    log_unified(
+        f"[QUEUE] {artist} - {title} → search service unavailable, "
+        f"retrying in {wait_seconds}s"
+    )
+    _log_queue_event(
+        "queued",
+        f"{artist} - {title} → search service unavailable, retrying in {wait_seconds}s",
+        queue_id,
+    )
     try:
         from helpers.logging_config import log_activity
 
@@ -568,7 +676,7 @@ def search_disconnected(item: dict, queue_id: int, artist: str, title: str) -> N
             queue_id=queue_id,
             artist=artist,
             title=title,
-            retry_in_seconds=_DISCONNECTED_RETRY_MINUTES * 60,
+            retry_in_seconds=wait_seconds,
         )
     except Exception:
         pass
@@ -938,8 +1046,72 @@ def _score_result(
         _HARD_VARIANT_TOKENS = frozenset({
             "live", "remix", "instrumental", "acoustic", "demo", "karaoke", "unplugged",
         })
+
+        # ⭐ THE REQUESTED VARIANT IS MANDATORY EVIDENCE.
+        #
+        # Reported: "Adele – Someone Like You (Funk3d radio edit)" downloaded the
+        # plain album track. ``radio`` and ``edit`` are variant tokens, but the
+        # old missing-variant check only consulted ``_HARD_VARIANT_TOKENS``
+        # (live/remix/instrumental/acoustic/demo/karaoke/unplugged), so a
+        # request for an edit accepted a candidate with NO evidence of one. A
+        # plain title match must never compensate for a missing version.
+        _MANDATORY_VARIANT_TOKENS = _HARD_VARIANT_TOKENS | frozenset({
+            "mix", "radio", "edit", "remaster", "remastered",
+            "extended", "re-recorded", "rerecorded", "version",
+        })
+        # Extra qualifiers that are not in the configured token list.
+        _EXTRA_VARIANT_RE = re.compile(
+            r"\b(extended|re[-\s]?recorded)\b", re.IGNORECASE
+        )
+        _COVER_ARTIST_RE = re.compile(
+            r"[\(\[]\s*([^\)\]]+?)\s+cover\s*[\)\]]", re.IGNORECASE
+        )
+
+        def _extra_variants(text: str) -> set[str]:
+            return {
+                "re-recorded" if m.group(1).lower().startswith("re") else "extended"
+                for m in _EXTRA_VARIANT_RE.finditer(str(text or ""))
+            }
+
+        def _cover_artist(text: str) -> str:
+            match = _COVER_ARTIST_RE.search(str(text or ""))
+            return str(match.group(1) or "").strip() if match else ""
+
+        def _evidence_text() -> str:
+            """Everything a candidate offers for variant/credit evidence."""
+            chunks = [
+                filename,
+                str(parts.get("artist") or ""),
+                str(parts.get("album") or ""),
+                str(parts.get("title") or ""),
+                str(result.get("title") or ""),
+                str(result.get("artist") or ""),
+                str(result.get("album") or ""),
+            ]
+            metadata = result.get("metadata")
+            if isinstance(metadata, dict):
+                chunks.extend(
+                    str(value) for value in metadata.values()
+                    if isinstance(value, (str, int, float))
+                )
+            elif isinstance(metadata, str):
+                chunks.append(metadata)
+            return "  ".join(chunk for chunk in chunks if chunk).lower()
+
+        _evidence = _evidence_text()
+
         _, _exp_title_v = extract_version_info(expected_title or "")
         _, _exp_album_v = extract_version_info(expected_album or "")
+        _requested_title_variants = set(_exp_title_v)
+        # A neutral form ("Album Version", "Single Version") names the ordinary
+        # recording, so it must not require a marker of its own.
+        try:
+            from helpers.normalization_service import is_neutral_studio_annotation
+
+            if is_neutral_studio_annotation(expected_title or ""):
+                _requested_title_variants.discard("version")
+        except Exception:
+            pass
         _exp_variants = (_exp_title_v | _exp_album_v) & _HARD_VARIANT_TOKENS
 
         _, _cand_title_v = extract_version_info(parsed_title)
@@ -963,17 +1135,17 @@ def _score_result(
             _note_reject(rejects, "variant_mismatch")
             return 0.0
 
-        # ⚠️ Asymmetry matters: a requested LIVE/ACOUSTIC/REMIX track must not
-        # silently accept the plain studio original. The old check only rejected
-        # a candidate carrying an UNREQUESTED variant; a candidate with NO
-        # variant marker passed. That is how "End of You" could download the
-        # original version when the requested recording was a versioned one.
-        # Only the TITLE-level variant is decisive here. An album name such as
-        # "Live Through This" is not a version marker for every track, so the
-        # album-level variants stay in the unrequested check above.
-        _missing_variants = (
-            (_exp_title_v & _HARD_VARIANT_TOKENS) - _cand_variants
-        )
+        # ⭐ The requested version must be EVIDENCED, not merely not contradicted.
+        # The evidence may come from the filename, its parsed artist/album/title,
+        # or embedded metadata — the same sources the rest of the score uses.
+        _, _cand_evidence_v = extract_version_info(_evidence)
+        _cand_evidence_v = (
+            _cand_evidence_v & _MANDATORY_VARIANT_TOKENS
+        ) | _extra_variants(_evidence)
+        _required_variants = (
+            _requested_title_variants & _MANDATORY_VARIANT_TOKENS
+        ) | _extra_variants(expected_title or "")
+        _missing_variants = _required_variants - _cand_evidence_v
         if _missing_variants:
             logger.debug(
                 "Rejected candidate — requested version missing",
@@ -982,8 +1154,44 @@ def _score_result(
                 parsed_title=parsed_title,
                 missing_variants=sorted(_missing_variants),
             )
-            _note_reject(rejects, "variant_mismatch")
+            _note_reject(rejects, "requested_variant_missing")
             return 0.0
+
+        # A requested COVER names a different recording and often a different
+        # performer ("Luka Bloom Cover"). Require the cover marker or that
+        # performer's name in the candidate evidence — a plain album track is
+        # not the requested recording even when its song title is identical.
+        try:
+            from helpers.normalization_service import has_cover_marker as _has_cover
+
+            if _has_cover(expected_title or ""):
+                _wanted_cover_artist = _cover_artist(expected_title or "")
+                _cover_ok = False
+                if _wanted_cover_artist:
+                    try:
+                        from helpers.normalization_service import (
+                            artist_name_key as _akey,
+                            normalize_artist as _nartist,
+                        )
+
+                        _want_key = _akey(_nartist(_wanted_cover_artist))
+                        _scope_key = re.sub(r"\s+", "", _evidence)
+                        _cover_ok = bool(_want_key and _want_key in _scope_key)
+                    except Exception:
+                        _cover_ok = _wanted_cover_artist.lower() in _evidence
+                if not _cover_ok:
+                    _cover_ok = _has_cover(_evidence)
+                if not _cover_ok:
+                    logger.debug(
+                        "Rejected candidate — requested cover missing",
+                        filename=filename[:180],
+                        expected_title=expected_title,
+                        cover_artist=_wanted_cover_artist or None,
+                    )
+                    _note_reject(rejects, "requested_variant_missing")
+                    return 0.0
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1037,6 +1245,22 @@ def _score_result(
             path_scope = path_scope.replace(_normalise(parsed_title), " ")
             
         artist_scope = f"{parsed_artist} {path_scope}"
+        # Trusted embedded metadata is evidence too. A peer can name the file
+        # "01-01. Shout.flac" while the tags carry the performer; the artist gate
+        # must see that, or a confirmed recording is rejected for
+        # ``no_artist_evidence`` before the feature check can look at it.
+        _cand_metadata = result.get("metadata")
+        if isinstance(_cand_metadata, dict):
+            _meta_artist_values = [
+                str(_cand_metadata.get(_key) or "").strip()
+                for _key in (
+                    "artist", "track_artist", "album_artist",
+                    "artists", "albumartists",
+                )
+            ]
+            _meta_artist_text = " ".join(v for v in _meta_artist_values if v)
+            if _meta_artist_text:
+                artist_scope = f"{artist_scope} {_meta_artist_text}"
         artist_scope_tokens = set(re.findall(r"[a-z0-9]+", _normalise(artist_scope)))
         significant_words = [
             w for w in re.findall(r"[a-z0-9]+", norm_gate)
@@ -1097,6 +1321,70 @@ def _score_result(
         logger.debug("Rejected candidate — no artist evidence", filename=filename[:180], expected_artist=expected_artist)
         _note_reject(rejects, "no_artist_evidence")
         return 0.0
+
+    # ⭐ A REQUESTED FEATURED ARTIST IS EVIDENCE, NOT DECORATION.
+    #
+    # Reported: "Mortemia feat. Marita Hellem – Shout" selected
+    # "01-01. Shout (Cover).flac", which shows neither Marita Hellem nor any
+    # feature. The old gate only checked the PRIMARY artist (feat. was stripped
+    # before the artist test), so the guest never contributed. A request that
+    # names a guest requires the guest in the track artist, filename, title or
+    # embedded metadata — unless metadata confirms the exact recording (which
+    # the evidence scan below covers).
+    _feat_match = re.search(
+        r"\b(?:feat\.?|featuring|ft\.?)\s+(.+)$",
+        expected_artist or "",
+        re.IGNORECASE,
+    )
+    if _feat_match:
+        try:
+            from helpers.normalization_service import (
+                artist_name_key as _feat_key,
+                split_artist_credit as _feat_split,
+            )
+
+            _guest_names = [
+                name for name in (
+                    _feat_split(_feat_match.group(1)) or [_feat_match.group(1)]
+                ) if str(name).strip()
+            ]
+        except Exception:
+            _feat_key = None
+            _guest_names = [str(_feat_match.group(1)).strip()]
+
+        _feat_chunks = [
+            filename,
+            parsed_artist,
+            parsed_title,
+            parsed_album_raw,
+            str(result.get("title") or ""),
+            str(result.get("artist") or ""),
+            str(result.get("album") or ""),
+        ]
+        _feat_metadata = result.get("metadata")
+        if isinstance(_feat_metadata, dict):
+            _feat_chunks.extend(
+                str(value) for value in _feat_metadata.values()
+                if isinstance(value, (str, int, float))
+            )
+        elif isinstance(_feat_metadata, str):
+            _feat_chunks.append(_feat_metadata)
+        _feat_scope = re.sub(r"\s+", "", _normalise("  ".join(_feat_chunks)))
+        _guest_confirmed = False
+        for _guest in _guest_names:
+            _guest_key = _feat_key(_guest) if _feat_key else _normalise(_guest)
+            if _guest_key and re.sub(r"\s+", "", _guest_key) in _feat_scope:
+                _guest_confirmed = True
+                break
+        if not _guest_confirmed:
+            logger.debug(
+                "Rejected candidate — featured artist missing",
+                filename=filename[:180],
+                expected_artist=expected_artist,
+                guests=_guest_names,
+            )
+            _note_reject(rejects, "featured_artist_missing")
+            return 0.0
 
     if _artist_script_ambiguous and art_score <= 0.4:
         _artist_credit = 0.0
@@ -1517,6 +1805,19 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     except Exception:
         pass
 
+    # ⭐ SHARED BREAKER GATE, BEFORE ANY SEARCH IS ATTEMPTED.
+    #
+    # The breaker is process-wide: once three infrastructure failures (or the
+    # empty-result streak) trip it, every subsequent item parks immediately for
+    # the same window instead of independently re-discovering the outage. After
+    # the window one search runs as the health probe.
+    if _search_service_looks_down():
+        search_disconnected(
+            item, queue_id, expected_artist, expected_title,
+            retry_seconds=max(30, _search_service_retry_seconds() or 30),
+        )
+        return {"success": False, "status": "search_service_down", "skipped": True}
+
     query = build_search_query(item)
     fallback_queries = _build_fallback_search_queries(item, query)
     started_at = time.time()
@@ -1549,6 +1850,10 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
 
         best = None
         all_results: list[dict[str, Any]] = []
+        # Deduplicate across query variants by peer + full path. The same file
+        # routinely appears in several fallback queries; evaluating it again
+        # wasted the 200-candidate budget.
+        _seen_candidate_keys: set[tuple[str, str]] = set()
         searched_queries: list[str] = []
         used_low_quality_fallback = False
         results: list[dict[str, Any]] = []
@@ -1590,12 +1895,24 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 # does not expire): never select them again.
                 results, _dropped = _filter_rejected_for_item(results, item)
                 _rejected_dropped += _dropped
-                all_results.extend(results)
+
+                # ⭐ PER-QUERY 50, OVERALL 200 UNIQUE. ``search_and_filter``
+                # already caps each query at 50; the fallbacks exist to surface
+                # files that query did not rank. Evaluating the same peer/path
+                # twice would consume the overall budget, so dedupe here.
+                new_results: list[dict[str, Any]] = []
+                for candidate in results:
+                    key = _candidate_key(candidate)
+                    if key in _seen_candidate_keys:
+                        continue
+                    _seen_candidate_keys.add(key)
+                    new_results.append(candidate)
+                all_results.extend(new_results)
                 consecutive_empty = consecutive_empty + 1 if not results else 0
                 _bump_empty_streak(bool(results))
 
                 best = _select_best_result(
-                    results,
+                    new_results,
                     expected_artist=expected_artist,
                     expected_title=expected_title,
                     expected_album=expected_album,
@@ -1609,25 +1926,23 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     used_low_quality_fallback = tier_index > 0
                     break
 
-                # ⚠️ THE FALLBACKS CANNOT HELP IF THE FILES ARE ALREADY HERE.
-                #
-                # ``_build_fallback_search_queries`` exists for a query that
-                # surfaced NOTHING. When the primary query DID return candidates
-                # and every one was rejected on its merits (wrong artist, wrong
-                # title, wrong album), a looser query only finds the same files
-                # again — the report's 57s average and the 50-result limit were
-                # largely this. Bail out of the tail instead.
-                if idx == 0 and results and not best:
+                # ⚠️ THE FALLBACKS ARE NOT SKIPPED JUST BECAUSE THE PRIMARY
+                # FOUND CANDIDATES. Reported: difficult searches stopped at
+                # exactly 50, with all 50 rejected — the correct file was in a
+                # later query's results. The budget is now the shared 200-unique
+                # ceiling; the loop stops early only when a match qualifies.
+                if len(all_results) >= _MAX_UNIQUE_CANDIDATES:
                     logger.info(
-                        "Primary query returned candidates but none qualified — "
-                        "not burning the fallback queries",
+                        "Candidate budget reached — stopping fallback queries",
                         queue_id=queue_id,
                         artist=expected_artist,
                         title=expected_title,
-                        candidates=len(results),
+                        candidates=len(all_results),
                     )
                     break
             if best:
+                break
+            if len(all_results) >= _MAX_UNIQUE_CANDIDATES:
                 break
 
         elapsed = round(time.time() - started_at, 1)

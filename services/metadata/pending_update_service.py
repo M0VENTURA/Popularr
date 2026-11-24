@@ -231,6 +231,18 @@ def stash_track_title_recommendation(
     if not track_id or not proposed_title:
         return False
 
+    # A proposal that differs only in typography is not a correction. Without
+    # this, MusicBrainz's U+2010 hyphen re-stashed "So Long, Good-Bye" →
+    # "So Long, Good‐Bye" on every scan and the approval panel never emptied.
+    if current_title:
+        try:
+            from helpers.normalization_service import titles_match_for_review
+
+            if titles_match_for_review(current_title, proposed_title):
+                return False
+        except Exception:
+            pass
+
     try:
         with db_session() as session:
             row = session.execute(
@@ -483,6 +495,40 @@ def fetch_albums_pending_review(limit: int = 50) -> list[dict[str, Any]]:
     return albums[:capped]
 
 
+def _is_typography_only_change(change: dict[str, Any]) -> bool:
+    """True when a proposal differs only in typography, not in wording.
+
+    MusicBrainz writes U+2010/U+2011/U+2013 where a file carries an ASCII
+    hyphen (reported: ``So Long, Good-Bye`` → ``So Long, Good‐Bye``). That is
+    the SAME title, so it must never be stashed or rendered as a correction.
+    Title proposals use the shared review comparator (it also folds version and
+    cover markers); every other text field folds Unicode punctuation, case and
+    whitespace only, so a genuine edition difference is still surfaced.
+    """
+    current = _as_text(change.get("current"))
+    proposed = _as_text(change.get("proposed"))
+    if not current or not proposed or current == proposed:
+        return current == proposed
+    field = _as_text(change.get("field")).lower()
+    try:
+        from helpers.normalization_service import (
+            normalize_unicode_punctuation,
+            titles_match_for_review,
+        )
+
+        if field == "title":
+            return bool(titles_match_for_review(current, proposed))
+        left = " ".join(
+            normalize_unicode_punctuation(current).casefold().split()
+        )
+        right = " ".join(
+            normalize_unicode_punctuation(proposed).casefold().split()
+        )
+        return left == right
+    except Exception:
+        return False
+
+
 def _filter_ignored(
     changes: list[Any],
     ignored_raw: Any,
@@ -504,6 +550,11 @@ def _filter_ignored(
         field = _as_text(change.get("field"))
         if not field or field in ignored:
             continue
+        # ⚠️ A typography-only difference is not a correction. Filtering it here
+        # fixes BOTH fresh stashes and rows written before this rule existed, so
+        # the dashboard/album review stops offering an endless no-op save.
+        if _is_typography_only_change(change):
+            continue
         kept.append(change)
     return kept
 
@@ -512,6 +563,11 @@ def fetch_artist_recommendations(artist: str) -> dict[str, Any]:
     """Aggregate an artist's stashed recommendations by album.
 
     Backs the artist page's per-album "N pending updates" summary.
+
+    ⚠️ COUNTS SURVIVING CHANGES, not raw rows. A row whose only proposal was a
+    typography-only title difference (``Good-Bye`` → ``Good‐Bye``) must not keep
+    the album on the pending list; counting rows made it look like outstanding
+    work that saving could never clear.
     """
     artist = _as_text(artist)
     with db_session() as session:
@@ -519,22 +575,41 @@ def fetch_artist_recommendations(artist: str) -> dict[str, Any]:
             text("""
                 SELECT COALESCE(NULLIF(album_artist, ''), artist) AS artist,
                        album,
-                       COUNT(*) AS track_count
+                       pending_mb_updates,
+                       mb_ignored_fields
                 FROM tracks
                 WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
                   AND pending_mb_updates IS NOT NULL
                   AND pending_mb_updates != ''
-                GROUP BY COALESCE(NULLIF(album_artist, ''), artist), album
             """),
             {"artist": artist},
         ).fetchall()
 
+    counts: dict[str, int] = {}
+    for row in rows or []:
+        mapping = dict(row._mapping)
+        album = _as_text(mapping.get("album"))
+        if not album:
+            continue
+        try:
+            envelope = json.loads(mapping.get("pending_mb_updates"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(envelope, dict):
+            continue
+        if envelope.get("version") not in (None, _ENVELOPE_VERSION):
+            continue
+        ignored = mapping.get("mb_ignored_fields")
+        surviving = (
+            len(_filter_ignored(envelope.get("album_changes") or [], ignored))
+            + len(_filter_ignored(envelope.get("changes") or [], ignored))
+        )
+        if surviving:
+            counts[album] = counts.get(album, 0) + 1
+
     albums = [
-        {
-            "album": _as_text(dict(r._mapping).get("album")),
-            "track_count": int(dict(r._mapping).get("track_count") or 0),
-        }
-        for r in rows or []
+        {"album": album, "track_count": count}
+        for album, count in counts.items()
     ]
     return {
         "success": True,

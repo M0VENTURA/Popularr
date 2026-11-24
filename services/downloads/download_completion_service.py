@@ -928,6 +928,8 @@ DISCARD_REASON_LABELS: dict[str, str] = {
     "wrong_length": "Wrong length",
     "title_mismatch": "Different song",
     "edition_mismatch": "Different edition",
+    "requested_variant_missing": "Requested version missing",
+    "featured_artist_missing": "Featured artist missing",
     "filename_mismatch": "Filename does not match",
     "unsupported_format": "File type not allowed",
 }

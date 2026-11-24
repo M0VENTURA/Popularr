@@ -311,9 +311,23 @@ class TestDiscard:
 
 class TestArtistRecommendations:
     def test_aggregates_by_album(self, monkeypatch, pending):
+        # The aggregation now counts SURVIVING changes per row (not the old
+        # SQL COUNT), so each fake row carries a real pending envelope.
+        change = json.dumps({
+            "version": 1,
+            "changes": [{"field": "title", "current": "Old", "proposed": "New"}],
+        })
         rows = [
-            {"artist": "A", "album": "B", "track_count": 3},
-            {"artist": "A", "album": "C", "track_count": 2},
+            {"artist": "A", "album": "B", "pending_mb_updates": change,
+             "mb_ignored_fields": "[]"},
+            {"artist": "A", "album": "B", "pending_mb_updates": change,
+             "mb_ignored_fields": "[]"},
+            {"artist": "A", "album": "B", "pending_mb_updates": change,
+             "mb_ignored_fields": "[]"},
+            {"artist": "A", "album": "C", "pending_mb_updates": change,
+             "mb_ignored_fields": "[]"},
+            {"artist": "A", "album": "C", "pending_mb_updates": change,
+             "mb_ignored_fields": "[]"},
         ]
         _install(monkeypatch, pending, _Session(read_rows=rows))
         result = pending.fetch_artist_recommendations("A")

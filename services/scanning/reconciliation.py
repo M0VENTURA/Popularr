@@ -653,6 +653,24 @@ def _dates_compatible(left: Any, right: Any) -> bool:
     return True
 
 
+def _typography_equal(left: Any, right: Any) -> bool:
+    """True when two text values differ only in Unicode punctuation/case.
+
+    MusicBrainz writes U+2010/U+2011/U+2013 where a file carries an ASCII
+    hyphen, and smart quotes where a tag has straight ones. Treating those as a
+    conflict kept a corrected row "dirty" forever and re-reported the same
+    correction. Folding those characters does not hide a genuine wording change.
+    """
+    try:
+        from helpers.normalization_service import normalize_unicode_punctuation
+
+        a = " ".join(normalize_unicode_punctuation(str(left or "")).casefold().split())
+        b = " ".join(normalize_unicode_punctuation(str(right or "")).casefold().split())
+        return bool(a) and a == b
+    except Exception:
+        return False
+
+
 def local_authority_conflicts(
     existing: dict[str, Any], payload: dict[str, Any],
 ) -> list[str]:
@@ -678,8 +696,14 @@ def local_authority_conflicts(
             if not _dates_compatible(existing.get(field), payload.get(field)):
                 conflicts.append(field)
             continue
-        if existing_value != payload_value:
-            conflicts.append(field)
+        if existing_value == payload_value:
+            continue
+        # Unicode hyphen/quote variants are the same value, not a conflict.
+        # (Reported: a local "So Long, Good-Bye" was perpetually in conflict
+        # with Navidrome's U+2010 spelling, keeping the row dirty forever.)
+        if _typography_equal(existing_value, payload_value):
+            continue
+        conflicts.append(field)
     return conflicts
 
 
