@@ -434,7 +434,19 @@ def iter_genre_tokens(genres: Any) -> list[str]:
 
     out: list[str] = []
     for token in tokens:
-        norm = re.sub(r"[^\w\s-]", "", str(token).strip().lower()).strip()
+        # ⚠️ THIS USED TO BE A THIRD, PRIVATE NORMALISER —
+        # ``re.sub(r"[^\w\s-]", "", ...)`` — which DELETED punctuation just like
+        # the old ``normalize_token`` did. "R&B" became ``rb`` here while
+        # ``Vocabulary.classify`` (using ``normalize_token``) resolved it to
+        # ``r_and_b``, so ``deciding_family`` reported a genre it knew perfectly
+        # well as UNKNOWN. ``classify_main_genre(["R&B"])`` then returned None and
+        # the config normaliser fell back to the raw id ``r_b``.
+        #
+        # ⭐ ONE NORMALISER, USED EVERYWHERE: whatever ``classify`` can resolve,
+        # this must hand it in the same form.
+        from services.enrichment.genre_vocabulary import normalize_token
+
+        norm = normalize_token(token)
         if norm:
             out.append(norm)
     return out

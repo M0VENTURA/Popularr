@@ -48,6 +48,26 @@
     "",
     "Adding an entry is enough to make it selectable; nothing is hardcoded in Python."
   ],
+
+  "tokenizer": {
+    "_comment": [
+      "How a composite source value is split into genres.",
+      "hard_delimiters: always separate genres; split FIRST, before any whole-value match.",
+      "soft_joiners: separate genres in a list (\"Funk / Soul\") but also occur INSIDE",
+      "  real names (death/doom, r&b, drum & bass), so the whole value is tried first.",
+      "protected_values: real names that contain a hard delimiter. Matched whole BEFORE",
+      "  splitting, so \"Folk, World, & Country\" stays one genre."
+    ],
+    "hard_delimiters": [";", ",", "|"],
+    "soft_joiners": ["/", "&", "+"],
+    "protected_values": [
+      "Folk, World, & Country",
+      "Stage & Screen",
+      "Brass & Military",
+      "Children's"
+    ]
+  },
+
   "genres": [
     {
       "id": "rock",

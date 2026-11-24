@@ -36,7 +36,11 @@ from typing import Any
 
 from sqlalchemy import bindparam, inspect, text
 
+import structlog
+
 from db.engine import db_session
+
+logger = structlog.get_logger(__name__)
 
 
 def _tables_exist(session: Any) -> bool:
@@ -186,6 +190,21 @@ def replace_playlist(
         if not _tables_exist(session):
             return {"entries": 0}
 
+        # ⭐ SAME LOCK, SAME ORDER AS ``delete_playlists_not_in``.
+        #
+        # ⚠️ THIS FUNCTION USED TO UPSERT THE HEADER BEFORE DELETING ENTRIES —
+        # the exact reverse of the sweep, which deletes entries first. Two
+        # concurrent writers therefore touched ``playlists`` and
+        # ``playlist_entries`` in opposite orders and PostgreSQL resolved the
+        # cycle by killing one. Entries are now deleted FIRST here as well, so
+        # every writer to these two tables follows one lock order.
+        _acquire_write_lock(session)
+
+        session.execute(
+            text("DELETE FROM playlist_entries WHERE playlist_id = :playlist_id"),
+            {"playlist_id": playlist_id},
+        )
+
         session.execute(
             text(
                 "INSERT INTO playlists "
@@ -215,11 +234,6 @@ def replace_playlist(
             },
         )
 
-        session.execute(
-            text("DELETE FROM playlist_entries WHERE playlist_id = :playlist_id"),
-            {"playlist_id": playlist_id},
-        )
-
         # One executemany, not N round-trips: a 500-track playlist is 500 rows
         # and a per-row INSERT would dominate the sync's cost.
         rows = [
@@ -239,54 +253,106 @@ def replace_playlist(
         return {"entries": len(rows)}
 
 
+#: Serialises playlist INDEX writes across processes.
+#:
+#: ⚠️ REPORTED: "playlist sync, the orphan sweep and the genre playlist rebuild"
+#: overlapped, and the index sync deadlocked. Two writers each deleting from
+#: ``playlists`` in one order and inserting into ``playlist_entries`` in another
+#: is the classic cycle. ``pg_advisory_xact_lock`` makes the phase exclusive and
+#: releases itself at COMMIT/ROLLBACK, so a crash cannot strand the lock.
+_PLAYLIST_INDEX_LOCK_NAME = "playlist_index_write"
+
+
+def _is_postgres(session: Any) -> bool:
+    """True when this session talks to PostgreSQL.
+
+    ⚠️ DO NOT TOUCH ``session.bind``. Reading it materialises the engine, and
+    ``db.engine.get_engine()`` CONSTRUCTS one when none exists — which, under
+    pytest, means creating the PostgreSQL engine and importing psycopg2. In this
+    environment that module is not installed, so a single ``session.bind.dialect``
+    access raised ``ModuleNotFoundError`` and **disposed the shared in-memory
+    SQLite engine**, wiping every table for the rest of the session. It turned 7
+    unrelated suites into 40+ collection errors.
+
+    ``session.get_bind()`` returns the engine the session is ACTUALLY bound to
+    without triggering construction, so the dialect can be read safely.
+    """
+    try:
+        bind = session.get_bind()
+        return getattr(getattr(bind, "dialect", None), "name", "") == "postgresql"
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _acquire_write_lock(session: Any) -> None:
+    """Take the playlist-index advisory lock for this transaction.
+
+    ⭐ ``pg_advisory_xact_lock``, not ``pg_try_advisory_lock``: the caller is a
+    background sync that should WAIT for the other writer rather than skip a
+    pass and leave the index stale. The lock dies with the transaction, so
+    nothing has to unwind it on an exception.
+
+    ⚠️ SILENTLY SKIPPED OFF POSTGRESQL. SQLite (the test engine) has no advisory
+    locks and needs none — it serialises writers anyway.
+    """
+    if not _is_postgres(session):
+        return
+    try:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:name))"),
+            {"name": _PLAYLIST_INDEX_LOCK_NAME},
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Playlist index lock unavailable", error=str(exc))
+
+
 def delete_playlists_not_in(playlist_ids: list[str]) -> int:
     """Drop every playlist that is no longer in the source of truth.
 
-    Entries first: the tables have no foreign key, so the order is what keeps a
-    half-deleted playlist out of the artist query for the duration of the
-    transaction.
+    ⭐ ``DELETE FROM playlists WHERE playlist_id NOT IN :ids`` in BOTH branches —
+    never an unfiltered ``DELETE FROM playlists``.
+
+    ⚠️ THE UNFILTERED DELETE WAS A DEADLOCK, NOT JUST A SHORTCUT. It ran
+    ``DELETE FROM playlist_entries`` (no predicate, so every row) and then
+    ``DELETE FROM playlists`` while a concurrent ``replace_playlist`` was doing
+    ``DELETE ... WHERE playlist_id = ?`` followed by INSERTs. A full-table delete
+    takes row locks in SCAN order; the targeted delete takes them in PK order.
+    Two transactions acquiring the same rows in opposite orders is a cycle, and
+    PostgreSQL kills one of them. Expressing the empty case as
+    ``NOT IN ()`` — which the expanding parameter already renders as "matches
+    everything" — keeps ONE lock order for every path.
+
+    ⚠️ That also means the empty branch no longer needs to be special-cased for
+    CORRECTNESS. It is kept because the semantics here are destructive and
+    "an empty IN list" is a dialect detail this module has already been bitten
+    by (see the ``json_each`` note in the module docstring).
     """
     with db_session() as session:
         if not _tables_exist(session):
             return 0
+        _acquire_write_lock(session)
 
-        # An empty keep-list means "delete everything". That is the correct
-        # reading when the source genuinely returned no playlists — and it is
-        # ALSO what a transient Navidrome failure looks like, so the decision
-        # to call this at all belongs to the service, not here.
         ids = [str(v or "").strip() for v in (playlist_ids or []) if str(v or "").strip()]
 
-        # The empty case is handled EXPLICITLY rather than delegated to the
-        # expanding parameter, so the "delete everything" meaning is READABLE at
-        # the call site instead of inferred from an empty-IN rendering rule.
+        # An empty keep-list means "delete everything": with no ids, the NOT IN
+        # renders as a predicate that matches every row, which is the same
+        # statement shape as the non-empty case. One lock order, always.
         #
-        # ⚠️ Be precise about why: this branch is DEFENSIVE, not load-bearing.
-        # SQLAlchemy substitutes an empty expanding list for `NOT IN` with a
-        # rendering that matches every row, so removing the branch still clears
-        # the tables — verified by mutation, which ESCAPED for exactly that
-        # reason. It is kept because "an empty IN list" is the kind of dialect
-        # detail that has already bitten this module once (see the json_each note
-        # above), and the semantics here are destructive enough to spell out.
-        if not ids:
-            session.execute(text("DELETE FROM playlist_entries"))
-            deleted_all = session.execute(text("DELETE FROM playlists")).rowcount or 0
-            return int(deleted_all or 0)
-
         # Entries first, so a half-deleted playlist cannot surface in the artist
-        # query between the two statements. Not counted: the playlist count is
-        # the number that means something to a caller (a playlist is the unit a
-        # user recognises; its rows are an implementation detail).
+        # query between the two statements.
         session.execute(
-            text("DELETE FROM playlist_entries WHERE playlist_id NOT IN :ids")
-            .bindparams(bindparam("ids", expanding=True)),
+            text(
+                "DELETE FROM playlist_entries WHERE playlist_id NOT IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         )
-        deleted_playlists = session.execute(
-            text("DELETE FROM playlists WHERE playlist_id NOT IN :ids")
-            .bindparams(bindparam("ids", expanding=True)),
+        deleted = session.execute(
+            text(
+                "DELETE FROM playlists WHERE playlist_id NOT IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         ).rowcount or 0
-        return int(deleted_playlists or 0)
+        return int(deleted or 0)
 
 
 def artist_playlist_tracks_by_artist(
@@ -371,12 +437,23 @@ def playlist_names_by_track_id() -> dict[str, str]:
         if not _tables_exist(session):
             return {}
         try:
+            # ⭐ GROUP BY, not DISTINCT: the same track may sit in one playlist
+            # TWICE (``playlist_entries`` is keyed on ``(playlist_id, position)``),
+            # and DISTINCT over the pair then emitted that name twice. Grouping
+            # by the pair collapses it while still allowing one track to name
+            # several playlists.
+            #
+            # ⚠️ ``ORDER BY e.track_id`` matters even here: the rows are folded
+            # into a dict below, so the order is invisible in the result — but
+            # keeping it makes the statement deterministic under a future change,
+            # and lets a caller stream it without sorting first.
             rows = session.execute(
                 text(
-                    "SELECT DISTINCT e.track_id, p.name "
+                    "SELECT e.track_id, p.name "
                     "FROM playlist_entries e "
                     "JOIN playlists p ON p.playlist_id = e.playlist_id "
                     "WHERE COALESCE(TRIM(p.name), '') <> '' "
+                    "GROUP BY e.track_id, p.name "
                     "ORDER BY e.track_id, LOWER(p.name)"
                 )
             ).mappings().all()

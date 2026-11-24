@@ -55,10 +55,11 @@ class TestASeparatedListSplits:
             ("Pop, Rock", ["Pop", "Rock"]),
             ("Folk, Punk", ["Folk", "Punk"]),
             ("Rock; Pop", ["Rock", "Pop"]),
-            ("Rock / Pop", ["Rock", "Pop"]),
             ("Rock | Pop", ["Rock", "Pop"]),
             ("Hip Hop, Rap", ["Hip Hop", "Rap"]),
             ("Rock, Pop, Folk", ["Rock", "Pop", "Folk"]),
+            # A SOFT joiner splits only when the whole value does not resolve.
+            ("Funk / Soul", ["Funk", "Soul"]),
         ],
     )
     def test_it_splits_every_separator(self, vocab, value, expected):
@@ -66,6 +67,17 @@ class TestASeparatedListSplits:
             f"{value!r} was treated as one value; a genre list must split or "
             "every genre in it is lost"
         )
+
+    def test_a_soft_joiner_that_names_a_genre_stays_whole(self, vocab):
+        """⚠️ "Rock / Pop" IS Pop Rock — the rule the report specifies.
+
+        ``/`` and ``&`` separate genres in a list but also occur inside real
+        names, so the whole value is tried FIRST. Splitting "Rock / Pop" into
+        Rock + Pop would discard the actual reading.
+        """
+        assert tokenize_values("Rock / Pop", vocab) == ["Rock / Pop"]
+        assert tokenize_values("Rock/Pop", vocab) == ["Rock/Pop"]
+        assert vocab.classify("Rock/Pop").canonical == "pop_rock"
 
     def test_the_reported_case_is_not_one_genre(self, vocab):
         """The exact regression: "Rock, Pop" must never become Pop Rock."""

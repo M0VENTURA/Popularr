@@ -89,9 +89,27 @@ def normalize_token(value: Any) -> str:
         return ""
     text = unicodedata.normalize("NFKD", str(value))
     text = text.casefold().strip()
-    text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
-    text = re.sub(r"[^a-z0-9]+", "", text)
-    return text
+    # ⚠️ COMBINING MARKS MUST BE DELETED BEFORE PUNCTUATION BECOMES A SPACE.
+    #
+    # NFKD splits "ü" into "u" + U+0308, and the punctuation pass below now
+    # produces a SPACE for anything non-alphanumeric — so "Motörhead" became
+    # "moto rhead" and stopped matching "Motorhead". Deleting the marks first
+    # keeps the letter and drops the accent, which is the whole point of NFKD
+    # here.
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    # ⭐ PUNCTUATION BECOMES A SPACE, NOT NOTHING.
+    #
+    # ⚠️ DELETING IT MADE A SEPARATOR AND A JOINER THE SAME KEY. "Rock, Pop" and
+    # "Rock Pop" both collapsed to ``rockpop``, so a two-genre LIST matched the
+    # single name "Pop Rock" and never split — the reported
+    # "Pop, Metal -> Glam Metal" worst case.
+    #
+    # ⚠️ HYPHENS ARE STILL FOLDED TO A SPACE. "hip-hop" and "hip hop" must
+    # remain one key — that is a spelling difference, not a list.
+    text = re.sub(r"[\u2010-\u2015\u2212\-]+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    # Collapse runs and trim LAST, after both substitutions have run.
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def values_are_alphabetical(values: Any) -> bool:
@@ -288,6 +306,11 @@ class Vocabulary:
     source_path: str = ""
     is_override: bool = False
     errors: tuple[str, ...] = ()
+    #: The ``tokenizer`` block: delimiter and protected-value configuration.
+    #:
+    #: ⭐ IN THE JSON SO IT IS EDITABLE, not hardcoded — the protected list is a
+    #: statement about how THIS collection's sources spell things.
+    tokenizer: dict[str, Any] = field(default_factory=dict)
 
     def is_noise_value(self, raw: Any) -> bool:
         """True when ``raw`` is listed in the vocabulary's ``noise_values``.
@@ -821,6 +844,10 @@ def _build(
         source_path=path,
         is_override=is_override,
         errors=errors,
+        # ⭐ Carried through so ``tokenize_values`` can read
+        # ``protected_values`` without re-reading the file (a caller may have
+        # built a vocabulary from an override or a test fixture).
+        tokenizer=dict(data.get("tokenizer") or {}) if isinstance(data.get("tokenizer"), dict) else {},
     )
 
 
@@ -851,14 +878,34 @@ _SAFE_SPLIT = re.compile(r"[;|\\]+")
 #: Dangerous separators. ``/`` appears inside real labels (``death/doom``,
 #: ``death/doom metal``) and ``&`` inside ``r&b`` / ``drum & bass``, so these are
 #: only split when the WHOLE value failed to match anything.
-_UNSAFE_SPLIT = re.compile(r"[/&]+")
+_UNSAFE_SPLIT = re.compile(r"[/&+]+")
 
 #: ``", "`` is how this codebase WRITES a genre list into a TEXT column
 #: (``", ".join(genres)`` in the album blend, the VA sync and the genre resync).
-#: A comma is therefore a separator too — but only once the whole value has
-#: failed to match, because it is the one delimiter a real genre name never
-#: contains and the last resort is already "this is a list".
 _COMMA_SPLIT = re.compile(r"\s*,\s*")
+
+#: ⭐ THE HARD DELIMITERS: sources use these to SEPARATE genres and never inside
+#: a genre name. They are split FIRST, before any whole-value match, because a
+#: whole-value match on a list is always wrong — see ``tokenize_values``.
+#:
+#: ``\`` is included because some source columns are backslash-delimited
+#: ("Nu Metal\\Alternative Rock") and no genre name contains one.
+_HARD_DELIMITERS = re.compile(r"[;,|\\]+")
+
+#: ⭐ THE SOFT JOINERS: they separate genres in a list ("Funk / Soul") AND occur
+#: inside real names ("death/doom", "r&b", "drum & bass"). Only split when the
+#: whole value does not resolve.
+_SOFT_JOINERS = re.compile(r"[/&+]+")
+
+#: Values that are GENUINELY one name containing a hard delimiter. Kept in the
+#: vocabulary JSON (``tokenizer.protected_values``) so they are editable rather
+#: than hardcoded here; this is the fallback when the block is absent.
+_DEFAULT_PROTECTED_VALUES = (
+    "Folk, World, & Country",
+    "Stage & Screen",
+    "Brass & Military",
+    "Children's",
+)
 
 #: A serialized array (``['Doom Metal', 'Rock']``). Inside one, commas ARE
 #: separators — that is one context where splitting on ``,`` is safe outright.
@@ -894,13 +941,23 @@ def _flatten(raw: Any) -> list[str]:
     return [text]
 
 
-def _split_on_separators(text: str) -> list[str]:
-    """Split a value on the separator hierarchy, most reliable first.
+def _tokenizer_config(vocab: "Vocabulary") -> tuple[frozenset[str], tuple[str, ...]]:
+    """``(protected_normalised, soft_joiners)`` from the vocabulary's tokenizer block.
 
-    ``;`` and ``|`` are unambiguous; then a comma; then ``/`` and ``&``, which
-    also occur INSIDE real genre names (``death/doom``, ``r&b``). The caller
-    decides whether the result is a list or a name — see ``_all_parts_are_known``.
+    ⭐ THE PROTECTED LIST LIVES IN THE JSON so it is editable, not hardcoded. The
+    module constant is only the fallback for a vocabulary written before the
+    block existed.
     """
+    protected = _DEFAULT_PROTECTED_VALUES
+    raw = getattr(vocab, "tokenizer", None) or {}
+    listed = raw.get("protected_values") if isinstance(raw, dict) else None
+    if isinstance(listed, list) and listed:
+        protected = tuple(str(v) for v in listed if str(v or "").strip())
+    return frozenset(normalize_token(v) for v in protected), protected
+
+
+def _split_on_separators(text: str) -> list[str]:
+    """Split on the separator hierarchy, most reliable first."""
     parts = _SAFE_SPLIT.split(text)
     if len(parts) == 1:
         parts = _COMMA_SPLIT.split(text)
@@ -923,29 +980,35 @@ def _all_parts_are_known(parts: list[str], vocab: "Vocabulary") -> bool:
 
 
 def tokenize_values(raw: Any, vocab: "Vocabulary") -> list[str]:
-    """Split a raw source value into candidate tokens, VOCABULARY-AWARE.
+    """Split a raw source value into candidate tokens.
 
-    The order is the report's, and each step exists because the naive split got
-    it wrong:
+    ⭐⭐ HARD DELIMITERS SPLIT FIRST, WITHOUT A WHOLE-VALUE MATCH.
 
-    1. **A container** (list, dict, JSON string) is flattened without splitting.
-    2. **The whole value is tried FIRST.** ``death/doom`` and ``r&b`` are single
-       genres, but a blind split turns them into ``death`` + ``doom`` and
-       ``r`` + ``b`` — which is how a ``death/doom`` tag became a bare
-       ``doom metal`` one, and why the canonical ``death_doom`` entry could
-       never match anything.
-    3. **Then the safe separators** (``;``, ``|``, ``\\``). A pipe-delimited list
-       was previously kept WHOLE and therefore classified as unknown, silently
-       losing every genre in it.
-    4. **Only then the unsafe ones** (``/``, ``&``), because a composite that
-       matched nothing as a whole is the only evidence that they are separators
-       here.
-    5. **A serialized array** splits on commas too — inside one, commas are
-       unambiguously separators.
+    ``;`` ``,`` ``|`` are how a source SEPARATES genres; they never appear inside
+    one. Matching the whole value first made "Rock, Pop" resolve to ``pop_rock``,
+    because ``normalize_token`` deleted the comma and produced the same key as
+    "Pop Rock" — and that is not a Pop Rock edge case:
+
+        Pop, Metal   -> Glam Metal (via the "pop metal" alias)   <- worst case
+        Punk, Rock   -> Punk (the Rock reading was lost)
+        Folk, Rock   -> Folk Rock          Industrial, Metal -> Industrial Metal
+        Alternative, Rock -> Alternative Rock     Emo, Pop -> Emo Pop
+
+    Any two genre names that together spell a compound genre collided, so the
+    list had to be split before anything else was considered.
+
+    ⭐ PROTECTED VALUES ARE THE ONE EXCEPTION. A handful of real names DO contain
+    a comma ("Folk, World, & Country"). They are listed in the vocabulary under
+    ``tokenizer.protected_values`` and matched whole, before splitting.
+
+    ⭐ SOFT JOINERS (``/`` ``&`` ``+``) MATCH THE WHOLE VALUE FIRST. They separate
+    genres in "Funk / Soul" but occur inside real names — ``death/doom``, ``r&b``,
+    ``drum & bass`` — so they only split once the whole value fails to resolve.
 
     Duplicates are collapsed, so a value listed twice by one source counts once.
     """
     tokens: list[str] = []
+    protected, _ = _tokenizer_config(vocab)
 
     for item in _flatten(raw):
         text = item.strip()
@@ -954,37 +1017,43 @@ def tokenize_values(raw: Any, vocab: "Vocabulary") -> list[str]:
 
         parts: list[str]
         if _ARRAY_LIKE.match(text):
+            # Inside a serialized array every separator is unambiguous.
             parts = _ALL_SPLIT.split(text.strip("[]{}"))
-        else:
-            split_parts = _split_on_separators(text)
-            if len(split_parts) > 1 and _all_parts_are_known(split_parts, vocab):
-                # ⭐ A SEPARATED LIST IS NOT ONE GENRE NAME.
-                #
-                # ``normalize_token`` strips ALL punctuation, so "Rock, Pop" keys
-                # to ``rockpop`` — exactly the key "Rock Pop" produces, and
-                # ``pop_rock`` lists "rock pop" as an alias. The whole-value test
-                # therefore "recognised" a two-genre list as ONE genre and split
-                # nothing. The same held for "Rock; Pop", "Rock/Pop" and
-                # "Rock | Pop".
-                #
-                # Measured: 21 comma-joined pairs collapsed into one genre on the
-                # 224-entry vocabulary and 44 on the 318-entry one, because a
-                # bigger taxonomy has more "<word> <word>" aliases. "Pop, Rock"
-                # became Pop Rock; "Folk, Punk" became Folk Punk, discarding the
-                # separate Folk reading.
-                #
-                # ⚠️ THE DISCRIMINATOR IS "DO ALL THE PARTS RESOLVE", not "does it
-                # contain a separator". A name that legitimately uses ``/`` or
-                # ``&`` (``death/doom``, ``r&b``) yields parts that do NOT each
-                # resolve, so it is kept whole — the flag needed no vocabulary
-                # change to stay correct.
-                parts = split_parts
-            elif vocab.classify(text).kind != KIND_UNKNOWN:
-                # Step 2: the whole value, before any splitting.
-                tokens.append(text)
-                continue
+        elif normalize_token(text) in protected:
+            # ⭐ A REAL NAME CONTAINING A COMMA — "Folk, World, & Country".
+            tokens.append(text)
+            continue
+        elif _HARD_DELIMITERS.search(text):
+            # ⭐ HARD DELIMITERS SPLIT UNCONDITIONALLY.
+            parts = _HARD_DELIMITERS.split(text)
+            # A soft joiner inside one part is still ambiguous, so each part
+            # gets the whole-first treatment below.
+            expanded: list[str] = []
+            for part in parts:
+                piece = part.strip()
+                if not piece:
+                    continue
+                if _SOFT_JOINERS.search(piece) and (
+                    vocab.classify(piece).kind == KIND_UNKNOWN
+                ):
+                    expanded.extend(
+                        p.strip() for p in _SOFT_JOINERS.split(piece) if p.strip()
+                    )
+                else:
+                    expanded.append(piece)
+            parts = expanded
+        elif _SOFT_JOINERS.search(text):
+            # ⭐ SOFT JOINERS MATCH WHOLE FIRST: death/doom, r&b, drum & bass.
+            if vocab.classify(text).kind != KIND_UNKNOWN:
+                parts = [text]
             else:
-                parts = split_parts
+                parts = [
+                    p.strip() for p in _SOFT_JOINERS.split(text) if p.strip()
+                ]
+        elif vocab.classify(text).kind != KIND_UNKNOWN:
+            parts = [text]
+        else:
+            parts = [text]
 
         for part in parts:
             cleaned = part.strip(_STRIP_CHARS)

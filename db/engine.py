@@ -376,12 +376,24 @@ _DB_OUTAGE_UNTIL = 0.0
 _DB_OUTAGE_BACKOFF = 0.0
 _DB_OUTAGE_PROBE_AT = 0.0
 _DB_OUTAGE_PROBE_IN_FLIGHT = False
+#: How long the NEXT probe must wait, growing while the outage persists.
+#:
+#: ⚠️ REPORTED: "Popularr reconnects every ~5 s, which caused most of the error
+#: lines during recovery." The outage window already backed off 10 → 60 s, but
+#: the probe COOLDOWN was the fixed ``_DB_OUTAGE_PROBE_INTERVAL_SECONDS``, so the
+#: breaker retried at a flat 5 s cadence no matter how long recovery took.
+#: Doubling it (5 → 10 → 20 → 40 → 60) keeps the log readable while still
+#: reconnecting promptly: the first probe after a crash remains 5 s, and a
+#: 30-second recovery costs about four attempts instead of six.
+_DB_OUTAGE_PROBE_BACKOFF = 0.0
 #: Nested ``db_session`` calls on the probe's own thread must be allowed to
 #: use the connection the outer probe is holding. Depth is per-thread.
 _DB_PROBE_LOCAL = threading.local()
 _DB_OUTAGE_INITIAL_SECONDS = 10.0
 _DB_OUTAGE_MAX_SECONDS = 60.0
 _DB_OUTAGE_PROBE_INTERVAL_SECONDS = 5.0
+#: Cap on the growing probe cooldown (see ``_DB_OUTAGE_PROBE_BACKOFF``).
+_DB_OUTAGE_PROBE_MAX_SECONDS = 60.0
 
 
 def db_outage_retry_after() -> float:
@@ -408,9 +420,14 @@ def db_outage_retry_after() -> float:
     second for one artist (``processed=0``) for as long as PostgreSQL was
     recovering. Every probe-cooldown window spun instead of waiting.
 
-    ``_DB_OUTAGE_PROBE_INTERVAL_SECONDS`` is used for an in-flight probe because
-    it owns an attempt of unknown duration; reporting a flat positive wait keeps
-    those callers quiet until the next window opens.
+    ``_DB_OUTAGE_PROBE_BACKOFF`` (growing 5 → 60 s) is used for an in-flight
+    probe because it owns an attempt of unknown duration; reporting a flat
+    positive wait keeps those callers quiet until the next window opens.
+
+    ⚠️ It is the GROWING value, not the fixed ``_DB_OUTAGE_PROBE_INTERVAL_SECONDS``.
+    Reporting the constant while ``_claim_db_probe`` gated on the grown one made
+    every waiter wake far earlier than the gate would admit, so it re-entered and
+    was refused again — the same spin the clamp below exists to prevent.
     """
     now = time.monotonic()
     with _DB_OUTAGE_LOCK:
@@ -420,7 +437,7 @@ def db_outage_retry_after() -> float:
             return max(
                 0.0,
                 _DB_OUTAGE_UNTIL - now,
-                _DB_OUTAGE_PROBE_INTERVAL_SECONDS,
+                _DB_OUTAGE_PROBE_BACKOFF or _DB_OUTAGE_PROBE_INTERVAL_SECONDS,
             )
         # Covers both the remaining outage window and the probe cooldown: a
         # caller may only connect when BOTH have elapsed.
@@ -464,6 +481,7 @@ def _note_db_outage(exc: BaseException) -> None:
         return
 
     global _DB_OUTAGE_UNTIL, _DB_OUTAGE_BACKOFF, _DB_OUTAGE_PROBE_AT
+    global _DB_OUTAGE_PROBE_BACKOFF
 
     with _DB_OUTAGE_LOCK:
         now = time.monotonic()
@@ -475,9 +493,16 @@ def _note_db_outage(exc: BaseException) -> None:
             max(_DB_OUTAGE_BACKOFF * 2.0, _DB_OUTAGE_INITIAL_SECONDS),
             _DB_OUTAGE_MAX_SECONDS,
         )
+        # ⚠️ THE PROBE COOLDOWN GROWS TOO. It used to be pinned to the 5 s
+        # constant, so the reconnect cadence stayed flat however long the outage
+        # lasted — the reported "reconnects every ~5 s" log noise.
+        _DB_OUTAGE_PROBE_BACKOFF = min(
+            max(_DB_OUTAGE_PROBE_BACKOFF * 2.0, _DB_OUTAGE_PROBE_INTERVAL_SECONDS),
+            _DB_OUTAGE_PROBE_MAX_SECONDS,
+        )
         _DB_OUTAGE_UNTIL = now + _DB_OUTAGE_BACKOFF
         _DB_OUTAGE_PROBE_AT = now + min(
-            _DB_OUTAGE_PROBE_INTERVAL_SECONDS, _DB_OUTAGE_BACKOFF
+            _DB_OUTAGE_PROBE_BACKOFF, _DB_OUTAGE_BACKOFF
         )
         seconds = _DB_OUTAGE_BACKOFF
 
@@ -497,6 +522,7 @@ def _note_db_outage(exc: BaseException) -> None:
 def reset_db_outage() -> None:
     """Close the breaker (a connection succeeded). Also used by tests."""
     global _DB_OUTAGE_UNTIL, _DB_OUTAGE_BACKOFF, _DB_OUTAGE_PROBE_AT
+    global _DB_OUTAGE_PROBE_BACKOFF
     global _DB_OUTAGE_PROBE_IN_FLIGHT
 
     with _DB_OUTAGE_LOCK:
@@ -504,6 +530,7 @@ def reset_db_outage() -> None:
         _DB_OUTAGE_UNTIL = 0.0
         _DB_OUTAGE_BACKOFF = 0.0
         _DB_OUTAGE_PROBE_AT = 0.0
+        _DB_OUTAGE_PROBE_BACKOFF = 0.0
         _DB_OUTAGE_PROBE_IN_FLIGHT = False
         try:
             _DB_PROBE_LOCAL.depth = 0
@@ -534,7 +561,11 @@ def _claim_db_probe() -> bool:
             return False
         _DB_OUTAGE_PROBE_IN_FLIGHT = True
         _DB_PROBE_LOCAL.depth = 1
-        _DB_OUTAGE_PROBE_AT = now + _DB_OUTAGE_PROBE_INTERVAL_SECONDS
+        # ⚠️ The GROWING cooldown, not the fixed constant: this is what spaces
+        # retries out to 60 s during a long recovery.
+        _DB_OUTAGE_PROBE_AT = now + (
+            _DB_OUTAGE_PROBE_BACKOFF or _DB_OUTAGE_PROBE_INTERVAL_SECONDS
+        )
         return True
 
 
