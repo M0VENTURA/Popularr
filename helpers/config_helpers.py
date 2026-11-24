@@ -2322,6 +2322,38 @@ def get_genre_selection_config() -> dict[str, Any]:
         # ...but only when the metal evidence is comparable to the rock side.
         # A thin metal tag must not delete a stronger rock body of evidence.
         "metal_over_rock_min_ratio": _ratio("metal_over_rock_min_ratio", 0.8),
+        # HOW that comparison is made. "share" (the default) requires metal to be
+        # the MAJORITY of the rock+metal evidence; "pair" is the older per-pair
+        # ratio above.
+        "metal_over_rock_mode": str(
+            selection.get("metal_over_rock_mode") or "share"
+        ).strip().lower(),
+        # The share metal must hold before it removes rock-family genres.
+        "metal_over_rock_min_share": _ratio("metal_over_rock_min_share", 0.6),
+        # Generic roots are excluded from that share: a bare "Rock" tag outscores
+        # the subgenres, so counting it lets the umbrella decide the question.
+        "metal_over_rock_exclude_roots": bool(
+            selection.get("metal_over_rock_exclude_roots", True)
+        ),
+        # Bare family genres (Rock, Punk, Electronic, Pop) are a FALLBACK only:
+        # they take a slot only when nothing more specific qualifies.
+        "root_fallback_only": bool(selection.get("root_fallback_only", True)),
+        # If condensing leaves no genre for position 1, re-select without it.
+        "restore_parent_if_empty": bool(
+            selection.get("restore_parent_if_empty", True)
+        ),
+        # Artist-only evidence may confirm a family, never introduce one.
+        "artist_only_same_family": bool(
+            selection.get("artist_only_same_family", True)
+        ),
+        # Honour each vocabulary entry's own ``redundant_with`` list after the
+        # slots are decided (freed slots are NOT refilled).
+        "declared_redundancy": bool(selection.get("declared_redundancy", True)),
+        # Position 3 may accept one source group when MusicBrainz AND
+        # ListenBrainz both name the genre at track level and its family is new.
+        "position3_new_family": bool(
+            selection.get("position3_new_family", True)
+        ),
         # Heavy Metal is absorbed by a narrower metal genre only when that
         # genre carries comparable support. Without it one stray "nu metal"
         # tag deleted a three-source Heavy Metal reading.

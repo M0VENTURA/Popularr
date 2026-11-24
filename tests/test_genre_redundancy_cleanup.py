@@ -54,9 +54,22 @@ SETTINGS = gs.SelectionSettings(
     mutually_exclusive=gs.DEFAULT_MUTUALLY_EXCLUSIVE,
 )
 
+#: The OLD per-pair metal-over-rock contract, still selectable via
+#: ``metal_over_rock_mode="pair"``. Tests that pin it use this explicitly; the
+#: default is the share rule described in ``test_genre_metal_over_rock_policy``.
+PAIR_SETTINGS = gs.SelectionSettings(
+    **{
+        **SETTINGS.__dict__,
+        "metal_over_rock_mode": "pair",
+        "metal_over_rock_min_ratio": 0.8,
+    }
+)
 
-def select(source_map: dict) -> list[str]:
-    return gs.select_album_or_track_genres(source_map, settings=SETTINGS)["genres"]
+
+def select(source_map: dict, *, settings=None) -> list[str]:
+    return gs.select_album_or_track_genres(
+        source_map, settings=settings or SETTINGS
+    )["genres"]
 
 
 def _pair_evidence(parent: str, child: str) -> dict:
@@ -237,13 +250,21 @@ class TestCrossoverGenresAreRecognised:
         """--- CONTROL ---
 
         Widening the companions must NOT disable the policy. These three are not
-        hybrids, so Alternative Rock still goes.
+        hybrids, so Alternative Rock still goes — once METAL HAS WON.
+
+        ⚠️ ``pair`` MODE, because the default share rule is about a different
+        question. Here both sides carry identical evidence and the raw scores land
+        at a ~0.59 share — a hair under the 0.60 threshold, so the policy declines
+        and rock survives. That is the requested outcome ("metal only replaces rock
+        when MOST of the evidence is metal"), not the policy being switched off:
+        ``test_a_dominant_metal_share_still_strips_rock`` in
+        ``test_genre_metal_over_rock_policy.py`` proves it still fires.
         """
         result = select({
             "musicbrainz@track": [metal, "alternative rock"],
             "lastfm@track": [metal, "alternative rock"],
             "listenbrainz@track": [metal, "alternative rock"],
-        })
+        }, settings=PAIR_SETTINGS)
         assert "Alternative Rock" not in result, (
             f"{metal} stopped suppressing rock, so the policy is switched off: {result}"
         )

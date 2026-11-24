@@ -182,6 +182,18 @@ class GenreEntry:
     aliases: tuple[str, ...]
     #: Which evidence may create it, and whether it takes a slot.
     scope: GenreScope = DEFAULT_GENRE_SCOPE
+    #: Genres that REPLACE this one when they are also selected.
+    #:
+    #: ⭐ A DATA-DRIVEN redundancy list, declared per genre rather than inferred
+    #: from the hierarchy. The ancestry walk cannot see these relationships: a
+    #: ``Nu Metal`` track does not need ``Heavy Metal`` restating the umbrella it
+    #: descends from, but ``heavy_metal`` is not an ANCESTOR of ``nu_metal`` in the
+    #: graph (they meet at ``metal``). This list is the collection's own statement
+    #: of which names stop being informative once a narrower one lands.
+    #:
+    #: Direction matters: the list belongs to the genre that LOSES. If any listed
+    #: id is also selected, this entry is dropped.
+    redundant_with: tuple[str, ...] = ()
 
     def ancestors(self, by_id: dict[str, "GenreEntry"]) -> list[str]:
         """Every ancestor id, nearest first. Breadth-first, cycle-safe, bounded."""
@@ -712,6 +724,10 @@ def _build(
             family=str(raw.get("family") or "").strip(),
             aliases=tuple(str(a) for a in (raw.get("aliases") or []) if a),
             scope=_parse_scope(raw.get("scope")),
+            redundant_with=tuple(
+                str(r).strip() for r in (raw.get("redundant_with") or [])
+                if r and str(r).strip()
+            ),
         )
 
     # A genre that declares no family INHERITS the nearest declared one from its
@@ -730,6 +746,7 @@ def _build(
             # rule a second time (the file parsed, and the value still arrived
             # empty at the selector).
             scope=entry.scope,
+            redundant_with=entry.redundant_with,
         )
         for gid, entry in genres.items()
     }

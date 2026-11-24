@@ -531,19 +531,43 @@ class TestCondensation:
         assert result == ["Heavy Metal"], result
 
     def test_rock_is_suppressed_by_a_non_nu_metal_genre_even_with_support(self) -> None:
-        """The collection policy now outranks ``conditional_keep`` for rock/metal.
+        """The collection policy outranks ``conditional_keep`` for rock/metal.
 
         ``hard_rock`` + ``heavy_metal`` used to survive when the rock side had
         its own track/album evidence. Under the metal-over-rock policy an
         accepted non-Nu-Metal genre removes the rock side regardless, so the
         track keeps ONE identity from the pair.
+
+        ⚠️ ``pair`` MODE. This test is about POLICY PRECEDENCE over
+        ``conditional_keep``, which is only observable once metal has won. Under
+        the default share rule the split here is ~0.46 — rock is the larger
+        half — so the policy correctly declines and both survive; that is a
+        different rule answering a different question.
         """
+        pair = gs.SelectionSettings(
+            **{
+                **SETTINGS.__dict__,
+                "metal_over_rock_mode": "pair",
+                "metal_over_rock_min_ratio": 0.8,
+            }
+        )
+        result = gs.select_album_or_track_genres({
+            "lastfm@track": ["hard rock"],
+            "musicbrainz@album": ["heavy metal"],
+            "listenbrainz@track": ["hard rock", "heavy metal"],
+        }, settings=pair)["genres"]
+        assert result == ["Heavy Metal"], result
+
+    def test_rock_survives_when_it_holds_most_of_the_evidence(self) -> None:
+        """CONTROL for the default share rule — the reported Kiss/Godsmack shape."""
         result = select({
             "lastfm@track": ["hard rock"],
             "musicbrainz@album": ["heavy metal"],
             "listenbrainz@track": ["hard rock", "heavy metal"],
         })
-        assert result == ["Heavy Metal"], result
+        assert "Hard Rock" in result, (
+            f"rock is the larger half of the evidence and must survive: {result}"
+        )
 
     def test_conditional_keep_still_applies_between_non_rock_families(self) -> None:
         """``metalcore`` + ``hardcore_punk`` are NOT a rock/metal pair.
@@ -747,7 +771,16 @@ class TestThePoolThenCleanupPipeline:
     def test_the_result_declares_its_versions(self) -> None:
         result = full({"lastfm@track": ["death metal"]})
         assert result["algorithm_version"] == "2.1"
-        assert result["taxonomy_version"] == 2
+        # ⚠️ Compares against the ACTIVE vocabulary FILE's version rather than a
+        # literal. The number moves whenever the taxonomy is merged (v4 -> v5),
+        # and pinning it made a data update look like a code regression.
+        import json
+
+        from services.enrichment.genre_vocabulary import get_vocabulary
+
+        with open(get_vocabulary().source_path, encoding="utf-8") as handle:
+            declared = json.load(handle).get("version")
+        assert result["taxonomy_version"] == declared
 
     def test_an_unselected_candidate_is_still_explained(self) -> None:
         """A genre that lost is reported, not discarded."""
@@ -975,7 +1008,14 @@ class TestProvenance:
 
     def test_moved_values_are_reported_by_kind(self) -> None:
         """A value that was RECOGNISED and set aside must be distinguishable from
-        one that was never understood — otherwise a mis-classification is silent."""
+        one that was never understood — otherwise a mis-classification is silent.
+
+        ⚠️ "Billboard Hot 100" now lands in ``noise`` rather than ``unknown``: the
+        v5.2 vocabulary lists it as a noise value, which is a MORE precise answer
+        than "never understood". The point of this test — that a recognised value
+        is not silently indistinguishable from an unrecognised one — still holds;
+        only the bucket moved.
+        """
         result = full({
             "lastfm@track": ["death metal", "dark", "German", "live", "Billboard Hot 100"],
         })
@@ -983,7 +1023,13 @@ class TestProvenance:
         assert moved.get("mood") == ["dark"]
         assert moved.get("geography") == ["German"]
         assert moved.get("attribute") == ["live"]
-        assert "Billboard Hot 100" in moved.get("unknown", [])
+        assert "Billboard Hot 100" in moved.get("noise", []), moved
+        assert "Billboard Hot 100" not in moved.get("unknown", [])
+
+    def test_an_unrecognised_value_is_still_reported_as_unknown(self) -> None:
+        """CONTROL — the bucket this test cares about must still populate."""
+        result = full({"lastfm@track": ["death metal", "wibble zorbly"]})
+        assert "wibble zorbly" in result["moved"].get("unknown", [])
 
     def test_a_recognised_non_genre_never_becomes_a_candidate(self) -> None:
         """⚠️ THE PIPELINE-LEVEL TEST FOR CLASSIFICATION.

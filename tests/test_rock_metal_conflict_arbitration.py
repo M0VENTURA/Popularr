@@ -65,6 +65,17 @@ def select(*titles: str) -> list[str]:
     return gs.select_album_or_track_genres(ev, max_genres=4)["genres"]
 
 
+#: Settings under which the OLD per-pair contract applies. Tests that pin that
+#: contract use this explicitly; the default is the share rule.
+BASE_SETTINGS = gs.SelectionSettings(
+    source_weights=gs.DEFAULT_SOURCE_WEIGHTS,
+    entity_weights=gs.DEFAULT_ENTITY_WEIGHTS,
+    keep_together=gs.DEFAULT_KEEP_TOGETHER,
+    conditional_keep=gs.DEFAULT_CONDITIONAL_KEEP,
+    mutually_exclusive=gs.DEFAULT_MUTUALLY_EXCLUSIVE,
+)
+
+
 def _sides(genres: list[str]) -> tuple[list[str], list[str]]:
     folded = [g.casefold() for g in genres]
     return (
@@ -105,8 +116,30 @@ class TestTheReportedRowsNoLongerConflict:
     def test_a_track_does_not_keep_a_rock_and_a_metal_classification(
         self, rock, metal
     ) -> None:
-        """THE RULE — arbitrated per track, on the evidence."""
-        result = select(rock, metal)
+        """THE RULE — arbitrated per track, on the evidence.
+
+        ⚠️ THESE RUN IN ``pair`` MODE, DELIBERATELY.
+
+        The default is now ``metal_over_rock_mode="share"``: metal must hold 60%
+        of the combined rock+metal evidence, measured on RAW SCORES. For a 1:1
+        rival pair the two candidates' scores are rank-decayed differently (only
+        the first tag listed keeps full weight), so the share lands at ~0.41-0.42
+        and the policy DECLINES — both sides survive.
+
+        That is the collection's requested behaviour, not a regression: "metal
+        only replaces rock when most of the evidence is metal". An even split is
+        not most of the evidence, and the report explicitly accepts rock surviving
+        on those borderline tracks. What this class still protects is the OLD
+        contract, which remains available and must keep working exactly as before
+        — hence the explicit ``pair`` settings rather than the default.
+        """
+        settings = gs.SelectionSettings(
+            **{**BASE_SETTINGS.__dict__, "metal_over_rock_mode": "pair"}
+        )
+        result = gs.select_album_or_track_genres(
+            {f"{s}@track": [rock, metal] for s in ("musicbrainz", "lastfm", "listenbrainz")},
+            settings=settings,
+        )["genres"]
         rocks, metals = _sides(result)
         assert not (rocks and metals), (
             f"{rock!r} and {metal!r} both survived: {result}"
@@ -147,8 +180,21 @@ class TestTheOriginalBehaviourSurvives:
         assert "Alternative Rock" not in result, result
 
     def test_a_non_companion_rock_genre_still_goes_beside_nu_metal(self) -> None:
-        """CONTROL — the exception is a short list, not every rock genre."""
-        result = select("nu metal", "blues rock")
+        """CONTROL — the exception is a short list, not every rock genre.
+
+        Run in ``pair`` mode: under the default share rule an even 1:1 split does
+        not let metal overrule rock at all, so the companion list is never
+        consulted. The companion rule itself is what this pins, and it is only
+        reachable once metal has won.
+        """
+        settings = gs.SelectionSettings(
+            **{**BASE_SETTINGS.__dict__, "metal_over_rock_mode": "pair"}
+        )
+        result = gs.select_album_or_track_genres(
+            {f"{s}@track": ["nu metal", "blues rock"]
+             for s in ("musicbrainz", "lastfm", "listenbrainz")},
+            settings=settings,
+        )["genres"]
         assert "Blues Rock" not in result, result
 
 

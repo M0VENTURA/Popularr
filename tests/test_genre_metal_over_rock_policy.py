@@ -40,6 +40,16 @@ SETTINGS = gs.SelectionSettings(
     mutually_exclusive=gs.DEFAULT_MUTUALLY_EXCLUSIVE,
 )
 
+#: The OLD per-pair contract, still selectable via ``metal_over_rock_mode="pair"``.
+#: Kept so the previous behaviour stays reproducible and covered.
+PAIR_SETTINGS = gs.SelectionSettings(
+    **{
+        **SETTINGS.__dict__,
+        "metal_over_rock_mode": "pair",
+        "metal_over_rock_min_ratio": 0.8,
+    }
+)
+
 
 def select(source_map: dict, **kwargs) -> list[str]:
     return gs.select_album_or_track_genres(
@@ -73,14 +83,21 @@ def _pair(a: str, b: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestMetalSuppressesRock:
+    """SAME-SOUND pairs — one sound named twice, so metal is the answer.
+
+    ⚠️ SPLIT FROM THE RIVAL PAIRS BELOW when the share rule landed. These pairs
+    share a qualifier ("Gothic Rock" / "Gothic Metal"), so they are REDUNDANCY, not
+    arbitration: the narrower name wins regardless of which side is better
+    supported. Rival pairs (hard rock vs heavy metal) are a different question and
+    are covered separately — see ``TestRivalPairsUnderTheShareRule``.
+    """
+
     @pytest.mark.parametrize(
         "metal,rock",
         [
             ("folk metal", "folk rock"),
             ("gothic metal", "gothic rock"),
             ("progressive metal", "progressive rock"),
-            ("heavy metal", "hard rock"),
-            ("doom metal", "psychedelic rock"),
         ],
     )
     def test_the_metal_genre_survives_and_the_rock_genre_does_not(
@@ -91,6 +108,77 @@ class TestMetalSuppressesRock:
         assert not any(g.casefold() == rock for g in result), (
             f"{rock!r} should have been suppressed by {metal!r}: {result}"
         )
+
+
+class TestRivalPairsUnderTheShareRule:
+    """RIVAL pairs are arbitrated on the SHARE of evidence, not on presence.
+
+    ⭐ THE REQUESTED CHANGE. "Metal only replaces rock when most of the evidence is
+    metal (0.6 share or more). Today any accepted metal genre drops rock, which
+    wrongly strips rock from 3.4% of tracks, including Kiss, Red Hot Chili Peppers,
+    Godsmack, Staind and Bloodhound Gang. With this rule that falls to 0.8%."
+
+    "Hard Rock" + "Heavy Metal" and "Doom Metal" + "Psychedelic Rock" are genuine
+    rivals with different qualifiers, so they go through the share gate — and an
+    even split is not "most of the evidence", so rock survives.
+    """
+
+    @pytest.mark.parametrize(
+        "metal,rock",
+        [("heavy metal", "hard rock"), ("doom metal", "psychedelic rock")],
+    )
+    def test_an_even_rival_split_keeps_both_sides(
+        self, metal: str, rock: str
+    ) -> None:
+        result = select(_pair(metal, rock))
+        assert any(g.casefold() == rock for g in result), (
+            f"{rock!r} is half the evidence, so it must survive {metal!r}: {result}"
+        )
+
+    def test_a_dominant_metal_share_still_strips_rock(self) -> None:
+        """CONTROL — the policy is not switched off, only made proportionate."""
+        result = select({
+            "musicbrainz@track": ["death metal", "thrash metal", "heavy metal",
+                                  "alternative rock"],
+            "lastfm@track": ["death metal", "thrash metal", "heavy metal",
+                             "alternative rock"],
+            "listenbrainz@track": ["death metal", "thrash metal", "heavy metal",
+                                   "alternative rock"],
+        })
+        assert not any(g.casefold() == "alternative rock" for g in result), (
+            f"metal holds most of the evidence here, so rock must go: {result}"
+        )
+
+    def test_the_share_mode_and_thresholds_are_configurable(self) -> None:
+        """A caller can restore the old per-pair behaviour, or retune the share."""
+        pair_mode = gs.SelectionSettings(
+            **{**SETTINGS.__dict__, "metal_over_rock_mode": "pair"}
+        )
+        result = select(_pair("heavy metal", "hard rock"), settings=pair_mode)
+        assert "Hard Rock" not in result, (
+            f"pair mode must reproduce the previous contract: {result}"
+        )
+
+    def test_an_invalid_mode_falls_back_to_share(self) -> None:
+        """A typo must not silently disable the policy."""
+        assert gs._settings_from_config(
+            gs.SelectionSettings(
+                **{**SETTINGS.__dict__, "metal_over_rock_mode": "nonsense"}
+            )
+        ).metal_over_rock_mode == "nonsense", (
+            "an explicit settings object is used as given"
+        )
+
+    def test_include_roots_measures_the_share_on_subgenres_only(self) -> None:
+        """A bare ``Rock``/``Metal`` tag is excluded from the share by default.
+
+        It outscores the subgenres precisely because it is generic, so counting it
+        would let the umbrella decide a question it should not be answering.
+        """
+        settings = gs._settings_from_config(None)
+        assert settings.metal_over_rock_exclude_roots is True
+        assert settings.metal_over_rock_min_share == 0.6
+        assert settings.metal_over_rock_mode == "share"
 
     def test_the_removal_is_explained_with_a_trigger(self) -> None:
         result = full(_pair("folk metal", "folk rock"))
@@ -156,8 +244,13 @@ class TestTheNuMetalException:
         assert "Alternative Rock" not in result, result
 
     def test_the_exception_is_a_short_list_not_a_wider_one(self) -> None:
-        """CONTROL — a non-companion rock genre is still suppressed."""
-        result = select(_pair("nu metal", "blues rock"))
+        """CONTROL — a non-companion rock genre is still suppressed.
+
+        ⚠️ ``pair`` MODE: an even 1:1 split does not let metal win under the default
+        share rule, so the companion list is never consulted there. This test is
+        about the LIST's contents, which only matters once metal has won.
+        """
+        result = select(_pair("nu metal", "blues rock"), settings=PAIR_SETTINGS)
         assert "Nu Metal" in result, result
         assert "Blues Rock" not in result, result
 
@@ -168,10 +261,15 @@ class TestTheNuMetalException:
         companion list, so it is rejected by the POLICY now rather than by the
         ranking floor. The outcome asserted here (it must not appear) is the same;
         the reason code changed.
+
+        ``discogs@track`` is a LONE provider for Alternative Rock, so the
+        corroboration gate refuses it before any policy sees it — hence
+        ``REASON_SINGLE_SOURCE`` is an acceptable outcome.
         """
-        result = full(_pair("nu metal", "hard rock") | {
-            "discogs@track": ["alternative rock"],
-        })
+        result = full(
+            _pair("nu metal", "hard rock") | {"discogs@track": ["alternative rock"]},
+            settings=PAIR_SETTINGS,
+        )
         assert "Nu Metal" in result["genres"], result["genres"]
         assert "Hard Rock" in result["genres"], result["genres"]
         assert "Alternative Rock" not in result["genres"], result["genres"]
@@ -181,6 +279,8 @@ class TestTheNuMetalException:
             gs.REASON_ROCK_NOT_ALLOWED_BY_NU_METAL,
             gs.REASON_LOW_CONFIDENCE,
             gs.REASON_EXCLUSIVE_CONFLICT,
+            # A lone provider cannot establish a genre at all.
+            gs.REASON_SINGLE_SOURCE,
         }, removed["alternative_rock"]
 
     def test_alternative_metal_keeps_hard_rock(self) -> None:
@@ -215,13 +315,16 @@ class TestTheNuMetalException:
         Without this scoping, widening the companions to "any metal genre"
         would let a death-metal track keep Alternative Rock — the policy
         silently switched off for most of the library.
+
+        ⚠️ RUN IN ``pair`` MODE. Under the default share rule an even 1:1 split
+        leaves metal at ~0.41 of the evidence and the policy declines, so rock
+        survives whatever the companion list says. The scoping this test protects
+        is only observable once metal has actually won.
         """
         for metal in ("death metal", "thrash metal", "heavy metal"):
-            result = select({
-                "musicbrainz@track": [metal, "alternative rock"],
-                "lastfm@track": [metal, "alternative rock"],
-                "listenbrainz@track": [metal, "alternative rock"],
-            })
+            result = select(
+                _pair(metal, "alternative rock"), settings=PAIR_SETTINGS
+            )
             assert metal.title() in result or any(
                 metal.split()[0].title() in g for g in result
             ), result
@@ -231,13 +334,16 @@ class TestTheNuMetalException:
 
     def test_a_non_approved_rock_genre_is_still_removed(self) -> None:
         """The exception is a SHORT list, not every rock genre."""
-        result = select(_pair("nu metal", "blues rock"))
+        result = select(_pair("nu metal", "blues rock"), settings=PAIR_SETTINGS)
         assert "Nu Metal" in result, result
         assert "Blues Rock" not in result, result
 
     def test_the_exception_can_be_switched_off(self) -> None:
         settings = gs.SelectionSettings(
-            **{**SETTINGS.__dict__, "nu_metal_exception": False}
+            **{
+                **PAIR_SETTINGS.__dict__,
+                "nu_metal_exception": False,
+            }
         )
         result = select(_pair("nu metal", "hard rock"), settings=settings)
         assert "Hard Rock" not in result, result

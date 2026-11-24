@@ -107,6 +107,9 @@ class Candidate:
     #: floors must not discard it and blank the track — see
     #: ``require_source_corroboration``.
     rescued: bool = False
+    #: Named by BOTH MusicBrainz and ListenBrainz at track level — the
+    #: position-3 concession. See ``select_genres``.
+    metabrainz_pair: bool = False
 
     @property
     def entity_count(self) -> int:
@@ -175,6 +178,65 @@ class SelectionSettings:
     #: pairs it exists to settle. Measured against the reported track, whose
     #: metal/rock ratio is 0.62.
     metal_over_rock_min_ratio: float = 0.8
+    #: HOW the policy decides: ``"share"`` (default) or ``"pair"``.
+    #:
+    #: * ``"share"`` — the metal family's SHARE of the combined rock+metal
+    #:   evidence, with roots excluded. Rock survives whenever metal is a
+    #:   minority reading. This is the measured rule: over the reported library it
+    #:   cut wrongly-stripped rock from 3.4% of tracks to 0.8%, and 0.55 / 0.60 /
+    #:   0.67 gave nearly identical results, so the middle value is safe.
+    #: * ``"pair"`` — the previous per-pair ratio (``metal_over_rock_min_ratio``).
+    #:   Kept because it is the only way to reproduce the old outcome exactly;
+    #:   it is NOT the default.
+    metal_over_rock_mode: str = "share"
+    #: With ``mode="share"``: the metal family must be at least this share of the
+    #: rock+metal evidence before rock-family genres are removed.
+    metal_over_rock_min_share: float = 0.6
+    #: Exclude ``specificity == 0`` roots from that share.
+    #:
+    #: ⚠️ NOT OPTIONAL IN PRACTICE. A bare ``Rock`` tag scores highly BECAUSE it
+    #: is generic (Discogs "Rock" + MusicBrainz "rock" outscore most subgenres),
+    #: so counting it would let the umbrella decide the very question it is
+    #: supposed to be excluded from.
+    metal_over_rock_exclude_roots: bool = True
+    #: Bare family genres ("Rock", "Punk", "Electronic", "Pop") are a FALLBACK:
+    #: they only take a slot when nothing more specific qualifies.
+    #:
+    #: ⭐ 12% of genre slots were these generic names. Because a root is the
+    #: highest-scoring tag, it also SET the relative floor — and then knocked out
+    #: the real subgenre that scored below it. Making them fallback-only cut
+    #: generic slots to 3.4% and raised the share of acceptable genres on the
+    #: labelled tracks from 86% to 93%.
+    root_fallback_only: bool = True
+    #: If condensing would leave NO genre at position 1, re-select without it.
+    #:
+    #: ⚠️ THIS IS A BUG IN THE CURRENT DESIGN, not a preference. On The Trooper,
+    #: Heavy Metal (1.68) is condensed into a narrower genre that scores 0.59 on
+    #: one source; that narrower genre then fails the 0.60 floor for position 1,
+    #: and the track comes out with NO genre at all despite having had a
+    #: well-supported one.
+    restore_parent_if_empty: bool = True
+    #: Artist-only evidence may only add a genre whose family ALREADY appears in
+    #: track/album evidence.
+    #:
+    #: Aimed at Nu Metal arriving on a rock track purely from the artist's own
+    #: tags ("Even Flow" by Pearl Jam): the artist genre describes the act, so it
+    #: may confirm a family the recording already belongs to but must not
+    #: introduce a different one.
+    artist_only_same_family: bool = True
+    #: Honour each vocabulary entry's ``redundant_with`` list after the slots are
+    #: decided. The freed slot is NOT refilled.
+    declared_redundancy: bool = True
+    #: Position 3 may accept ONE source group when the genre is named by both
+    #: MusicBrainz and ListenBrainz at track level AND its family is not already
+    #: represented in positions 1-2.
+    #:
+    #: ⚠️ The ordinary rule needs two INDEPENDENT source groups. MusicBrainz and
+    #: ListenBrainz both resolve through MetaBrainz, so they count as ONE group —
+    #: which is why a genre corroborated by exactly those two still failed the
+    #: gate and left the third slot empty on tracks with a thin but real third
+    #: reading.
+    position3_new_family: bool = True
     #: Nu Metal on its own is a metal/rock crossover, so it does NOT suppress
     #: the approved rock companions below.
     nu_metal_exception: bool = True
@@ -452,6 +514,23 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         except (TypeError, ValueError):
             return default
 
+    def _ratio(key: str, default: float) -> float:
+        """A 0..1 share, CLAMPED.
+
+        An out-of-range value (1.5, -1) would silently disable the rule it tunes
+        — a share above 1 can never be reached, and a negative one always can —
+        so it is clamped rather than trusted.
+        """
+        try:
+            return max(0.0, min(1.0, float(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    def _mode(key: str, default: str) -> str:
+        """One of a small set of strategy names, case-insensitively."""
+        text = str(raw.get(key) or default).strip().casefold()
+        return text if text in ("share", "pair") else default
+
     def _bool(key: str, default: bool) -> bool:
         """A config flag, accepting the YAML spellings the Config page writes.
 
@@ -521,6 +600,14 @@ def _settings_from_config(settings: SelectionSettings | None) -> SelectionSettin
         # How much metal evidence is needed before the metal-over-rock policy may
         # overrule a stronger rock body of evidence.
         metal_over_rock_min_ratio=_num("metal_over_rock_min_ratio", 0.80),
+        metal_over_rock_mode=_mode("metal_over_rock_mode", "share"),
+        metal_over_rock_min_share=_ratio("metal_over_rock_min_share", 0.60),
+        metal_over_rock_exclude_roots=_bool("metal_over_rock_exclude_roots", True),
+        root_fallback_only=_bool("root_fallback_only", True),
+        restore_parent_if_empty=_bool("restore_parent_if_empty", True),
+        artist_only_same_family=_bool("artist_only_same_family", True),
+        declared_redundancy=_bool("declared_redundancy", True),
+        position3_new_family=_bool("position3_new_family", True),
         ancestor_replace_min_ratio=_num("ancestor_replace_min_ratio", 0.80),
         umbrella_absorb_min_ratio=_num("umbrella_absorb_min_ratio", 0.60),
         essentia_fallback=_bool("essentia_fallback", True),
@@ -764,6 +851,15 @@ REASON_MANUAL_OVERRIDE_LIMIT = "MANUAL_GENRE_KEPT"
 #: lone Discogs broad category) is exactly the weak evidence the corroboration
 #: gate exists to reject — see ``SelectionSettings.min_independent_sources``.
 REASON_SINGLE_SOURCE = "SINGLE_SOURCE"
+#: A bare family genre ("Rock", "Punk", "Electronic", "Pop") that was held back
+#: because a more specific genre could take the slot instead.
+REASON_ROOT_FALLBACK_ONLY = "ROOT_FALLBACK_ONLY"
+#: Artist-only evidence tried to introduce a family the recording itself has no
+#: track/album evidence for.
+REASON_ARTIST_ONLY_FOREIGN_FAMILY = "ARTIST_ONLY_FOREIGN_FAMILY"
+#: The vocabulary's own ``redundant_with`` list replaced this genre with a
+#: narrower one that was also selected.
+REASON_DECLARED_REDUNDANT = "DECLARED_REDUNDANT"
 
 
 FAMILY_METAL = "metal"
@@ -846,6 +942,124 @@ def apply_metal_over_rock_policy(
     if not metal or not rock:
         return candidates, []
 
+    # ⭐ THE SHARE RULE — the family holding MOST of the evidence wins.
+    #
+    # "Any accepted metal genre drops rock" wrongly stripped rock from 3.4% of
+    # tracks, including Kiss, Red Hot Chili Peppers, Godsmack, Staind and
+    # Bloodhound Gang. Requiring a 0.6 SHARE of the rock+metal evidence took that
+    # to 0.8% — and 0.55 / 0.60 / 0.67 measured almost identically, so the value
+    # is not a knife edge.
+    #
+    # ⚠️ IT IS SYMMETRIC, AND IT HAS TO BE. The first cut only ever removed ROCK
+    # when metal won; when metal lost, both sides stayed. That resurrected the
+    # opposite defect — a lone low-weight metal tag (an Essentia guess at 0.45
+    # against a full-weight MusicBrainz rock tag) sat beside the rock genre it
+    # should have lost to, and "rock wins on stronger evidence" stopped removing
+    # anything. Arbitration means ONE side goes, so the losing family is removed
+    # too. Between the two thresholds neither side has a majority and both stay —
+    # which is exactly the reported "a few borderline tracks whose primary becomes
+    # the rock genre".
+    #
+    # ⚠️ ROOTS ARE EXCLUDED FROM THE SHARE, and that is what makes it work: a
+    # bare ``Rock`` tag scores highest precisely because it is generic, so
+    # including it would let the umbrella outvote the subgenres on the question
+    # the umbrella should not be answering.
+    _same_sound_rock: set[str] = set()
+    if settings.metal_over_rock_mode == "share":
+        _probe_vocab = get_vocabulary()
+
+        def _qualifier_of(genre_id: str) -> str:
+            entry = _probe_vocab.genres.get(genre_id)
+            if entry is None:
+                return genre_id
+            words = entry.display.casefold().replace("-", " ").split()
+            if len(words) > 1 and words[-1] in (FAMILY_METAL, FAMILY_ROCK):
+                words = words[:-1]
+            return " ".join(words)
+
+        # A rock/metal pair with the SAME qualifier is one sound named twice, so
+        # the narrower name (metal) is the answer whatever the support says. That
+        # is REDUNDANCY, not arbitration, and it is decided before the share so
+        # the share is measured on genuine rivals only.
+        for _rock_candidate in rock:
+            for _metal_candidate in metal:
+                _is_same = _is_ancestor(
+                    _rock_candidate.genre_id, _metal_candidate.genre_id, _probe_vocab
+                ) or (
+                    _qualifier_of(_rock_candidate.genre_id)
+                    and _qualifier_of(_rock_candidate.genre_id)
+                    == _qualifier_of(_metal_candidate.genre_id)
+                )
+                if _is_same:
+                    _same_sound_rock.add(_rock_candidate.genre_id)
+                    break
+
+        _metal_pool = [
+            c for c in metal
+            if not (settings.metal_over_rock_exclude_roots and c.specificity == 0)
+        ]
+        _rivals = [c for c in rock if c.genre_id not in _same_sound_rock]
+        _metal_total = sum(float(c.score or 0.0) for c in _metal_pool)
+        _rock_total = sum(float(c.score or 0.0) for c in _rivals)
+        _combined = _metal_total + _rock_total
+        _share = (_metal_total / _combined) if _combined > 0 else 0.0
+        _threshold = settings.metal_over_rock_min_share
+
+        if _combined > 0 and _share < _threshold and (1.0 - _share) < _threshold:
+            # NO MAJORITY EITHER WAY — the evidence does not settle it, so both
+            # readings stand. Only the same-sound duplicates are still redundant.
+            logger.debug(
+                "Genre metal-over-rock policy declined — neither side holds a "
+                "majority of the evidence",
+                metal_share=round(_share, 3),
+                required=_threshold,
+                metal=[c.display for c in _metal_pool],
+                rival_rock=[c.display for c in _rivals],
+            )
+            if not _same_sound_rock:
+                return candidates, []
+            _trigger = max(metal, key=lambda c: (c.confidence, c.score)).display
+            _removed_same = [
+                _removal(c, REASON_ROCK_SUPPRESSED_BY_METAL, _trigger)
+                for c in rock
+                if c.genre_id in _same_sound_rock and not c.manual
+            ]
+            _drop_same = {r["id"] for r in _removed_same}
+            return [
+                c for c in candidates if c.genre_id not in _drop_same
+            ], _removed_same
+
+        if _combined > 0 and _share < _threshold:
+            # ROCK holds the majority: the metal side loses.
+            logger.debug(
+                "Genre rock-over-metal policy applied — rock holds most of the "
+                "evidence",
+                rock_share=round(1.0 - _share, 3),
+                metal=[c.display for c in _metal_pool],
+                rival_rock=[c.display for c in _rivals],
+            )
+            _trigger = max(_rivals, key=lambda c: (c.confidence, c.score)).display
+            _removed_metal: list[dict[str, Any]] = []
+            _drop_metal: set[str] = set()
+            for candidate in metal:
+                if candidate.manual:
+                    continue
+                _drop_metal.add(candidate.genre_id)
+                _removed_metal.append(
+                    _removal(candidate, REASON_METAL_SUPPRESSED_BY_ROCK, _trigger)
+                )
+            # A same-sound duplicate is redundant in its own right, and metal has
+            # just lost the arbitration, so the ROCK member of the pair stays.
+            _removed_same_rock = [
+                _removal(c, REASON_ROCK_SUPPRESSED_BY_METAL, _trigger)
+                for c in rock
+                if c.genre_id in _same_sound_rock and not c.manual
+            ]
+            _drop_metal |= {r["id"] for r in _removed_same_rock}
+            return [
+                c for c in candidates if c.genre_id not in _drop_metal
+            ], _removed_metal + _removed_same_rock
+
     # ⭐⭐ THE POLICY IS MUTUAL, BUT ARBITRATED PER PAIR — NOT ON FAMILY TOTALS.
     #
     # It used to be one-directional: metal present meant rock was deleted, with a
@@ -926,7 +1140,14 @@ def apply_metal_over_rock_policy(
 
     blocked: set[str] = set()
     _rock_wins_pairs = 0
-    for metal_candidate in metal:
+    # ⚠️ THE PER-PAIR ARBITRATION IS THE ``pair`` MODE ONLY.
+    #
+    # In ``share`` mode the question is already settled by the gate above: metal
+    # holds most of the evidence, so it wins and rock goes. Running the pair loop
+    # afterwards would re-litigate that on individual scores and could block the
+    # very metal genre the share just endorsed — the two rules would disagree and
+    # the outcome would depend on which ran last.
+    for metal_candidate in (metal if settings.metal_over_rock_mode == "pair" else []):
         if metal_candidate.manual:
             continue
         winners_for_metal = [
@@ -1018,6 +1239,230 @@ def apply_metal_over_rock_policy(
         trigger=trigger,
     )
     return [c for c in candidates if c.genre_id not in drop], removed
+
+
+def apply_root_fallback(
+    candidates: list[Candidate],
+    *,
+    settings: SelectionSettings | None = None,
+    reasons: list[dict[str, Any]] | None = None,
+) -> list[Candidate]:
+    """NO LONGER DROPS ANYTHING — the rule lives in :func:`select_genres`.
+
+    ⭐ WHY THE RULE IS NOT HERE. Bare family genres ("Rock", "Punk", "Electronic",
+    "Pop") are a FALLBACK: they should take a slot only when nothing more specific
+    does. The first attempt at that dropped every root whenever ANY specific genre
+    was present, which was wrong twice over:
+
+    * ``Pop`` beside ``Synthpop`` — synthpop is ELECTRONIC-family, so it cannot
+      replace the pop root. Folding them cost the track its only pop-family genre.
+    * ``Death Metal`` + ``Bebop`` + ``Reggae`` — the reggae root was dropped in
+      favour of an unrelated metal genre, leaving a reggae track with no reggae
+      genre and a slot short of the configured count.
+
+    A root is only redundant against its OWN family (that is
+    :func:`remove_generic_parents`); the "fallback" half is an ORDERING problem —
+    do not let a root set the relative floor or take a slot a specific genre could
+    have filled. That belongs in the selection order, so it lives in
+    :func:`select_genres`.
+
+    Kept as a no-op so existing callers and tests that import it keep working.
+    """
+    return candidates
+
+
+def filter_artist_only_families(
+    candidates: list[Candidate],
+    *,
+    settings: SelectionSettings | None = None,
+    reasons: list[dict[str, Any]] | None = None,
+) -> list[Candidate]:
+    """Artist-only evidence may CONFIRM a family, never INTRODUCE one.
+
+    An artist's genre tags describe the act across its whole career. Letting them
+    add a family the recording itself has no track/album evidence for is how Pearl
+    Jam's "Even Flow" acquires Nu Metal: the act has touched the genre somewhere,
+    so the recording inherits it.
+
+    The rule therefore allows an artist-only candidate whose family already appears
+    in TRACK or ALBUM evidence (it corroborates what the recording says) and drops
+    one whose family appears nowhere else (it invents a reading).
+
+    ⚠️ IF THERE IS NO TRACK/ALBUM EVIDENCE AT ALL the rule cannot judge anything —
+    every candidate would be "foreign" and the track would come out empty. An
+    untagged recording whose only evidence is the artist's own tags must keep
+    them.
+    """
+    settings = settings or _settings_from_config(None)
+    if not settings.artist_only_same_family or not candidates:
+        return candidates
+
+    supported_families = {
+        (c.family or c.genre_id)
+        for c in candidates
+        if c.has_entity(ENTITY_TRACK) or c.has_entity(ENTITY_ALBUM)
+    }
+    if not supported_families:
+        return candidates
+
+    kept: list[Candidate] = []
+    dropped: list[Candidate] = []
+    for candidate in candidates:
+        if candidate.manual or candidate.entities != {ENTITY_ARTIST}:
+            kept.append(candidate)
+            continue
+        if (candidate.family or candidate.genre_id) in supported_families:
+            kept.append(candidate)
+            continue
+        dropped.append(candidate)
+        if reasons is not None:
+            reasons.append(
+                _removal(
+                    candidate,
+                    REASON_ARTIST_ONLY_FOREIGN_FAMILY,
+                    "no track or album evidence for its family",
+                )
+            )
+    if dropped:
+        logger.debug(
+            "Genre artist-only foreign family dropped",
+            dropped=[c.display for c in dropped],
+            supported_families=sorted(supported_families),
+        )
+    return kept
+
+
+def _named_by_metabrainz_at_track(candidate: Candidate) -> bool:
+    """Both MusicBrainz AND ListenBrainz named this at TRACK level.
+
+    ⭐ THE POINT OF THIS TEST. MusicBrainz and ListenBrainz resolve through the
+    same MetaBrainz identity, so ``source_group_count`` counts them as ONE
+    independent group — correct in general, but it means a genre corroborated by
+    exactly those two still fails a two-group gate. For position 3 that is too
+    strict: two track-level providers naming the genre is real evidence, however
+    they are grouped.
+    """
+    sources = {
+        c.source
+        for c in candidate.contributions
+        if c.entity == ENTITY_TRACK
+    }
+    return "musicbrainz" in sources and "listenbrainz" in sources
+
+
+def apply_declared_redundancy(
+    candidates: list[Candidate],
+    *,
+    vocab: Vocabulary | None = None,
+    settings: SelectionSettings | None = None,
+    reasons: list[dict[str, Any]] | None = None,
+) -> list[Candidate]:
+    """Drop a genre whose vocabulary entry lists a selected genre as redundant.
+
+    ⭐ WHY THIS IS DATA AND NOT A HIERARCHY WALK. ``redundant_with`` states
+    relationships the parent graph cannot: ``Nu Metal`` beside ``Heavy Metal`` is
+    redundant (both describe the same metal umbrella), but ``heavy_metal`` is not
+    an ANCESTOR of ``nu_metal`` — they meet at ``metal``. ``Alternative Rock``
+    beside ``Emo Pop`` is the same story.
+
+    ⚠️ IT RUNS AFTER THE SLOTS ARE DECIDED, and the freed slot is NOT refilled.
+    Filling it would let the redundancy rule silently promote whatever the trim
+    happened to place next — a genre that never earned a slot. The list gets
+    shorter, which is the honest outcome: "these two names were one reading".
+
+    ⚠️ IT NEVER EMPTIES A TRACK. If every candidate is lost to a redundant pair the
+    first one is kept, because a track with no genre is worse than a track with a
+    redundant one — the playlist builders filter on ``genres``.
+
+    ⚠️ ``keep_together`` OVERRIDES A DECLARED LIST — ALWAYS. That setting is the
+    collection's explicit statement that two genres belong side by side, and it is
+    a deliberate human decision recorded against a specific pair. A data-driven
+    redundancy list must not silently reverse it. The v5.2 patch, for instance,
+    declares ``alternative_metal`` redundant with ``nu_metal`` while
+    ``keep_together`` declares the same pair a valid combination; without this
+    guard the patch won, which is the wrong precedence for a generated list.
+
+    Direction is the ENTRY's: a genre is dropped when one of ITS listed ids is
+    present.
+    """
+    settings = settings or _settings_from_config(None)
+    if not settings.declared_redundancy or not candidates:
+        return candidates
+
+    vocab = vocab or get_vocabulary()
+    present = {c.genre_id for c in candidates}
+
+    def _kept_together(first: str, second: str) -> bool:
+        return _pair_is_kept(first, second, settings.keep_together)
+
+    drop: set[str] = set()
+    for candidate in candidates:
+        if candidate.manual:
+            continue
+        entry = vocab.genres.get(candidate.genre_id)
+        if entry is None or not entry.redundant_with:
+            continue
+        rivals = sorted(
+            rid for rid in entry.redundant_with
+            if rid in present
+            and rid != candidate.genre_id
+            and not _kept_together(candidate.genre_id, rid)
+        )
+        if not rivals:
+            continue
+        drop.add(candidate.genre_id)
+        if reasons is not None:
+            display = vocab.genres[rivals[0]].display if rivals[0] in vocab.genres else rivals[0]
+            reasons.append(
+                _removal(candidate, REASON_DECLARED_REDUNDANT, display)
+            )
+
+    if not drop:
+        return candidates
+
+    kept = [c for c in candidates if c.genre_id not in drop]
+    if not kept:
+        # ⚠️ REFUSE TO EMPTY THE TRACK. Restore the single best survivor.
+        best = max(candidates, key=lambda c: (c.confidence, c.score))
+        logger.debug(
+            "Declared redundancy would have emptied the track — keeping the best",
+            kept=best.display,
+            would_drop=sorted(drop),
+        )
+        return [best]
+    logger.debug(
+        "Declared redundancy applied",
+        dropped=sorted(drop),
+        kept=[c.display for c in kept],
+    )
+    return kept
+
+
+def _condense_pool(
+    pool: list[Candidate],
+    *,
+    vocab: Vocabulary,
+    settings: SelectionSettings,
+    reasons: list[dict[str, Any]],
+) -> list[Candidate]:
+    """The redundancy stage, in its required order. Appends its own reasons.
+
+    Extracted so :func:`select_album_or_track_genres` can re-run the selection on
+    the UNCONDENSED pool when condensing turns out to have emptied it — see
+    ``settings.restore_parent_if_empty``.
+    """
+    pool, generic_removed = remove_generic_parents(pool, settings=settings)
+    reasons.extend(generic_removed)
+
+    # ⭐ Heavy Metal is absorbed by any narrower metal genre — the "Heavy Metal is
+    # the Same as Metal" rule, kept separate from the specificity-0 mechanism that
+    # used to implement it (see ``UMBRELLA_METAL_GENRES``).
+    pool = _absorb_umbrella_genres(pool, settings=settings, reasons=reasons)
+
+    pool = remove_redundant_ancestors(
+        pool, vocab=vocab, settings=settings, reasons=reasons
+    )
+    return enforce_family_diversity(pool, settings=settings)
 
 
 def remove_generic_parents(
@@ -1264,6 +1709,15 @@ def require_source_corroboration(
             kept.append(candidate)
             continue
         if len(candidate.sources) >= minimum:
+            kept.append(candidate)
+            continue
+        # ⭐ POSITION-3 CONCESSION: MusicBrainz AND ListenBrainz, both at TRACK
+        # level, is a real second voice — they simply share a source GROUP, so the
+        # ordinary two-group test cannot see them as two. Rescuing the candidate
+        # here lets the selection place it at position 3 under its own rule (see
+        # ``select_genres``), which is the only position this may fill.
+        if settings.position3_new_family and _named_by_metabrainz_at_track(candidate):
+            candidate.metabrainz_pair = True
             kept.append(candidate)
             continue
         if reasons is not None:
@@ -1809,6 +2263,30 @@ def select_genres(
         reverse=True,
     )
 
+    # ⭐ BARE FAMILY GENRES ARE A FALLBACK — they are considered LAST.
+    #
+    # 12% of genre slots were generic: Rock, Punk, Electronic, Pop. A root is not
+    # merely uninformative, it is the HIGHEST-SCORING tag (Discogs "Rock" and
+    # MusicBrainz "rock" corroborate each other and outscore any real subgenre),
+    # so it took a slot AND became the yardstick for the relative floor — which
+    # then knocked out the subgenre it had just outscored.
+    #
+    # ⚠️ THIS IS AN ORDERING RULE, NOT A FILTER. A root is never deleted here; it
+    # simply cannot take a slot while a specific genre can fill one. Deleting
+    # instead broke two pinned decisions: ``Pop`` beside ``Synthpop`` (synthpop is
+    # electronic-family, so it cannot replace the pop root) and a lone ``Reggae``
+    # beside an unrelated metal genre. A root that is truly redundant against its
+    # OWN family is removed by ``remove_generic_parents``, which runs before this
+    # and names the reason.
+    #
+    # Consequence for the relative floor: it is measured against the first genre
+    # actually SELECTED, so with this ordering that is the strongest SPECIFIC
+    # genre wherever one exists — exactly the yardstick the rule wants.
+    if settings.root_fallback_only:
+        _roots = [c for c in ranked if c.specificity == 0 and not c.manual]
+        _specific = [c for c in ranked if not (c.specificity == 0 and not c.manual)]
+        ranked = _specific + _roots
+
     selected: list[Candidate] = []
     for index, candidate in enumerate(ranked):
         if len(selected) >= settings.max_genres:
@@ -1828,6 +2306,30 @@ def select_genres(
                 floor=floor,
             )
             break
+
+        # ⭐ POSITION-3 CONCESSION — a MetaBrainz pair may fill the LAST slot.
+        #
+        # ⚠️ ONLY AT POSITION 3, AND ONLY FOR A NEW FAMILY. The gate let a
+        # MetaBrainz-pair candidate through on one source GROUP, which is a weaker
+        # claim than the other slots require, so it may not lead the list and may
+        # not restate a family positions 1-2 already named. Those two conditions
+        # are what keep the concession from becoming a general loosening — and the
+        # ordinary confidence and relative floors still apply to it below.
+        #
+        # ⚠️ ``continue``, NOT ``break``. A pair candidate that cannot take the
+        # third slot must not stop a properly corroborated candidate behind it
+        # from trying — a ``break`` here would end the loop on its behalf.
+        _pair_may_fill_third_slot = False
+        if candidate.metabrainz_pair:
+            _pair_may_fill_third_slot = bool(
+                settings.position3_new_family
+                and position == 2
+                and (candidate.family or candidate.genre_id) not in {
+                    other.family or other.genre_id for other in selected
+                }
+            )
+            if not _pair_may_fill_third_slot:
+                continue
 
         if selected:
             relative = _relative_floor_for(settings, position)
@@ -2032,20 +2534,23 @@ def select_album_or_track_genres(
     pool, policy_removed = apply_metal_over_rock_policy(pool, settings=settings)
     removed.extend(policy_removed)
 
+    # ⭐ Artist-only evidence may CONFIRM a family, never INTRODUCE one. Runs after
+    # the family arbitration (which needs the full evidence set) and before
+    # condensation, so a family that only the artist's tags named cannot survive
+    # by outliving the genres that contradicted it.
+    pool = filter_artist_only_families(
+        pool, settings=settings, reasons=removed
+    )
+
+    # ⭐ BARE FAMILY GENRES ARE A FALLBACK: they are ordered AFTER every specific
+    # genre inside ``select_genres``, so they cannot set the relative floor or take
+    # a slot a real subgenre could fill. Not a filter — see ``apply_root_fallback``.
+
     # ── 5. Redundancy ────────────────────────────────────────────────────
-    pool, generic_removed = remove_generic_parents(pool, settings=settings)
-    removed.extend(generic_removed)
-
-    # ⭐ Heavy Metal is absorbed by any narrower metal genre — the
-    # "Heavy Metal is the Same as Metal" rule, kept separate from the
-    # specificity-0 mechanism that used to implement it (see
-    # ``UMBRELLA_METAL_GENRES``).
-    pool = _absorb_umbrella_genres(pool, settings=settings, reasons=removed)
-
-    pool = remove_redundant_ancestors(
+    _pre_condense_pool = list(pool)
+    pool = _condense_pool(
         pool, vocab=vocab, settings=settings, reasons=removed
     )
-    pool = enforce_family_diversity(pool, settings=settings)
 
     # ⭐ ``slot: "marker"`` genres never consume a Maximum Genres slot.
     #
@@ -2067,6 +2572,54 @@ def select_album_or_track_genres(
 
     # ── 6. Final cardinality ─────────────────────────────────────────────
     selected, trim_removed = trim_to_final(pool, settings=settings)
+
+    # ⭐ THE VOCABULARY'S OWN REDUNDANCY LISTS, applied to the SELECTED set.
+    #
+    # After the slots, deliberately: "heavy metal" and "nu metal" both holding a
+    # slot is a redundancy the slot logic cannot see (neither is the other's
+    # ancestor), and dropping one BEFORE selection would hand its slot to whatever
+    # ranked next instead of simply returning a shorter, honest list.
+    _before_redundancy = len(selected)
+    selected = apply_declared_redundancy(
+        selected, vocab=vocab, settings=settings, reasons=trim_removed
+    )
+    if len(selected) != _before_redundancy:
+        logger.debug(
+            "Declared redundancy shortened the final set",
+            before=_before_redundancy, after=len(selected),
+        )
+
+    # ⭐⭐ KEEP THE PARENT IF CONDENSING WOULD EMPTY THE SLOT.
+    #
+    # ⚠️ THIS IS A BUG IN THE DESIGN, not a preference. On The Trooper, Heavy Metal
+    # (score 1.68) is condensed into a narrower genre that scores 0.59 on one
+    # source. That narrower genre then fails the 0.60 floor for position 1, so the
+    # track comes out with NO genre — despite having started with a well-supported
+    # one. Condensation is a refinement; it must not be able to destroy the
+    # reading it refined.
+    #
+    # The rescue re-selects from the pool as it was BEFORE condensation. Only the
+    # redundancy stage is undone: the corroboration gate, the collection policy and
+    # the root fallback have all already had their say.
+    if not selected and settings.restore_parent_if_empty and _pre_condense_pool:
+        _restored, _restored_removed = trim_to_final(
+            _pre_condense_pool, settings=settings
+        )
+        if _restored:
+            logger.debug(
+                "Genre selection restored after condensing emptied it",
+                restored=[c.display for c in _restored],
+                condensed=[c.display for c in pool],
+            )
+            # The condense-stage reasons describe a pool that is no longer the
+            # answer, so they are replaced by the record of what the restore
+            # actually did.
+            removed = [
+                r for r in removed
+                if r.get("reason") != REASON_REDUNDANT_GENERIC_PARENT
+            ]
+            selected = _restored
+            trim_removed = _restored_removed
 
     # ── 5b. Local-audio fallback ─────────────────────────────────────────
     # ⭐ ONLY WHEN NOTHING ELSE PRODUCED A GENRE.
