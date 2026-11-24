@@ -316,9 +316,12 @@ def _push_to_files(
     the slow half of an apply — one read-modify-write per changed track — so it
     is the half that most needs a moving progress bar.
     """
-    out: dict[str, Any] = {"files_written": 0, "files_failed": 0, "navidrome": None}
+    out: dict[str, Any] = {
+        "files_written": 0, "files_failed": 0, "paths_stamped": 0, "navidrome": None,
+    }
 
     if write_file_tags and changed_rows:
+        written_paths: list[str] = []
         try:
             from services.metadata.tag_file_service import (
                 _resolve_music_file_path,
@@ -359,8 +362,16 @@ def _push_to_files(
                         out["files_failed"] += 1
                         continue
                     resolved = _resolve_music_file_path(path) or path
-                    if update_file_tags(resolved, {"genres": row.get("after") or ""}):
+                    # ⚠️ ``defer_stamp``: the local-authority mark is written ONCE
+                    # for the whole batch below. Per file it was an UPDATE whose
+                    # predicate wraps the indexed column in LOWER(REPLACE(...)),
+                    # so it could not use the path index and scanned the entire
+                    # ``tracks`` table on every single file.
+                    if update_file_tags(
+                        resolved, {"genres": row.get("after") or ""}, defer_stamp=True
+                    ):
                         out["files_written"] += 1
+                        written_paths.append(resolved)
                     else:
                         out["files_failed"] += 1
                 except Exception as exc:
@@ -368,6 +379,21 @@ def _push_to_files(
                     logger.debug(
                         "Genre resync: tag write failed",
                         track_id=track_id, error=str(exc),
+                    )
+
+            # One stamp for every file this pass actually wrote.
+            if written_paths:
+                try:
+                    from services.scanning.reconciliation import (
+                        mark_local_tags_written_for_paths,
+                    )
+
+                    out["paths_stamped"] = mark_local_tags_written_for_paths(
+                        written_paths
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Genre resync: batched tag stamp failed", error=str(exc)
                     )
 
     if sync_navidrome:

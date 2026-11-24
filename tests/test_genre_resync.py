@@ -298,7 +298,15 @@ class TestApplyProgressAndSpeed:
         """No per-track DB lookup on the slowest phase of the job."""
         from services.metadata import tag_file_service as tfs
 
-        monkeypatch.setattr(tfs, "update_file_tags", lambda path, tags: True)
+        # The real signature now takes ``defer_stamp`` (the local-authority mark
+        # is written once per batch, not per file).
+        seen: list[bool] = []
+
+        def _fake_update(path, tags, *, defer_stamp=False):
+            seen.append(defer_stamp)
+            return True
+
+        monkeypatch.setattr(tfs, "update_file_tags", _fake_update)
         monkeypatch.setattr(tfs, "_resolve_music_file_path", lambda path: path)
         monkeypatch.setattr(
             svc,
@@ -312,6 +320,7 @@ class TestApplyProgressAndSpeed:
             sync_navidrome=False,
         )
         assert out["files_written"] == 1, out
+        assert seen == [True], "the per-file stamp must be deferred to the batch"
 
     def test_apply_does_not_recompute_selector_explanations(self, monkeypatch):
         """``removed`` is preview-only; computing it re-ran the selector 70k times."""

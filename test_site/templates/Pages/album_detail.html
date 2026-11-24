@@ -325,6 +325,12 @@
           <button class="btn btn-sm btn-outline-danger" id="bulkDeleteSelectedBtn" onclick="confirmBulkDeleteTracks()" title="Delete the selected tracks — from the database, or from the database and disk">
             <i class="bi bi-trash me-1"></i> Delete Selected
           </button>
+          {# Repair this album's rows from the FOLDERS their files sit in. Shows
+             the proposed changes and asks for confirmation before writing —
+             reading an album out of a folder name is a heuristic. #}
+          <button class="btn btn-sm btn-outline-info" id="repairFromPathsBtn" onclick="repairAlbumFromPaths(this)" title="Re-derive this album's tags from the folders its files live in — for rows that a merge left tagged with another album">
+            <i class="bi bi-wrench-adjustable me-1"></i> Repair from paths
+          </button>
         </div>
         {# Bulk track edit — the Edit Album page's identity fields, scoped to the
            selection. Blank fields are NOT posted, so the server writes only what

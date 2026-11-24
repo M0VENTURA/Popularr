@@ -784,22 +784,29 @@ class TestTheBuildersUseTheOrderingPipeline:
             "key silently falls back to the stored score for every track"
         )
 
-    def test_the_essential_builder_uses_the_shared_orderer(self):
+    def test_the_essential_builder_orders_by_reach(self):
+        """The Essential Collection is ONE list by listener REACH.
+
+        ⚠️ CHANGED DELIBERATELY. It used to rank by star tier then the stored
+        Popularity Score ("5★ then 4★, in score order inside each"). The owner's
+        spec for the collection is: include 4★+ tracks that are a
+        high-confidence single or at/above the artist's 80th percentile of
+        reach, then order the survivors by reach — one list, no features
+        section. ``_ordered_playlist_rows`` is consequently no longer used here;
+        the OTHER builders still use it, which the tests below pin.
+        """
         src = self._finalise_source()
-        assert 'order_mode = "popularity_score"' in src, (
-            "the Essential Collection must rank by stars then the stored "
-            "Popularity Score, not listener prominence"
+        assert "_essential_reach(r)" in src, (
+            "ordering must use listener reach (Last.fm, falling back to "
+            "ListenBrainz), not the album-relative score"
         )
-        assert "winners = _ordered_playlist_rows(winners, order_mode=order_mode)" in src
+        assert "winners = sorted(" in src
         assert "winners = [row for row in winners if int(row.get(\"stars\") or 0) >= 4]" in src, (
             "the final Essential membership must be 4★/5★ only"
         )
         assert "_ordered_by_percentile_then_prominence" not in strip_py_comments(src), (
             "the percentile-first orderer must be gone; keeping it would leave a "
             "second ordering contract in place"
-        )
-        assert "winners.sort(\n        key=lambda r: (\n            -int(r.get(\"stars\")" not in src, (
-            "the old inline Essential sort must be gone"
         )
 
     def test_the_essential_query_selects_the_popularity_score_it_sorts_on(self):

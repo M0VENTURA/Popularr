@@ -2979,6 +2979,83 @@
 
   global.lookupMbidForSelectedTracks = lookupMbidForSelectedTracks;
 
+  /**
+   * Repair this album's rows from the FOLDERS their files live in.
+   *
+   * ⚠️ TWO STEPS, ALWAYS: the server is asked for a DRY RUN first, the proposed
+   * changes are shown, and only a confirmed second call writes anything. Reading
+   * an album out of a folder name is a heuristic, and the merge that caused the
+   * damage was itself an unprompted bulk rewrite — doing that again silently
+   * would be the same mistake with a different shape.
+   */
+  async function repairAlbumFromPaths(btn) {
+    const artist = pageArtist();
+    const album = pageAlbum();
+    if (!artist || !album) {
+      notifyError('Cannot tell which album this is.');
+      return;
+    }
+
+    const run = async () => {
+      const preview = await global.api.postJson('/api/album/repair-from-paths', {
+        artist, album, dry_run: true,
+      });
+      if (!preview || preview.success === false) {
+        notifyError((preview && preview.error) || 'Could not scan the album.');
+        return;
+      }
+      const changes = Array.isArray(preview.changes) ? preview.changes : [];
+      if (!changes.length) {
+        notifySuccess(
+          `No mismatches: all ${preview.scanned || 0} file(s) already sit in the ` +
+          'folder their album tag names.'
+        );
+        return;
+      }
+
+      // Show what would change, track by track, before asking.
+      const shown = changes.slice(0, 12).map((c) => {
+        const to = c.proposed && c.proposed.album ? c.proposed.album : '(unchanged)';
+        return `  ${c.title}\n      "${c.current.album}"  →  "${to}"`;
+      }).join('\n');
+      const more = changes.length > 12 ? `\n  …and ${changes.length - 12} more` : '';
+
+      const confirmed = global.ui && global.ui.confirm
+        ? await global.ui.confirm({
+          title: 'Repair from paths',
+          message: `${changes.length} of ${preview.scanned} track(s) have a file path `
+            + 'that disagrees with their album tag.',
+          detail: `Rewriting them from their folders:\n\n${shown}${more}\n\n`
+            + 'Database only — file tags are not touched.',
+          tone: 'warning',
+          confirmLabel: 'Repair',
+        })
+        : window.confirm(
+          `${changes.length} of ${preview.scanned} track(s) disagree with their `
+          + `folder:\n\n${shown}${more}\n\nRepair them?`
+        );
+      if (!confirmed) return;
+
+      const applied = await global.api.postJson('/api/album/repair-from-paths', {
+        artist, album, dry_run: false, write_file_tags: false,
+      });
+      if (!applied || applied.success === false) {
+        notifyError((applied && applied.error) || 'Repair failed.');
+        return;
+      }
+      notifySuccess(`Repaired ${applied.repaired || 0} track(s) from their paths.`);
+      setTimeout(() => global.location.reload(), 900);
+    };
+
+    if (global.busyPopup) {
+      return global.busyPopup.showAndRun('Scanning album paths…', run)
+        .catch((error) => notifyError('Error: ' + error.message));
+    }
+    return run().catch((error) => notifyError('Error: ' + error.message));
+  }
+
+  global.repairAlbumFromPaths = repairAlbumFromPaths;
+
   function selectedTrackIds() {
     // Set: a track must never be acted on twice even if markup ever renders
     // its row twice (the class of bug behind the 2026-08-17 double-rename).

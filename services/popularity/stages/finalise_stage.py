@@ -2742,6 +2742,15 @@ _ESSENTIAL_FEAT_RE = re.compile(
 )
 _ESSENTIAL_FEAT_SPLIT_RE = re.compile(r"\s*(?:&|,|/|\+|\bx\b|\bvs\.?\b)\s*", re.IGNORECASE)
 
+#: What may follow the artist's name for the credit to still count as THEIRS.
+#: A feature marker ("feat.", "ft.", "featuring", "with"), a credit joiner, or
+#: nothing. Deliberately NOT "any word": "Papa Roach Tribute Band" is a
+#: different act whose name merely begins with this artist's.
+_ESSENTIAL_CREDIT_BOUNDARY_RE = re.compile(
+    r"^(?:\s*(?:feat\.?|ft\.?|featuring|with|&|,|/|\+|x|vs\.?)\b|\s*$)",
+    re.IGNORECASE,
+)
+
 
 def _escape_like(value: str) -> str:
     """Escape LIKE wildcards so artist names containing % or _ match literally."""
@@ -2751,6 +2760,111 @@ def _escape_like(value: str) -> str:
         .replace("%", "\\%")
         .replace("_", "\\_")
     )
+
+
+# ── Essential Collection selection helpers ────────────────────────────────────
+#
+# The spec for one artist X:
+#
+#   1. pool      — X as PRIMARY credit (the credit STARTS with X, so
+#                  "X feat. Y" counts) or X as a FEATURED credit on someone
+#                  else's track.
+#   2. filter    — drop live/remix/acoustic/demo unless high-confidence single;
+#                  merge duplicates by normalised title + primary artist.
+#   3. include   — 4★+ AND (high-confidence single OR reach >= X's p80).
+#                  The percentile is computed from PRIMARY tracks only.
+#   4. reach     — Last.fm listeners, falling back to ListenBrainz listens.
+#   5. order     — reach descending, one list (no features section).
+#
+# Each piece below is one line of that spec, named so the two cannot drift.
+
+def _essential_reach(row: dict[str, Any]) -> float:
+    """STEP 4 — Last.fm listeners, falling back to ListenBrainz listens.
+
+    Not ``popularity``/``final_score``: those are ALBUM-relative (a remap inside
+    the release), so they are not comparable across an artist's catalogue. Reach
+    is the only cross-album number available.
+    """
+    try:
+        lastfm = float(row.get("lastfm_listeners") or 0)
+    except (TypeError, ValueError):
+        lastfm = 0.0
+    if lastfm > 0:
+        return lastfm
+    try:
+        return float(row.get("listenbrainz_listens") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _essential_is_primary_credit(row: dict[str, Any], artist_lower: str) -> bool:
+    """STEP 1a — the credit STARTS with the artist, as a whole name.
+
+    ``"Papa Roach"`` and ``"Papa Roach feat. Maria Brink"`` are both primary;
+    ``"Korn feat. Papa Roach"`` is NOT (that one is 1b), and neither is
+    ``"Papa Roach Tribute Band"`` — a bare ``startswith`` accepted that, because
+    the artist happens to be a prefix of a DIFFERENT name. The credit must be
+    followed by a separator or a feature marker, never by another word.
+    """
+    if not artist_lower:
+        return False
+    for field in ("artist", "album_artist"):
+        text = re.sub(r"\s+", " ", str(row.get(field) or "")).strip().casefold()
+        if not text:
+            continue
+        if text == artist_lower:
+            return True
+        if not text.startswith(artist_lower):
+            continue
+        rest = text[len(artist_lower):]
+        if _ESSENTIAL_CREDIT_BOUNDARY_RE.match(rest):
+            return True
+    return False
+
+
+def _essential_is_high_confidence_single(row: dict[str, Any]) -> bool:
+    """STEP 3a — ``single_confidence == high`` on ANY version.
+
+    ``user`` is included because it is a manual lock: the user said this IS the
+    single, which outranks the detector's own certainty.
+    """
+    return (
+        str(row.get("single_confidence") or "").strip().casefold()
+        in ("high", "user")
+    )
+
+
+def _essential_version_ok(row: dict[str, Any]) -> bool:
+    """STEP 2a — drop live/remix/acoustic/demo unless it is a single.
+
+    Reuses ``_track_is_playlist_eligible`` — the SAME gate the genre playlists
+    use — so the two builders cannot disagree about what a "version" is. The
+    exemption is the spec's: a high-confidence single survives whatever its
+    title says, because a live single IS the artist's single.
+    """
+    if _essential_is_high_confidence_single(row):
+        return True
+    try:
+        return bool(_track_is_playlist_eligible(row))
+    except Exception:
+        return True
+
+
+def _essential_percentile(values: list[float], fraction: float) -> float | None:
+    """The value at *fraction* of the way up *values*, or None when unusable.
+
+    ``None`` (rather than 0.0) so a caller can tell "no data" from "the bottom of
+    the catalogue" — an artist with no listener figures must not silently get an
+    EMPTY collection because every track failed a threshold of zero.
+    """
+    usable = sorted(float(v) for v in (values or []) if float(v or 0) > 0)
+    if not usable:
+        return None
+    if len(usable) == 1:
+        return usable[0]
+    # Nearest-rank: ceil(fraction * n), clamped into range.
+    index = min(len(usable) - 1, max(0, math.ceil(fraction * len(usable)) - 1))
+    return usable[index]
 
 
 def _essential_playlist_name(artist: str) -> str:
@@ -3295,6 +3409,8 @@ def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
                            COALESCE(popularity, final_score, 0) AS popularity_score,
                            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
                            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
+                          COALESCE(single_confidence, 'low') AS single_confidence,
+                          COALESCE(exclude_from_stats, FALSE) AS exclude_from_stats,
                            year, release_year, artist, album_artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
@@ -3338,10 +3454,9 @@ def _sync_essential_playlist(
     except Exception:
         max_tracks = 50
 
-    # ⭐ Artist-specific Essential Collection: stars first, then the stored
-    # Popularity Score. ``playlist_order_mode`` is for library-wide builders;
-    # listener-based prominence is not this list's contract.
-    order_mode = "popularity_score"
+    # ⭐ Ordering is LISTENER REACH for this playlist (see STEP 5 below), not the
+    # library-wide ``playlists.playlist_order_mode`` — that switch belongs to the
+    # cross-artist builders, where a shared ordering is meaningful.
 
     if artist_scores is None:
         try:
@@ -3379,6 +3494,11 @@ def _sync_essential_playlist(
                            COALESCE(final_score, popularity, 0) AS final_score,
                            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
                            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
+                           -- ⭐ The high-confidence-single exemption below needs
+                           -- this; it was never selected, so a live/remix take
+                           -- could not be distinguished from a studio one.
+                           COALESCE(single_confidence, 'low') AS single_confidence,
+                           COALESCE(exclude_from_stats, FALSE) AS exclude_from_stats,
                            year, release_year, artist, album_artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
@@ -3456,6 +3576,22 @@ def _sync_essential_playlist(
     # able to reintroduce a 3★ track.
     rows = [row for row in rows if int(row.get("stars") or 0) >= 4]
 
+    # ⭐ STEP 2 — DROP LIVE / REMIX / ACOUSTIC / DEMO TAKES, unless the take is a
+    # HIGH-CONFIDENCE SINGLE.
+    #
+    # This path had NO version filter at all: ``_track_is_playlist_eligible``
+    # exists and is used by the genre builders, but the Essential builder never
+    # called it, so a live take survived whenever it happened to be the only copy
+    # and could even rank high on its own score. The spec asks for the exclusion
+    # with one exemption, which is what ``_essential_version_ok`` encodes.
+    _before_version_filter = len(rows)
+    rows = [row for row in rows if _essential_version_ok(row)]
+    if len(rows) != _before_version_filter:
+        logger.debug(
+            "Essential: dropped alternate versions",
+            artist=artist, dropped=_before_version_filter - len(rows),
+        )
+
     # ⚠️ Check the TRACK artist as well as the album artist. A compilation row
     # stores "Various Artists" (or the album's artist) in ``album_artist`` while
     # the excluded act is in ``artist``, so an album-artist-only check let those
@@ -3481,20 +3617,62 @@ def _sync_essential_playlist(
         except (TypeError, ValueError):
             return 9999
 
+    # ⭐ STEP 3 — THE 80TH-PERCENTILE GATE.
+    #
+    # A track belongs in the collection when it is 4★+ AND either a
+    # high-confidence single, or at/above the artist's 80th percentile of
+    # listener reach.
+    #
+    # ⚠️ THE PERCENTILE IS COMPUTED FROM PRIMARY-ARTIST TRACKS ONLY. Featured
+    # tracks are COMPARED against that threshold but must never SHIFT it:
+    # a guest slot on someone else's hit says nothing about this artist's own
+    # catalogue, and letting features into the basis would drag the bar around
+    # with the artist's collaborations rather than their records.
+    _primary_reach = [
+        _essential_reach(row) for row in rows
+        if _essential_is_primary_credit(row, _artist_lower)
+    ]
+    _percentile_80 = _essential_percentile(_primary_reach, 0.80)
+    if _percentile_80 is None:
+        # No usable reach data at all: do not gate, or a sparse artist would
+        # silently produce an EMPTY collection.
+        _gated = rows
+    else:
+        _gated = [
+            row for row in rows
+            if _essential_is_high_confidence_single(row)
+            or (_essential_reach(row) or 0.0) >= _percentile_80
+        ]
+    if len(_gated) != len(rows):
+        logger.debug(
+            "Essential: 80th-percentile gate applied",
+            artist=artist, kept=len(_gated), of=len(rows),
+            threshold=round(_percentile_80 or 0, 1),
+            basis=len(_primary_reach),
+        )
+    rows = _gated
+
     winners: list[dict[str, Any]] = []
     for group in _group_duplicate_tracks(rows):
+        # ⭐ STEP 6 — prefer the ORIGINAL ALBUM version.
+        #
+        # For a featured track the copy on the HOST artist's own release is the
+        # right one; a compilation or soundtrack appearance is a re-release and
+        # its rows carry the compilation's shape (different neighbours, a
+        # different album-relative score). ``is_compilation`` is the only signal
+        # the row carries for that, so it sorts before the score tiebreak.
         group.sort(
             key=lambda r: (
                 int(r.get("is_live") or 0),
+                int(r.get("is_compilation") or 0),
                 -int(r.get("stars") or 0),
+                -float(_essential_reach(r) or 0.0),
                 -float(
                     r.get("popularity_score")
                     or r.get("popularity")
                     or r.get("final_score")
                     or 0
                 ),
-                -float(cross_album_track_score(r)),
-                int(r.get("is_compilation") or 0),
                 _track_year(r),
                 str(r.get("title") or "").casefold(),
             ),
@@ -3505,20 +3683,25 @@ def _sync_essential_playlist(
         _delete_playlist_from_navidrome(playlist_name)
         return False
 
-    # ⭐ ONE ordering contract for EVERY generated playlist.
+    # ⭐ STEP 5 — ONE list, ordered by listener REACH, highest first.
     #
-    # This used to run through ``_ordered_by_percentile_then_prominence``, whose
-    # second key was the ARTIST-relative percentile of
-    # ``COALESCE(popularity, final_score)`` — the album-relative value — so an
-    # Essential Collection was the ONLY playlist that ignored
-    # ``playlist_order_mode``. The ordering key now leads with the star tier
-    # (5★, then 4★) and ranks each tier by the track's FINAL SCORE, which is
-    # exactly the reported "essential playlists should be 5★ then 4★, in score
-    # order inside each".
+    # There is deliberately no separate "features" section and no star-tier
+    # grouping: an Essential Collection is the artist's best-of, so track 1 is
+    # their biggest and the last is their smallest. Features are compared on the
+    # same number as everything else. The old contract ranked by STAR TIER then
+    # score, so every 5★ preceded every 4★ — "the loudest, not the biggest".
     #
-    # No per-artist cap / interleave here on purpose: this playlist is one
-    # artist's best-of, so a cap would truncate it at ``max_per_artist``.
-    winners = _ordered_playlist_rows(winners, order_mode=order_mode)
+    # No per-artist cap or interleave: this playlist is ONE artist's best-of, so
+    # a cap would truncate it at ``max_per_artist``.
+    winners = sorted(
+        winners,
+        key=lambda r: (
+            -float(_essential_reach(r) or 0.0),
+            -int(r.get("stars") or 0),
+            str(r.get("title") or "").casefold(),
+            str(r.get("id") or ""),
+        ),
+    )
     winners = [row for row in winners if int(row.get("stars") or 0) >= 4]
     winners = winners[:max_tracks]
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 from typing import Any
 
@@ -84,6 +85,12 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "is_single",
     "single_confidence",
     "single_confidence_score",
+    # ⭐ WHICH SOURCES AGREED. ``is_single`` / ``single_confidence`` say what the
+    # detector CONCLUDED; these say why, so the scoring can be judged rather than
+    # guessed at. ``single_sources`` is a JSONB list of source names
+    # (``["musicbrainz", "discogs"]``) and is normalised to one cell below.
+    "single_sources",
+    "single_sources_used",
     "is_live",
     "popularity_frozen",
     # Data freshness. ``last_scanned`` is the NEWEST of the two per-source
@@ -122,6 +129,7 @@ _POPULARITY_REPORT_SELECT = """
            listenbrainz_listens, listenbrainz_users, listenbrainz_score,
            exclude_from_stats,
            is_single, single_confidence, single_confidence_score,
+           single_sources, single_sources_used,
            is_live, popularity_frozen,
            lastfm_last_updated, listenbrainz_last_updated,
            id
@@ -251,6 +259,42 @@ def ensure_playlist_index() -> dict[str, int]:
         return {}
 
 
+#: Columns holding a JSONB list of source names (see ``_source_list_cell``).
+_SOURCE_LIST_COLUMNS: frozenset[str] = frozenset({
+    "single_sources", "single_sources_used",
+})
+
+
+def _source_list_cell(value: Any) -> str:
+    """One CSV cell for a JSONB list of source names.
+
+    ``single_sources`` is stored as a JSON array (``["musicbrainz", "discogs"]``)
+    and arrives as a Python list from psycopg, as JSON text from SQLite, and as a
+    CSV fragment from an older writer. Writing the raw value would put brackets
+    and quotes in a spreadsheet cell and make the column useless for filtering,
+    so every shape is flattened to ``"musicbrainz; discogs"``.
+
+    An empty list stays EMPTY rather than becoming ``"[]"`` — "no source agreed"
+    is a real answer and must not look like data.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text_value = value.strip()
+        if not text_value or text_value in ("[]", "null", "None"):
+            return ""
+        try:
+            parsed = json.loads(text_value)
+        except (TypeError, ValueError):
+            # A plain string ("musicbrainz, discogs") or a legacy CSV fragment.
+            return text_value
+        return _source_list_cell(parsed)
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item).strip() for item in value if str(item or "").strip()]
+        return "; ".join(parts)
+    return str(value)
+
+
 def build_popularity_report(*, artist: str | None = None, album: str | None = None) -> str:
     """CSV text for one artist (or one album), or the whole collection.
 
@@ -303,6 +347,8 @@ def build_popularity_report(*, artist: str | None = None, album: str | None = No
                 values.append(playlists_by_track.get(str(row.get("id") or ""), ""))
             elif column in _GENRE_COLUMNS:
                 values.append(_genre_cell(row.get(column)))
+            elif column in _SOURCE_LIST_COLUMNS:
+                values.append(_source_list_cell(row.get(column)))
             else:
                 values.append(row.get(column))
         # ``None`` becomes an empty cell; everything else is written as stored.

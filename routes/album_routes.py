@@ -836,6 +836,61 @@ def api_album_library_tracks() -> Any:
         return jsonify({"error": str(exc)}), 500
 
 
+@album_bp.route("/repair-from-paths", methods=["POST"])
+async def api_album_repair_from_paths() -> Any:
+    """Re-derive an album's tags from the FOLDERS its files sit in.
+
+    Body (all optional)::
+
+        {"dry_run": true}          # DEFAULT — report only
+        {"dry_run": false}         # write the rows
+        {"write_file_tags": false} # DEFAULT — DB only
+
+    Backs the album page's "Repair from paths" action. A merge used to rewrite
+    the ALBUM TAG of every file of every source album without checking where the
+    file lived, so a foreign rip kept its path while its tag claimed the other
+    album — and the tag that identified its true album was overwritten, leaving
+    the PATH as the only surviving evidence.
+
+    ``dry_run`` defaulting to true is deliberate: reading an album out of a folder
+    name is a heuristic, and the caller is shown the proposed changes first. The
+    file tags are NOT rewritten by default either — the DB is what the album page
+    and the playlist builders read, and a tag write is the irreversible half.
+    """
+    from services.metadata.album_path_repair_service import (
+        repair_album_from_paths,
+    )
+
+    data = (await request.get_json(silent=True)) or {}
+    artist = str(data.get("artist") or "").strip()
+    album = str(data.get("album") or "").strip()
+    if not artist or not album:
+        return jsonify({"success": False, "error": "artist and album required"}), 400
+
+    def _as_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().casefold() not in ("", "0", "false", "no", "off")
+        return bool(value)
+
+    try:
+        result = await asyncio.to_thread(
+            repair_album_from_paths,
+            artist,
+            album,
+            dry_run=_as_bool(data.get("dry_run"), default=True),
+            write_file_tags=_as_bool(data.get("write_file_tags"), default=False),
+        )
+    except Exception as exc:
+        logger.error(
+            "Album repair from paths failed", artist=artist, album=album, error=str(exc)
+        )
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+    return jsonify(result)
+
+
 @album_bp.route("/missing-tracks", methods=["GET"])
 def api_album_missing_tracks() -> Any:
     """The album's missing tracks — read from the database only by default.

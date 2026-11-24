@@ -963,7 +963,11 @@ def write_ogg_tags(file_path: str, tags: Dict[str, Any]) -> bool:
 # =============================================================================
 
 def write_tags_to_file(
-    file_path: str, tags: Dict[str, Any], *, force: bool = False
+    file_path: str,
+    tags: Dict[str, Any],
+    *,
+    force: bool = False,
+    defer_stamp: bool = False,
 ) -> bool:
     """Write tags, then durably mark the local correction.
 
@@ -974,11 +978,22 @@ def write_tags_to_file(
 
     ``force=True`` bypasses ``tagging.fill_missing_only`` for an authoritative
     payload (see ``_write_tags_to_file_impl``).
+
+    ⚠️ ``defer_stamp=True`` SKIPS the per-file DB stamp — for a BATCH writer
+    (the genre resync fans out over every changed track) that will call
+    ``mark_local_tags_written_for_paths`` once at the end.
+
+    That stamp is one UPDATE per file whose predicate is
+    ``LOWER(REPLACE(COALESCE(file_path, ''), '\\', '/'))`` — a function on the
+    indexed column, so it cannot use ``idx_tracks_file_path`` and scans the whole
+    ``tracks`` table every time. Doing that once per file turned "write the
+    genres" into a per-file full-table scan, on top of the read-modify-write of
+    the audio file itself. Batching collapses N scans into one.
     """
     ok = _write_tags_to_file_impl(file_path, tags, force=force)
     _non_metadata = {"rating", "playcount", "skipcount", "cover_art_data", "cover_art_mime"}
     _is_metadata_write = bool(tags) and any(key not in _non_metadata for key in tags)
-    if ok and _is_metadata_write:
+    if ok and _is_metadata_write and not defer_stamp:
         try:
             from services.scanning.reconciliation import (
                 mark_local_tags_written_for_path,
@@ -987,6 +1002,7 @@ def write_tags_to_file(
             mark_local_tags_written_for_path(file_path)
         except Exception as exc:
             logger.debug("Local tag write marker failed: %s", exc)
+    if ok and _is_metadata_write:
         try:
             from services.scanning.navidrome_rescan_service import (
                 mark_rescan_required,
@@ -999,11 +1015,17 @@ def write_tags_to_file(
 
 
 def update_file_tags(
-    file_path: str, tag_updates: Dict[str, Any], *, force: bool = False
+    file_path: str,
+    tag_updates: Dict[str, Any],
+    *,
+    force: bool = False,
+    defer_stamp: bool = False,
 ) -> bool:
     if not file_path or not tag_updates:
         return False
-    return write_tags_to_file(file_path, tag_updates, force=force)
+    return write_tags_to_file(
+        file_path, tag_updates, force=force, defer_stamp=defer_stamp
+    )
 
 
 def _get_track_file_path(track_id: str) -> str | None:

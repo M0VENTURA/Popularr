@@ -368,6 +368,61 @@ def mark_local_tags_written_for_path(file_path: str) -> int:
         return 0
 
 
+def mark_local_tags_written_for_paths(file_paths: list[str]) -> int:
+    """``mark_local_tags_written_for_path`` for MANY files in ONE statement.
+
+    ⚠️ THIS IS A PERFORMANCE FUNCTION, not a convenience wrapper.
+
+    The per-file predicate is
+    ``LOWER(REPLACE(COALESCE(file_path, ''), '\\', '/')) IN (...)``. A function on
+    the indexed column makes it non-sargable, so PostgreSQL cannot use
+    ``idx_tracks_file_path`` and every call is a sequential scan of the whole
+    ``tracks`` table. A batch writer (the genre resync fans out over every changed
+    track) called it once per file, so an album's worth of writes cost dozens of
+    full-table scans for no additional protection.
+
+    Returns the number of rows stamped.
+    """
+    keys: set[str] = set()
+    for file_path in file_paths or []:
+        try:
+            keys.update(path_keys(file_path))
+        except Exception:
+            continue
+    if not keys:
+        return 0
+
+    ordered = sorted(keys)
+    total = 0
+    # Chunked so the placeholder list stays well under any driver's limit.
+    for start in range(0, len(ordered), 500):
+        chunk = ordered[start: start + 500]
+        placeholders = ", ".join(f":p{i}" for i in range(len(chunk)))
+        params = {
+            f"p{i}": key.replace("\\", "/").casefold()
+            for i, key in enumerate(chunk)
+        }
+        try:
+            from sqlalchemy import text
+
+            with db_session() as session:
+                result = session.execute(
+                    text(
+                        "UPDATE tracks SET "
+                        "local_tags_written_at = CURRENT_TIMESTAMP, "
+                        "metadata_dirty_for_navidrome = TRUE, "
+                        "metadata_source = 'popularr' "
+                        "WHERE LOWER(REPLACE(COALESCE(file_path, ''), '\\', '/')) "
+                        f"IN ({placeholders})"
+                    ),
+                    params,
+                )
+                total += int(result.rowcount or 0)
+        except Exception as exc:
+            logger.debug("Batched local tag stamp failed", error=str(exc))
+    return total
+
+
 def has_dirty_navidrome_metadata() -> bool:
     try:
         from sqlalchemy import text
