@@ -47,6 +47,7 @@ from helpers.normalization_service import (
     strip_featured_artist as Strip_featured_artist,
     strip_search_keywords as Strip_search_keywords,
     strip_single_release_suffix as Strip_single_release_suffix,
+    strip_credited_artist_prefix as Strip_credited_artist_prefix,
     titles_match_for_review as Titles_match_for_review,
     track_duration_seconds as Track_duration_seconds,
 )
@@ -152,6 +153,16 @@ def _track_count_penalty(counts: list[int], expected_count: int) -> float:
     return (expected - max(usable)) * 0.10
 
 _TRACKLIST_TITLE_FLOOR = 0.55
+
+#: How close two titles must be before a TRACK-NUMBER pairing is trusted.
+#:
+#: ⚠️ Higher than the fuzzy-search floor. ``_TRACKLIST_TITLE_FLOOR`` only has
+#: to find a candidate by name; this one decides whether the number may pair
+#: two rows, and a shared word ("Stacy's Momma" vs "Stacy's Mom") clears 0.55
+#: while describing different songs. At 0.85 a position match needs the names
+#: to genuinely agree; anything weaker falls through to the fuzzy arm, which
+#: also requires the lengths not to contradict it.
+_TRACKLIST_PAIRING_TITLE_FLOOR = 0.85
 _TRACKLIST_MATCH_FLOOR = 0.6
 
 _ALIGN_WRITABLE_FIELDS = ("title", "track_number", "disc_number")
@@ -1720,6 +1731,65 @@ class MusicBrainzService:
                     _collect(work_relation.get("artist"))
         return list(dict.fromkeys(composers))
 
+    def get_credit_roles_for_recording(
+        self, recording_mbid: str, **kwargs: Any
+    ) -> dict[str, list[str]]:
+        """``{"writer", "composer", "lyricist"}`` names for a recording.
+
+        ⭐ ROLE-AWARE, unlike :meth:`get_composers_for_recording`, which
+        collapses every writing role into one list. The track page and the file
+        tags carry three separate columns, so a download import must know which
+        name is the composer and which is the lyricist — the reported "Writer /
+        Composer / Lyricist are empty after a Soulseek download" was the import
+        fetching none of them, and a flat list could not have filled them
+        correctly anyway.
+
+        ``writer`` is the union of every writing role: that is what the broad
+        WRITER credit means. The names come from the recording's own relations
+        and its work's relations.
+        """
+        roles: dict[str, list[str]] = {
+            "writer": [],
+            "composer": [],
+            "lyricist": [],
+        }
+
+        def _collect(relation: Any) -> None:
+            if not isinstance(relation, dict):
+                return
+            role = str(relation.get("type") or "").casefold()
+            if role not in {"composer", "writer", "lyricist"}:
+                return
+            artist = relation.get("artist")
+            name = ""
+            if isinstance(artist, dict):
+                name = str(artist.get("name") or "").strip()
+            if not name:
+                name = str(relation.get("target-credit") or "").strip()
+            if not name:
+                return
+            if role == "composer":
+                roles["composer"].append(name)
+            elif role == "lyricist":
+                roles["lyricist"].append(name)
+            roles["writer"].append(name)
+
+        try:
+            for relation in self.get_recording_relationships(recording_mbid):
+                _collect(relation)
+                if not isinstance(relation, dict):
+                    continue
+                work = relation.get("work") or {}
+                if not isinstance(work, dict):
+                    continue
+                for work_relation in work.get("relations") or []:
+                    _collect(work_relation)
+        except Exception:
+            pass
+
+        return {role: list(dict.fromkeys(names)) for role, names in roles.items()}
+
+
     def get_recording_genres(self, title: str, artist: str, **kwargs: Any) -> list[str]:
         if not self.enabled or not title or not artist:
             return []
@@ -2804,7 +2874,7 @@ def _titles_agree_for_pairing(library_title: Any, mb_title: Any) -> bool:
         return True
     if _title_adds_a_second_song(library, musicbrainz):
         return False
-    return _similarity(library, musicbrainz) >= _TRACKLIST_TITLE_FLOOR
+    return _similarity(library, musicbrainz) >= _TRACKLIST_PAIRING_TITLE_FLOOR
 
 
 _TITLE_EXTENSION_TOKENS = frozenset({
@@ -2869,6 +2939,24 @@ def _match_mb_tracks_to_library(
     def _track_num_of(row: dict[str, Any]) -> str:
         return str(row.get("track_number") or "").split("/")[0].strip()
 
+    def _matching_title(row: dict[str, Any]) -> str:
+        """The row's title with a leading credited-artist prefix removed.
+
+        A split/covers release stores the performer in the TITLE as well as the
+        artist ("Trike Kill - Sk8er Boi (Avril Lavigne cover)"). Comparing the
+        raw title to MB's "Sk8r Boi" failed, so the name match missed and the
+        position fallback paired files with whatever the release had at that
+        number — the reported "matching the wrong files". The same strip the
+        queue cleaner uses is applied here, to the match key only; the display
+        title and the rename diff keep the original.
+        """
+        title = str(row.get("title") or "")
+        for artist in (row.get("artist"), row.get("album_artist")):
+            stripped = Strip_credited_artist_prefix(artist, title)
+            if stripped:
+                return stripped
+        return title
+
     for mb_track in mb_tracks:
         mb_disc = str(mb_track.get("mb_disc_number") or 1)
         mb_number = str(mb_track.get("mb_track_number") or "")
@@ -2881,7 +2969,7 @@ def _match_mb_tracks_to_library(
         named = [
             row for row in remaining
             if mb_norm
-            and Normalize_title_for_lookup(str(row.get("title") or "")) == mb_norm
+            and Normalize_title_for_lookup(_matching_title(row)) == mb_norm
         ]
         match = None
         if named:
@@ -2890,7 +2978,7 @@ def _match_mb_tracks_to_library(
                 [
                     row for row in named
                     if mb_verbatim
-                    and Normalize_title_for_mbid_match(str(row.get("title") or ""))
+                    and Normalize_title_for_mbid_match(_matching_title(row))
                     == mb_verbatim
                 ]
                 or named
@@ -2928,13 +3016,21 @@ def _match_mb_tracks_to_library(
             best_row: dict[str, Any] | None = None
             best_score = 0.0
             for row in same_disc:
-                row_norm = Normalize_title_for_lookup(str(row.get("title") or ""))
+                row_norm = Normalize_title_for_lookup(_matching_title(row))
                 if _title_adds_a_second_song(row_norm, mb_norm):
                     continue
                 score = _similarity(row_norm, mb_norm)
                 if score > best_score:
                     best_row, best_score = row, score
             if best_row is not None and best_score >= 0.55:
+                # ⚠️ A NAME-ONLY fallback must not contradict a known length.
+                # Without this guard a coincidental token overlap paired a
+                # 4:05 file with a 3:04 recording, and the Compare then offered
+                # to rename it — the reported "matching the wrong files".
+                if _lengths_agree_for_pairing(
+                    best_row.get("duration"), mb_duration
+                ) is False:
+                    best_row = None
                 match = best_row
 
         if match is not None:
@@ -2966,8 +3062,13 @@ def _match_mb_tracks_to_library(
             # A confirmed cover's "(X Cover)" suffix is OUR annotation. The MB
             # title without it is the same song; a later cover-detection scan
             # owns the verdict, so the Compare must not report a title rename.
+            #
+            # ⚠️ Compare with the CREDIT-STRIPPED title: "Trike Kill - Sk8r Boi"
+            # against MB's "Sk8r Boi" is the same song, and reporting the artist
+            # prefix as a rename only proposes deleting information the artist
+            # column already holds.
             titles_confirmed = Titles_match_for_review(
-                library_title,
+                _matching_title(match),
                 mb_title,
                 local_is_cover=bool(_as_int(match.get("is_cover"), 0)),
             )

@@ -4262,6 +4262,12 @@ async def track_detail(track_id: str) -> Any:
                     "musicbrainz_artistid", "musicbrainz_albumartistid",
                     "musicbrainz_releasegroupid", "musicbrainz_releasetrackid",
                     "musicbrainz_workid", "musicbrainz_trackid",
+                    # Canonical recording id + the remaining per-track identity
+                    # fields the page now exposes. ``recording_mbid`` is the
+                    # column every consumer reads; the legacy aliases are kept in
+                    # step by the sync block below.
+                    "recording_mbid", "iswc", "original_title",
+                    "original_cover_artist",
                     "replaygain_track_gain", "replaygain_track_peak",
                     "replaygain_album_gain", "replaygain_album_peak",
                     "r128_track_gain", "r128_album_gain",
@@ -4271,6 +4277,9 @@ async def track_detail(track_id: str) -> Any:
                     "is_cover", "cover_manual_override", "alternate_take",
                     "is_compilation", "is_live", "is_acoustic", "is_remix",
                     "single_manual_override",
+                    # Manual overrides / diagnostics the page exposes:
+                    "album_context_live", "exclude_from_stats",
+                    "popularity_frozen",
                 ]
 
                 update_values: dict[str, Any] = {}
@@ -4284,11 +4293,23 @@ async def track_detail(track_id: str) -> Any:
                         field_name, form.get(field_name), column_types,
                     )
 
-                mbid_value = form.get("mbid", "").strip() if "mbid" in form else None
-                if mbid_value:
-                    for column_name in ["mbid", "beets_mbid", "musicbrainz_trackid"]:
+                # The recording identity has TWO form spellings now: the page
+                # posts ``recording_mbid`` (the canonical column) and older
+                # callers post ``mbid``. Whichever is present is written to every
+                # alias, so the file tag (which uses the recording id) and every
+                # reader agree. An EMPTY value clears them — a presence-gated
+                # clear, not "nothing to do".
+                _mbid_field = (
+                    "recording_mbid" if "recording_mbid" in form
+                    else ("mbid" if "mbid" in form else None)
+                )
+                mbid_value = form.get(_mbid_field, "").strip() if _mbid_field else None
+                if _mbid_field is not None:
+                    for column_name in [
+                        "mbid", "beets_mbid", "musicbrainz_trackid", "recording_mbid",
+                    ]:
                         if column_name in existing_columns:
-                            update_values[column_name] = mbid_value
+                            update_values[column_name] = mbid_value or None
 
                 mb_album_value = (
                     form.get("musicbrainz_albumid", "").strip()
@@ -4331,6 +4352,19 @@ async def track_detail(track_id: str) -> Any:
                         param_name = f"value_{index}"
                         set_clauses.append(f"{quote_identifier(column_name)} = :{param_name}")
                         params[param_name] = value
+
+                    # Freezing is a timestamped state: stamp when it is turned
+                    # on, clear the stamp when it is turned off. Without this the
+                    # flag alone left no record of WHEN a score was frozen.
+                    if (
+                        "popularity_frozen" in update_values
+                        and "popularity_frozen_at" in existing_columns
+                    ):
+                        set_clauses.append(
+                            "popularity_frozen_at = CURRENT_TIMESTAMP"
+                            if update_values["popularity_frozen"]
+                            else "popularity_frozen_at = NULL"
+                        )
 
                     if "updated_at" in existing_columns:
                         set_clauses.append("updated_at = CURRENT_TIMESTAMP")

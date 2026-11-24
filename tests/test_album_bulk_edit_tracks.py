@@ -123,6 +123,83 @@ class TestTheEndpoint:
         assert payload["success"] is True
         assert "musicbrainz_albumid" in payload["updated"]
 
+    async def test_the_per_track_identity_and_flag_fields_are_supported(
+        self, client, db_session
+    ):
+        """The bulk modal's MBID/ISRC/credit fields and tri-state flags land.
+
+        ⚠️ ``recording_mbid`` must reach its legacy aliases too: the file writer
+        and some readers still use them, and writing only the canonical column
+        leaves the split the single-track save avoids.
+        """
+        from sqlalchemy import text
+
+        _seed(db_session, "be-fields")
+        resp = await client.post(
+            "/api/track/bulk-update",
+            json={
+                "track_ids": ["be-fields"],
+                "fields": {
+                    "recording_mbid": "rec-9",
+                    "isrc": "USRC17607839",
+                    "lyricist": "A Writer",
+                    "iswc": "T-345246800-1",
+                    "original_title": "Original",
+                    "is_cover": True,
+                    "exclude_from_stats": True,
+                    "popularity_frozen": True,
+                },
+                "sync_to_file": False,
+            },
+        )
+        assert resp.status_code == 200, await resp.get_json()
+
+        row = db_session.execute(
+            text(
+                "SELECT recording_mbid, mbid, musicbrainz_trackid, isrc, lyricist, "
+                "iswc, original_title, is_cover, exclude_from_stats, "
+                "popularity_frozen, popularity_frozen_at "
+                "FROM tracks WHERE id = 'be-fields'"
+            )
+        ).mappings().one()
+
+        assert row["recording_mbid"] == "rec-9"
+        assert row["mbid"] == "rec-9"
+        assert row["musicbrainz_trackid"] == "rec-9"
+        assert row["isrc"] == "USRC17607839"
+        assert row["lyricist"] == "A Writer"
+        assert row["iswc"] == "T-345246800-1"
+        assert row["original_title"] == "Original"
+        assert bool(row["is_cover"])
+        assert bool(row["exclude_from_stats"])
+        assert bool(row["popularity_frozen"])
+        assert row["popularity_frozen_at"], "freezing must stamp when it happened"
+
+        # Turning them off clears them, and unfreezing clears the stamp.
+        resp = await client.post(
+            "/api/track/bulk-update",
+            json={
+                "track_ids": ["be-fields"],
+                "fields": {
+                    "is_cover": False,
+                    "exclude_from_stats": False,
+                    "popularity_frozen": False,
+                },
+                "sync_to_file": False,
+            },
+        )
+        assert resp.status_code == 200
+        row = db_session.execute(
+            text(
+                "SELECT is_cover, exclude_from_stats, popularity_frozen, "
+                "popularity_frozen_at FROM tracks WHERE id = 'be-fields'"
+            )
+        ).mappings().one()
+        assert not bool(row["is_cover"])
+        assert not bool(row["exclude_from_stats"])
+        assert not bool(row["popularity_frozen"])
+        assert row["popularity_frozen_at"] is None
+
     async def test_only_the_selected_tracks_move(self, client, db_session):
         """THE POINT: realign a few tracks onto a different album."""
         _seed(db_session, "be-1")

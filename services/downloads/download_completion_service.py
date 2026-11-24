@@ -1643,6 +1643,14 @@ def _apply_stored_metadata(
         if isinstance(_stored, dict):
             if _stored.get("writer"):
                 meta["writer"] = str(_stored["writer"])
+            # ⭐ The three credited writing roles are separate columns on the
+            # track page and separate frames in the file. A queued album track
+            # already carries them from the release payload; read all three so
+            # an import does not drop the composer/lyricist it was given.
+            if _stored.get("composer"):
+                meta["composer"] = str(_stored["composer"])
+            if _stored.get("lyricist"):
+                meta["lyricist"] = str(_stored["lyricist"])
             if _stored.get("is_cover"):
                 meta["is_cover"] = 1
                 if _stored.get("original_cover_artist"):
@@ -1669,7 +1677,15 @@ def _apply_stored_metadata(
         ).strip()
 
     _track_missing = [
-        _k for _k in ("isrc", "tracktotal", "musicbrainz_artistid")
+        _k for _k in (
+            "isrc", "tracktotal", "musicbrainz_artistid",
+            # ⭐ WRITER / COMPOSER / LYRICIST. The reported download import left
+            # all three empty: only ``writer`` was ever copied from the queue
+            # row, and the release refresh below asked for isrc/tracktotal/
+            # artist-id only. The release tracklist already carries all three
+            # fields, so this costs no extra request.
+            "writer", "composer", "lyricist",
+        )
         if not meta.get(_k)
     ]
     if _track_missing and release_mbid:
@@ -1689,6 +1705,9 @@ def _apply_stored_metadata(
                     "isrc": _match.get("isrc"),
                     "tracktotal": _match.get("tracktotal"),
                     "musicbrainz_artistid": _match.get("artist_mbid"),
+                    "writer": _match.get("writer"),
+                    "composer": _match.get("composer"),
+                    "lyricist": _match.get("lyricist"),
                 }
                 for _k in _track_missing:
                     if _fills.get(_k) not in (None, ""):
@@ -1699,6 +1718,36 @@ def _apply_stored_metadata(
                 queue_id=item.get("id"),
                 release_mbid=release_mbid,
                 error=str(_track_exc),
+            )
+
+    # A single-song download often has a recording id but no release id. Fetch
+    # the ROLE-AWARE credits straight from the recording (the work relations
+    # distinguish composer from lyricist, which a flat "composers" list cannot).
+    #
+    # ⚠️ ONLY when no release was supplied. If a release WAS supplied but its
+    # fetch failed (MB down), retrying the same server once per track is a
+    # network storm for no new information — the release path has already
+    # tried and the stored values stand.
+    _role_missing = [
+        _k for _k in ("writer", "composer", "lyricist") if not meta.get(_k)
+    ]
+    if _role_missing and recording_mbid and not release_mbid:
+        try:
+            from services.enrichment.musicbrainz_service import get_shared_mb_service
+
+            _roles = get_shared_mb_service().get_credit_roles_for_recording(
+                str(recording_mbid)
+            ) or {}
+            for _k in _role_missing:
+                _names = _roles.get(_k) or []
+                if _names:
+                    meta[_k] = ", ".join(str(n) for n in _names if str(n).strip())
+        except Exception as _role_exc:
+            logger.debug(
+                "Recording credit-role refresh failed — stored values only",
+                queue_id=item.get("id"),
+                recording_mbid=recording_mbid,
+                error=str(_role_exc),
             )
 
     if not meta:
@@ -1731,7 +1780,8 @@ def _apply_stored_metadata(
     try:
         _db_payload: dict[str, Any] = {}
         _mb_cols = {
-            "writer", "is_cover", "original_cover_artist", "musicbrainz_genres",
+            "writer", "composer", "lyricist",
+            "is_cover", "original_cover_artist", "musicbrainz_genres",
             "musicbrainz_workid", "recording_mbid", "release_mbid",
             "musicbrainz_artistid", "musicbrainz_albumartistid",
             "musicbrainz_releasegroupid", "musicbrainz_albumtype", "musicbrainz_albumstatus",
@@ -1750,7 +1800,12 @@ def _apply_stored_metadata(
         if release_mbid and not _db_payload.get("musicbrainz_album_mbid"):
             _db_payload["musicbrainz_album_mbid"] = release_mbid
 
-        if recording_mbid or release_mbid:
+        if recording_mbid or release_mbid or file_path:
+            # ⚠️ The PATH is enough to identify the row the import is about to
+            # create/adopt. Requiring an MBID here meant a queue row that had
+            # neither one dropped the stored credits/ISRC/album fields onto the
+            # FILE but never persisted them, so the track page showed empty
+            # until a later scan happened to re-resolve it.
             _track_id = _resolve_track_id_for_import(
                 file_path=file_path,
                 recording_mbid=recording_mbid,

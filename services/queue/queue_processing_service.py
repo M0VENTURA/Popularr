@@ -458,6 +458,12 @@ def add_release_tracks_to_queue_detailed(
 
                 _mb_meta: dict[str, Any] = {}
                 if track.get("writer"): _mb_meta["writer"] = track["writer"]
+                # The three writing credits are separate columns/frames. The
+                # release track payload carries all three; dropping composer and
+                # lyricist here made the import unable to fill them (the reported
+                # "Writer / Composer / Lyricist empty after a download").
+                if track.get("composer"): _mb_meta["composer"] = track["composer"]
+                if track.get("lyricist"): _mb_meta["lyricist"] = track["lyricist"]
                 if track.get("work_mbid"): _mb_meta["work_mbid"] = track["work_mbid"]
                 if track.get("work_title"): _mb_meta["work_title"] = track["work_title"]
                 if track.get("work_artist"): _mb_meta["work_artist"] = track["work_artist"]

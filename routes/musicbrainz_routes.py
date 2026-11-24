@@ -1482,6 +1482,14 @@ def _match_release_tracklist(
     local_tracks: list[dict[str, Any]],
     mb_tracks: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Pair local rows with a MusicBrainz release's tracks.
+
+    Position first — ``(disc, track)``, with disc 1 as the fallback for a row
+    that carries no disc — then the normalised title. The matched entry carries
+    the MusicBrainz track's own metadata as well as its recording id, because a
+    caller applying a release to a SELECTION needs to write the title/number
+    the release gives, not just the MBID.
+    """
     by_position: dict[tuple[int, int], dict[str, Any]] = {}
     by_title: dict[str, list[dict[str, Any]]] = {}
     for track in mb_tracks:
@@ -1489,7 +1497,11 @@ def _match_release_tracklist(
             continue
         position = track.get("position")
         if isinstance(position, int) and position > 0:
-            by_position.setdefault((1, position), track)
+            try:
+                disc = int(track.get("disc") or 1)
+            except (TypeError, ValueError):
+                disc = 1
+            by_position.setdefault((disc, position), track)
         title_key = _normalise_track_key(track.get("title"))
         if title_key:
             by_title.setdefault(title_key, []).append(track)
@@ -1521,23 +1533,57 @@ def _match_release_tracklist(
             "track_id": track.get("id"),
             "title": track.get("title"),
             "recording_mbid": target["recording_mbid"],
+            # The release's own values, for callers applying metadata.
+            "mb_title": str(target.get("title") or "").strip(),
+            "mb_track_number": (
+                str(target.get("number") or "").strip()
+                or str(target.get("position") or "")
+            ),
+            "mb_disc": target.get("disc"),
         })
     return matched
 
 
 @mb_bp.route("/link-album-mbids", methods=["POST"])
 async def api_link_album_mbids() -> Any:
-    """Auto-link local tracks missing Recording MBIDs."""
+    """Link local tracks to a MusicBrainz release.
+
+    Two callers, one implementation:
+
+    * the album-wide "Auto-Link MBIDs" button (no ``track_ids``) resolves the
+      UNLINKED rows against the release and writes only the recording id;
+    * "Lookup MBID for Selected" (``track_ids`` + ``apply_metadata``) re-binds
+      ONLY the selected rows to the chosen release AND writes the release's
+      per-track metadata (title, track/disc number, recording/release ids) for
+      those rows. This is the reported "it attaches the MBID but does not
+      update the metadata for the tracks".
+    """
     data = (await request.get_json(silent=True)) or {}
     artist = str(data.get("artist") or "").strip()
     album = str(data.get("album") or "").strip()
     release_id = str(data.get("release_id") or "").strip()
+    release_group_id = str(
+        data.get("release_group_mbid") or data.get("release_group_id") or ""
+    ).strip()
+    track_ids = [
+        str(t).strip() for t in (data.get("track_ids") or []) if str(t).strip()
+    ]
+    apply_metadata = bool(data.get("apply_metadata"))
 
     if not artist or not album:
         return jsonify({"success": False, "error": "artist and album are required"}), 400
+    if apply_metadata and not track_ids:
+        # A metadata overwrite is only ever safe scoped to an explicit
+        # selection; without ids it would rewrite the whole album's titles and
+        # numbers from one member's lookup.
+        return jsonify({
+            "success": False,
+            "error": "track_ids is required when apply_metadata is set",
+        }), 400
 
     mb_tracks: list[dict[str, Any]] = []
     release_title = album
+    media: list[Any] = []
     if release_id and re.fullmatch(MUSICBRAINZ_UUID_RE, release_id):
         try:
             release = _get_mb_client().get_release(release_id, inc="recordings", timeout=15)
@@ -1545,16 +1591,20 @@ async def api_link_album_mbids() -> Any:
             logger.warning("Could not fetch release for MBID linking", release_id=release_id, error=str(exc))
             release = {}
         release_title = str(release.get("title") or album)
-        for medium in release.get("media") or []:
+        media = list(release.get("media") or [])
+        for medium in media:
+            disc = medium.get("position") or 1
             for track in medium.get("tracks") or []:
                 recording = track.get("recording") or {}
                 mb_tracks.append({
                     "position": track.get("position"),
                     "number": track.get("number"),
+                    "disc": disc,
                     "title": str(track.get("title") or "").strip(),
                     "length": track.get("length"),
                     "recording_mbid": str(recording.get("id") or "").strip(),
                 })
+    multi_disc = len(media) > 1
 
     try:
         with db_session() as session:
@@ -1574,16 +1624,28 @@ async def api_link_album_mbids() -> Any:
         logger.error("Failed to load local tracks for linking", error=str(exc))
         return jsonify({"success": False, "error": str(exc)}), 500
 
-    unlinked = [
+    selected = set(track_ids)
+    candidates = [
         t for t in local_tracks
-        if not (t.get("musicbrainz_trackid") or t.get("recording_mbid"))
+        if not selected or str(t.get("id")) in selected
     ]
+    if not apply_metadata:
+        candidates = [
+            t for t in candidates
+            if not (t.get("musicbrainz_trackid") or t.get("recording_mbid"))
+        ]
 
-    if not unlinked:
+    if not candidates:
         return jsonify({
             "success": True,
             "linked": 0,
-            "message": "All tracks already have Recording IDs.",
+            "matched": [],
+            "metadata_applied": apply_metadata,
+            "message": (
+                "No selected tracks to update."
+                if track_ids and apply_metadata
+                else "All tracks already have Recording IDs."
+            ),
         })
 
     if not mb_tracks:
@@ -1596,14 +1658,46 @@ async def api_link_album_mbids() -> Any:
     linked = 0
     try:
         with db_session() as session:
-            for track in _match_release_tracklist(unlinked, mb_tracks):
+            for track in _match_release_tracklist(candidates, mb_tracks):
+                assigns = [
+                    "musicbrainz_trackid = :mbid",
+                    "recording_mbid = :mbid",
+                ]
+                params: dict[str, Any] = {
+                    "mbid": track["recording_mbid"],
+                    "id": track["track_id"],
+                }
+                if apply_metadata:
+                    # ⭐ The release's own metadata, for the SELECTED rows only.
+                    # Without this the lookup bound the row to a release while
+                    # leaving its old title/number — the reported "it attaches
+                    # the MBID but does not update the metadata".
+                    if track.get("mb_title"):
+                        assigns.append("title = :title")
+                        params["title"] = track["mb_title"]
+                    if track.get("mb_track_number"):
+                        assigns.append("track_number = :track_number")
+                        params["track_number"] = track["mb_track_number"]
+                    # A single-disc release must not gain a bogus disc "1"
+                    # (the reported disc-1 split); only a genuine multi-disc
+                    # release writes the medium position.
+                    if multi_disc and track.get("mb_disc") is not None:
+                        assigns.append("disc_number = :disc_number")
+                        params["disc_number"] = str(track["mb_disc"])
+                    if release_id:
+                        # BOTH spellings, like the album-wide fan-out: the page
+                        # reads ``_mbid`` and album_identity reads ``albumid``.
+                        assigns.append("musicbrainz_album_mbid = :release_id")
+                        assigns.append("musicbrainz_albumid = :release_id")
+                        params["release_id"] = release_id
+                    if release_group_id:
+                        assigns.append("musicbrainz_releasegroupid = :release_group_id")
+                        params["release_group_id"] = release_group_id
                 session.execute(
-                    text("""
-                        UPDATE tracks
-                        SET musicbrainz_trackid = :mbid, recording_mbid = :mbid
-                        WHERE id = :id
-                    """),
-                    {"mbid": track["recording_mbid"], "id": track["track_id"]},
+                    text(
+                        f"UPDATE tracks SET {', '.join(assigns)} WHERE id = :id"
+                    ),
+                    params,
                 )
                 matched.append(track)
                 linked += 1
@@ -1611,12 +1705,37 @@ async def api_link_album_mbids() -> Any:
         logger.error("Failed to link MBIDs", error=str(exc))
         return jsonify({"success": False, "error": str(exc)}), 500
 
+    if apply_metadata and matched:
+        ids = [str(m.get("track_id") or "") for m in matched if m.get("track_id")]
+        try:
+            from services.scanning.reconciliation import (
+                mark_local_tags_written_for_track_ids,
+            )
+
+            mark_local_tags_written_for_track_ids(ids)
+        except Exception as exc:
+            logger.debug("Selection metadata authority stamp failed", error=str(exc))
+        try:
+            # ONE file pass for the batch, sharing the bulk-edit writer, so the
+            # audio tags (and therefore Navidrome) follow the rows.
+            from routes.track_routes import _start_bulk_file_sync
+
+            _start_bulk_file_sync(ids)
+        except Exception as exc:
+            logger.warning("Selected-track file sync failed", error=str(exc))
+
+    message = (
+        f"Matched {linked} of {len(candidates)} selected track(s) to “{release_title}”."
+        if apply_metadata
+        else f"Linked {linked} of {len(candidates)} tracks on “{release_title}”."
+    )
     return jsonify({
         "success": True,
         "linked": linked,
         "matched": matched,
         "release_title": release_title,
-        "message": f"Linked {linked} of {len(unlinked)} tracks on “{release_title}”.",
+        "metadata_applied": apply_metadata,
+        "message": message,
     })
 
 

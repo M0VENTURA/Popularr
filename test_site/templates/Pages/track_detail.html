@@ -261,12 +261,16 @@
                                     {% endif %}
                                 </div>
                                 <div class="mb-3">
-                                    <label for="mbid" class="form-label small fw-semibold text-muted mb-1">MusicBrainz Recording ID</label>
+                                    <label for="mbid" class="form-label small fw-semibold text-muted mb-1">Recording MBID</label>
                                     <div class="input-group">
-                                        <input type="text" class="form-control" id="mbid" name="mbid" value="{{ track.beets_mbid or track.mbid or track.musicbrainz_trackid or '' }}">
+                                        <input type="text" class="form-control" id="mbid" name="recording_mbid" value="{{ track.recording_mbid or track.musicbrainz_trackid or track.mbid or track.beets_mbid or '' }}">
                                         <button class="btn btn-outline-primary" type="button" data-action="track-lookup-recording">
                                             <i class="bi bi-search"></i> Search
                                         </button>
+                                    </div>
+                                    <div class="form-text text-muted" style="font-size:0.75rem;">
+                                        The recording identity. This is the canonical column consumers read; the legacy
+                                        <code>mbid</code>/<code>musicbrainz_trackid</code> columns are kept in step on save.
                                     </div>
                                 </div>
                                 <div class="row g-2 mb-3">
@@ -277,6 +281,26 @@
                                     <div class="col-6">
                                         <label for="writer" class="form-label small fw-semibold text-muted mb-1">Writer/Lyricist</label>
                                         <input type="text" class="form-control" id="writer" name="writer" value="{{ track.writer or '' }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="lyricist" class="form-label small fw-semibold text-muted mb-1">Lyricist</label>
+                                        <input type="text" class="form-control" id="lyricist" name="lyricist" value="{{ track.lyricist or '' }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="iswc" class="form-label small fw-semibold text-muted mb-1">ISWC</label>
+                                        <input type="text" class="form-control" id="iswc" name="iswc" value="{{ track.iswc or '' }}" placeholder="e.g. T-345246800-1">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="original_title" class="form-label small fw-semibold text-muted mb-1">Original Title</label>
+                                        <input type="text" class="form-control" id="original_title" name="original_title" value="{{ track.original_title or '' }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="bpm" class="form-label small fw-semibold text-muted mb-1">BPM (manual)</label>
+                                        <input type="number" step="0.01" class="form-control" id="bpm" name="bpm" value="{{ track.bpm if track.bpm is not none else '' }}" placeholder="Auto from Essentia">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="original_cover_artist" class="form-label small fw-semibold text-muted mb-1">Original Cover Artist</label>
+                                        <input type="text" class="form-control" id="original_cover_artist" name="original_cover_artist" value="{{ track.original_cover_artist or '' }}">
                                     </div>
                                 </div>
                                 <div class="row g-2 mb-3">
@@ -313,6 +337,10 @@
                                     <div class="form-check">
                                         <input type="checkbox" class="form-check-input" id="is_remix" name="is_remix" {% if track.is_remix == 1 %}checked{% endif %}>
                                         <label class="form-check-label small" for="is_remix">Remix</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input type="checkbox" class="form-check-input" id="album_context_live" name="album_context_live" {% if track.album_context_live == 1 %}checked{% endif %}>
+                                        <label class="form-check-label small" for="album_context_live" title="The album this track belongs to is a live release">Album is Live</label>
                                     </div>
                                 </div>
 
@@ -488,6 +516,15 @@
                                     <option value="4" {% if track.stars == 4 %}selected{% endif %}>★★★★☆ — 4 Stars</option>
                                     <option value="5" {% if track.stars == 5 %}selected{% endif %}>★★★★★ — 5 Stars</option>
                                 </select>
+                                <hr class="my-3 border-secondary">
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="exclude_from_stats" name="exclude_from_stats" {% if track.exclude_from_stats %}checked{% endif %}>
+                                    <label class="form-check-label small" for="exclude_from_stats" title="Keep this track out of popularity stats and rating curves">Exclude from stats</label>
+                                </div>
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="popularity_frozen" name="popularity_frozen" {% if track.popularity_frozen %}checked{% endif %}>
+                                    <label class="form-check-label small" for="popularity_frozen" title="Stop the scan refreshing this track's popularity">Freeze popularity</label>
+                                </div>
                             </div>
                         </div>
 
@@ -545,9 +582,47 @@
                                 </div>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- SECTION 2: GENRES & AUDIO -->
+                        <!-- Save-state diagnostics — read-only. The recurring
+                             "did it save to the file or only the database?"
+                             question is answered here instead of in the logs. -->
+                        <div class="card shadow-sm mt-3">
+                            <div class="card-header border-secondary bg-transparent py-2">
+                                <h6 class="card-title mb-0 fw-bold"><i class="bi bi-hdd-stack text-info me-1"></i> Save State</h6>
+                            </div>
+                            <div class="card-body p-3">
+                                <div class="d-flex justify-content-between border-bottom border-secondary py-1">
+                                    <span class="text-muted small">Metadata source</span>
+                                    <span class="small">{{ track.metadata_source or '—' }}</span>
+                                </div>
+                                <div class="d-flex justify-content-between border-bottom border-secondary py-1">
+                                    <span class="text-muted small">File tags written</span>
+                                    <span class="small">{{ track.local_tags_written_at or '—' }}</span>
+                                </div>
+                                <div class="d-flex justify-content-between border-bottom border-secondary py-1">
+                                    <span class="text-muted small">File tags reconciled</span>
+                                    <span class="small">{{ track.file_tags_synced_at or '—' }}</span>
+                                </div>
+                                <div class="d-flex justify-content-between border-bottom border-secondary py-1">
+                                    <span class="text-muted small">Navidrome imported</span>
+                                    <span class="small">{{ track.navidrome_imported_at or '—' }}</span>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center py-1">
+                                    <span class="text-muted small">Pending Navidrome re-read</span>
+                                    {% if track.metadata_dirty_for_navidrome %}
+                                        <span class="badge bg-warning text-dark">Yes — the file differs from the last import</span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">No</span>
+                                    {% endif %}
+                                </div>
+                                <div class="form-text text-muted mt-2">
+                                    A change is durable once the file tags are written; Navidrome only shows it after
+                                    the next rescan. “Pending” means the database was corrected but the file/import
+                                    has not confirmed it yet.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     <div id="tab-tech" class="tab-pane fade track-mobile-group" data-mobile-tab="tech" role="tabpanel">
                         <!-- Detected Genres & Tags Card -->
                         <div class="card shadow-sm mb-3">

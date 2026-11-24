@@ -994,6 +994,15 @@ async def api_track_bulk_update() -> Any:
         # scope exists for the handful that landed on the wrong release.
         "musicbrainz_album_mbid", "musicbrainz_albumid",
         "musicbrainz_releasegroupid",
+        # Per-track identity / credit fields the bulk "Edit Tracks" modal
+        # exposes. ``recording_mbid`` is the canonical column; its legacy
+        # aliases are kept in step below.
+        "isrc", "recording_mbid", "mbid", "musicbrainz_trackid",
+        "lyricist", "iswc", "original_title", "work",
+        # Tri-state flags (Yes/No only; "leave unchanged" is simply absent).
+        "is_cover", "cover_manual_override", "is_live", "is_acoustic",
+        "is_remix", "is_compilation", "album_context_live",
+        "exclude_from_stats", "popularity_frozen", "single_manual_override",
     }
     unknown = sorted(set(str(k) for k in fields) - allowed)
     if unknown:
@@ -1011,10 +1020,28 @@ async def api_track_bulk_update() -> Any:
     if not updates:
         return jsonify({"success": False, "error": "No fields to update"}), 400
 
+    # ⭐ ONE RECORDING ID, FOUR COLUMNS. A bulk MBID correction must land in the
+    # canonical ``recording_mbid`` AND the legacy spellings, or the file tag and
+    # some readers keep the old id (the same split the single-track save avoids).
+    _mbid_key = (
+        "recording_mbid" if "recording_mbid" in updates
+        else ("mbid" if "mbid" in updates else None)
+    )
+    if _mbid_key:
+        for _alias in ("mbid", "musicbrainz_trackid", "recording_mbid"):
+            updates.setdefault(_alias, updates[_mbid_key])
+
     try:
         with db_session() as session:
             updates = _normalize_track_updates(updates, _get_track_column_types(session))
             set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+            # Freezing stamps WHEN; unfreezing clears it.
+            if "popularity_frozen" in updates:
+                set_clause += (
+                    ", popularity_frozen_at = CURRENT_TIMESTAMP"
+                    if updates["popularity_frozen"]
+                    else ", popularity_frozen_at = NULL"
+                )
             placeholders = ", ".join(f":t{i}" for i in range(len(track_ids)))
             params = {
                 **updates,

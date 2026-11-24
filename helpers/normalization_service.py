@@ -643,6 +643,44 @@ def has_cover_marker(title: str) -> bool:
     return bool(_COVER_ANNOTATION_RE.search(str(title or "")))
 
 
+def strip_credited_artist_prefix(artist: Any, title: Any) -> str | None:
+    """Remove a leading ``"<credited artist> - "`` from *title*, else ``None``.
+
+    ``"Orpheus Omega / Triple Kill"`` + ``"Triple Kill - Stacy's Mom"``
+    -> ``"Stacy's Mom"``.
+
+    ⚠️ WHY THIS IS SHARED. A split/covers release often writes the performer
+    into the track TITLE as well as the artist column. The queue cleaner has
+    always normalised that form, but the MusicBrainz Compare matched with the
+    raw title — so ``"Trike Kill - Sk8er Boi"`` did not equal MB's ``"Sk8r Boi"``,
+    the name match missed, and the position fallback paired the file with
+    whatever the release put at that number. One rule, used by both.
+
+    ⚠️ Only a WHOLE credited artist is removed, only from the FRONT, and only
+    when the tail still has content. That is what makes this safe on an
+    ordinary title: "Triple Kill" is not a prefix of "Killing Me Softly", and
+    stripping to an empty string is refused outright.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return None
+
+    try:
+        names = split_artist_credit(str(artist or "")) or [str(artist or "")]
+    except Exception:
+        names = [str(artist or "")]
+
+    # Longest first, so "Triple Kill" is preferred over "Triple".
+    for name in sorted((n for n in names if n), key=len, reverse=True):
+        prefix = f"{name} - "
+        if not text.casefold().startswith(prefix.casefold()):
+            continue
+        tail = text[len(prefix):].strip(" -–—")
+        if tail:
+            return tail
+    return None
+
+
 def titles_match_for_review(
     current: Any,
     proposed: Any,

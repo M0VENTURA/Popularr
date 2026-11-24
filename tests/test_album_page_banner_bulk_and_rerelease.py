@@ -119,14 +119,22 @@ class TestPerTrackRerelease:
             "the whole point is that only the ticks are re-matched"
         )
 
-    def test_it_writes_only_identity_fields(self, js):
+    def test_it_applies_the_release_metadata_to_the_selection(self, js):
+        """⚠️ It used to write ONLY the release identity.
+
+        Reported: "it attaches the MBID but does not update the metadata for
+        those tracks". The call now goes to the link endpoint with the selected
+        ids and ``apply_metadata``, so the release's own title/number/MBIDs land
+        on the same rows. The album NAME is still never renamed here — it is
+        only the endpoint's scope.
+        """
         body = _function_body(js, "applyReleaseToSelectedTracks")
-        for field in ("musicbrainz_albumid", "musicbrainz_album_mbid"):
-            assert field in body
-        # It must not rewrite the album NAME — that is the album-wide action.
-        assert "album:" not in body.replace("musicbrainz_albumid", "").replace(
-            "musicbrainz_album_mbid", ""
-        ), "a per-track re-match must not rename the album"
+        assert "/api/musicbrainz/link-album-mbids" in body
+        assert "track_ids: ids" in body
+        assert "apply_metadata: true" in body
+        assert "fields:" not in body, (
+            "a per-track re-match must not use the direct field-write object"
+        )
 
     def test_it_refreshes_afterwards(self, js):
         body = _function_body(js, "applyReleaseToSelectedTracks")

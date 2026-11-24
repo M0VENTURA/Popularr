@@ -391,6 +391,46 @@
                     <label class="form-label small" for="btWriter">Composer</label>
                     <input type="text" class="form-control bg-dark text-light border-secondary" id="btWriter">
                   </div>
+                  <div class="col-md-6">
+                    <label class="form-label small" for="btLyricist">Lyricist</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btLyricist">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label small" for="btIsrc">ISRC</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btIsrc" placeholder="e.g. USSM10206594">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label small" for="btRecordingMbid">Recording MBID</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btRecordingMbid" placeholder="Recording id for the selected tracks">
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label small" for="btOriginalTitle">Original Title</label>
+                    <input type="text" class="form-control bg-dark text-light border-secondary" id="btOriginalTitle">
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label small" for="btIsCover">Cover song</label>
+                    <select class="form-select bg-dark text-light border-secondary" id="btIsCover">
+                      <option value="">Leave unchanged</option>
+                      <option value="true">Yes</option>
+                      <option value="false">No</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label small" for="btIsLive">Live</label>
+                    <select class="form-select bg-dark text-light border-secondary" id="btIsLive">
+                      <option value="">Leave unchanged</option>
+                      <option value="true">Yes</option>
+                      <option value="false">No</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label small" for="btExcludeStats">Exclude from stats</label>
+                    <select class="form-select bg-dark text-light border-secondary" id="btExcludeStats">
+                      <option value="">Leave unchanged</option>
+                      <option value="true">Yes</option>
+                      <option value="false">No</option>
+                    </select>
+                  </div>
                 </div>
               </div>
               <div class="modal-footer border-secondary">
@@ -452,6 +492,14 @@
                   <a href="{{ url_for('ui.track_detail', track_id=track.id) }}" class="fw-bold text-light text-decoration-none">
                     {{ track.title }}
                   </a>
+                  {# Save-state at a glance: a correction the database holds but
+                     Navidrome has not re-read is the single most confusing state
+                     (the page looks right, Navidrome does not). #}
+                  {% if track.metadata_dirty_for_navidrome %}
+                    <span class="badge bg-warning text-dark ms-1" style="font-size:.6rem;" title="Database/file correction not yet confirmed by a Navidrome import">pending</span>
+                  {% elif track.local_tags_written_at %}
+                    <span class="badge bg-secondary ms-1" style="font-size:.6rem;" title="File tags written {{ track.local_tags_written_at }}">file ✓</span>
+                  {% endif %}
                   {#
                     Phones hide the Duration column, so the number travels with
                     the title instead (see .track-inline-duration in
@@ -758,6 +806,61 @@
               <div class="col-6 col-md-4">
                 <label for="album_releasecountry" class="form-label small">Release Country</label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="album_releasecountry" name="album_releasecountry" value="{{ album_data.releasecountry or '' }}">
+              </div>
+              {# The backend's ``release_fields`` already reads and writes every
+                 field below; only the inputs were missing, so a stored value had
+                 no way to be corrected by hand. Presence-gated server-side, so an
+                 empty box clears the value and an absent field leaves it alone. #}
+              <div class="col-6 col-md-4">
+                <label for="album_releasestatus" class="form-label small">Release Status</label>
+                {% set _rel_status = (album_data.releasestatus or '')|string|trim %}
+                <select class="form-select bg-dark text-light border-secondary" id="album_releasestatus" name="album_releasestatus">
+                  <option value="" {% if not _rel_status %}selected{% endif %}>Unknown</option>
+                  <option value="Official" {% if _rel_status|lower == 'official' %}selected{% endif %}>Official</option>
+                  <option value="Promotion" {% if _rel_status|lower == 'promotion' %}selected{% endif %}>Promotion</option>
+                  <option value="Bootleg" {% if _rel_status|lower == 'bootleg' %}selected{% endif %}>Bootleg</option>
+                  <option value="Pseudo-Release" {% if _rel_status|lower == 'pseudo-release' %}selected{% endif %}>Pseudo-Release</option>
+                  <option value="Withdrawn" {% if _rel_status|lower == 'withdrawn' %}selected{% endif %}>Withdrawn</option>
+                </select>
+              </div>
+              <div class="col-6 col-md-4">
+                <label for="album_asin" class="form-label small">ASIN</label>
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_asin" name="album_asin" value="{{ album_data.asin or '' }}" placeholder="Amazon identifier">
+              </div>
+              <div class="col-6 col-md-4">
+                <label for="album_script" class="form-label small">Script</label>
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_script" name="album_script" value="{{ album_data.script or '' }}" placeholder="e.g. Latn, Cyrl">
+              </div>
+              <div class="col-6 col-md-4">
+                <label for="album_originaldate" class="form-label small">Original Date</label>
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_originaldate" name="album_originaldate" value="{{ album_data.originaldate or '' }}" placeholder="YYYY-MM-DD">
+                <div class="form-text text-muted">The release group's first release date.</div>
+              </div>
+              <div class="col-6 col-md-4">
+                <label for="album_tracktotal" class="form-label small">Track Total</label>
+                <input type="number" min="0" class="form-control bg-dark text-light border-secondary" id="album_tracktotal" name="album_tracktotal" value="{{ album_data.tracktotal or '' }}">
+              </div>
+              <div class="col-6 col-md-4">
+                <label for="album_discsubtitle" class="form-label small">Disc Subtitle</label>
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_discsubtitle" name="album_discsubtitle" value="{{ album_data.discsubtitle or '' }}" placeholder="e.g. Disc 1: The Storm">
+                <div class="form-text text-muted">Navidrome folds this into the album identity; keep it identical on every track.</div>
+              </div>
+              <div class="col-6 col-md-4">
+                <label for="album_language" class="form-label small">Language</label>
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_language" name="album_language" value="{{ album_data.language or '' }}" placeholder="e.g. eng">
+              </div>
+              <div class="col-6 col-md-4">
+                <label for="album_explicitstatus" class="form-label small">Explicit</label>
+                {% set _explicit = (album_data.explicitstatus or '')|string|trim %}
+                <select class="form-select bg-dark text-light border-secondary" id="album_explicitstatus" name="album_explicitstatus">
+                  <option value="" {% if not _explicit %}selected{% endif %}>Unknown</option>
+                  <option value="Explicit" {% if _explicit|lower == 'explicit' or _explicit|lower == 'true' or _explicit == '1' %}selected{% endif %}>Explicit</option>
+                  <option value="Clean" {% if _explicit|lower == 'clean' or _explicit|lower == 'false' or _explicit == '0' %}selected{% endif %}>Clean</option>
+                </select>
+              </div>
+              <div class="col-12">
+                <label for="album_copyright" class="form-label small">Copyright</label>
+                <input type="text" class="form-control bg-dark text-light border-secondary" id="album_copyright" name="album_copyright" value="{{ album_data.copyright or '' }}" placeholder="℗ 2002 The copyright in this sound recording is owned by …">
               </div>
             </div>
           </div>

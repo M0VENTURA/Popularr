@@ -68,33 +68,13 @@ def _strip_duplicated_artist_prefix(artist: str, title: str) -> str | None:
     ``"Orpheus Omega / Triple Kill"`` + ``"Triple Kill - Stacy's Mom"``
     -> ``"Stacy's Mom"``.
 
-    ⚠️ Only a WHOLE credited artist is removed, and only from the FRONT, and
-    only when the tail still has content. That is what makes this safe on an
-    ordinary title: "Triple Kill" is not a prefix of "Killing Me Softly", and
-    stripping to an empty string is refused outright.
+    Delegates to the shared rule in ``normalization_service`` so the queue
+    cleaner and the MusicBrainz Compare cannot disagree about the same title.
+    See ``strip_credited_artist_prefix`` for the safety conditions.
     """
-    text = str(title or "").strip()
-    if not text:
-        return None
+    from helpers.normalization_service import strip_credited_artist_prefix
 
-    try:
-        from helpers.normalization_service import split_artist_credit
-
-        names = split_artist_credit(artist) or [artist]
-    except Exception:
-        names = [artist]
-
-    # Longest first, so "Triple Kill" is preferred over "Triple".
-    for name in sorted((n for n in names if n), key=len, reverse=True):
-        prefix = f"{name} - "
-        if not text.casefold().startswith(prefix.casefold()):
-            continue
-        tail = text[len(prefix):].strip(" -–—")
-        # A tail that is itself just another credit is fine ("Triple Kill -
-        # Stacy's Mom" -> "Stacy's Mom"); an EMPTY tail is not.
-        if tail:
-            return tail
-    return None
+    return strip_credited_artist_prefix(artist, title)
 
 
 def clean_mangled_queue_item(item: dict[str, Any]) -> dict[str, Any]:

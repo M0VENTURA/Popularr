@@ -293,6 +293,11 @@ class TestAlbumMbidsComeFromTheLibrary:
         item["metadata"]["isrc"] = "USUM70000000001"
         item["metadata"]["tracktotal"] = "10"
         item["metadata"]["musicbrainz_artistid"] = "00000000-0000-0000-0000-0000000000bb"
+        # The row is "completely resolved" including the three writing roles the
+        # import now fills; without them it legitimately asks MB for them.
+        item["metadata"]["writer"] = "A Writer"
+        item["metadata"]["composer"] = "A Composer"
+        item["metadata"]["lyricist"] = "A Lyricist"
 
         meta = run_import(item)
         assert meta["musicbrainz_releasegroupid"] == "stored-rg"

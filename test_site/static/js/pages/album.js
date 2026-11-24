@@ -1269,12 +1269,28 @@
       title: 'btTitle',
       artist: 'btArtist',
       writer: 'btWriter',
+      lyricist: 'btLyricist',
+      isrc: 'btIsrc',
+      recording_mbid: 'btRecordingMbid',
+      original_title: 'btOriginalTitle',
     };
     const fields = {};
     Object.entries(fieldMap).forEach(([field, id]) => {
       const el = document.getElementById(id);
       const value = el ? String(el.value || '').trim() : '';
       if (value) fields[field] = value;
+    });
+    // Tri-state flags: only an explicit Yes/No is posted, so "Leave unchanged"
+    // can never clear a flag on every selected track.
+    [
+      ['is_cover', 'btIsCover'],
+      ['is_live', 'btIsLive'],
+      ['exclude_from_stats', 'btExcludeStats'],
+    ].forEach(([field, id]) => {
+      const el = document.getElementById(id);
+      const value = el ? String(el.value || '') : '';
+      if (value === 'true') fields[field] = true;
+      else if (value === 'false') fields[field] = false;
     });
     if (!Object.keys(fields).length) {
       notifyError('Fill in at least one field to apply.');
@@ -2007,11 +2023,13 @@
 
   // ── Compare with MusicBrainz ────────────────────────────────────────────
   //
-  // Backed by the server's compare_musicbrainz_release(), which matches MB
-  // tracklist entries to library rows (by disc+track number, falling back to
-  // fuzzy title match) and reports per-track diff_fields (title,
-  // track_number, disc_number, mbid — duration is reported but informational
-  // only, since a file's real duration is not an editable metadata field).
+  // Backed by the server's compare_musicbrainz_release(), which matches by
+  // SONG TITLE first (with a leading "<performer> - " prefix and the app's
+  // "(X cover)" annotation ignored), then by disc+track position, then by a
+  // conservative fuzzy fallback that is refused when the two known lengths
+  // contradict it. It reports per-track diff_fields (title, track_number,
+  // disc_number, mbid — duration is reported but informational only, since a
+  // file's real duration is not an editable metadata field).
   //
   // Field names below (mb_recording_mbid, mb_title, …) match the server's
   // response shape exactly — see musicbrainz_service.py.
@@ -2927,25 +2945,28 @@
   }
 
   /**
-   * Write the chosen release's identity onto *ids* only, then reload.
+   * Re-bind *ids* to the chosen release and apply that release's per-track
+   * metadata to those rows only, then reload.
    *
-   * Reuses the bulk-update endpoint rather than a new one: it already fans the
-   * write out to the files (in the background) and to Navidrome, and its
-   * allow-list now covers the release columns.
+   * ⚠️ THIS USED TO WRITE THE RELEASE IDENTITY AND NOTHING ELSE.
+   *
+   * The bulk-update call set ``musicbrainz_albumid`` / ``_mbid`` /
+   * ``releasegroupid`` and stopped there. The selected rows were then bound to
+   * the release while still carrying their old title and track/disc numbers —
+   * the reported "it attaches the MBID but does not update the metadata for
+   * those tracks". The link endpoint already matches local rows to a release
+   * tracklist; with ``track_ids`` + ``apply_metadata`` it now writes that
+   * match's title/number/MBIDs for the selection (and syncs the files), so one
+   * call does both jobs and the scope stays exactly the ticks.
    */
   async function applyReleaseToSelectedTracks(ids, releaseId, groupId) {
-    const fields = {
-      musicbrainz_albumid: releaseId,
-      musicbrainz_album_mbid: releaseId,
-    };
-    if (groupId) fields.musicbrainz_releasegroupid = String(groupId).trim();
-
     const confirmed = global.ui && global.ui.confirm
       ? await global.ui.confirm({
         title: 'Match selected tracks to another release',
         message: `Bind ${ids.length} selected track(s) to release ${releaseId}?`,
         detail:
-          'Only the selected tracks are moved. The rest of the album keeps its '
+          'Only the selected tracks are moved, and each one takes its title and '
+          + 'track/disc number from that release. The rest of the album keeps its '
           + 'current release, so the two halves can be split apart if that is what '
           + 'was wrong.',
         tone: 'warning',
@@ -2955,17 +2976,21 @@
     if (!confirmed) return;
 
     const run = async () => {
-      const data = await global.api.postJson('/api/track/bulk-update', {
+      const data = await global.api.postJson('/api/musicbrainz/link-album-mbids', {
+        artist: pageArtist(),
+        album: pageAlbum(),
+        release_id: releaseId,
+        release_group_mbid: groupId ? String(groupId).trim() : '',
         track_ids: ids,
-        fields,
-        sync_to_file: true,
+        apply_metadata: true,
       }, { timeoutMs: 60000 });
       if (!data || data.success !== true) {
         notifyError((data && data.error) || 'Could not re-match the selected tracks.');
         return;
       }
       notifySuccess(
-        `Matched ${ids.length} track(s) to that release. Reloading…`
+        data.message
+        || `Matched ${data.linked || 0} of ${ids.length} selected track(s) to that release.`
       );
       setTimeout(() => global.location.reload(), 900);
     };
