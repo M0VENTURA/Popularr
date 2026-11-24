@@ -95,7 +95,7 @@ import time
 from collections import OrderedDict, defaultdict
 from datetime import datetime
 from statistics import mean, median, stdev
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 try:  # pragma: no cover - platform dependent
@@ -2339,6 +2339,42 @@ def _build_album_model(
         return {}
 
 
+#: How a genre playlist's rotation bands tracks by popularity.
+#:
+#: A genre Top Tracks list is ranked by listener reach, and that ranking is the
+#: playlist's contract. Rotating the WHOLE list (the old behaviour) threw it away
+#: — the pushed order stopped being "most popular first" the moment the week
+#: rolled over.
+#:
+#: ⚠️ A FIXED BLOCK SIZE WOULD NOT FIX THAT. Blocks of N let the 1st track trade
+#: places with the Nth purely because they landed in the same block. Bands are
+#: formed from the VALUE instead: a track's reach rounded to one significant
+#: figure, so 9_000_000 and 8_200_000 band to 9e6 and 8e6 (they may not swap)
+#: while two tracks both in the 8e6 band may. Two tracks may only swap if a
+#: listener could not tell them apart.
+def _genre_shuffle_band(row: Any) -> float:
+    """The popularity BAND a row belongs to, as a rounded reach figure.
+
+    One significant figure: 8_100_000 and 8_400_000 both band to 8e6 and may swap;
+    9_000_000 and 900_000 do not. Rows with no reach at all share band 0.0, so
+    unreachable tracks stay free to rotate among themselves without moving
+    anything that has a real number.
+    """
+    if isinstance(row, dict):
+        reach = _essential_reach(row)
+    else:
+        try:
+            reach = float(row or 0)
+        except (TypeError, ValueError):
+            reach = 0.0
+    if reach <= 0:
+        return 0.0
+    try:
+        return float(f"{reach:.1g}")
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return reach
+
+
 def _resolve_playlist_order_mode(value: Any) -> str:
     """Normalise ``playlists.playlist_order_mode`` to a supported mode.
 
@@ -2607,6 +2643,7 @@ def _weekly_shuffle(
     scope: str | None = None,
     enabled: bool | None = None,
     when: datetime | None = None,
+    tier_key: Callable[[Any], Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Reorder a finished playlist ONCE PER WEEK, deterministically.
 
@@ -2662,8 +2699,38 @@ def _weekly_shuffle(
         return rows
 
     seed = f"{_rotation_week(when)}::{str(playlist_key or '').casefold()}"
+    rng = random.Random(seed)
+
+    # ⭐ ROTATE WITHIN POPULARITY TIERS, never across them.
+    #
+    # A whole-list shuffle destroyed the ranking the selection had just computed:
+    # "rank by popularity, highest first" was true of the slice and then untrue of
+    # what got pushed, because this ran afterwards.
+    #
+    # ⚠️ A FIXED TIER SIZE IS NOT A POPULARITY TIER. Slicing the list into blocks
+    # of N and shuffling each block lets the 1st track trade places with the Nth
+    # purely because they landed in the same block — the ranking is still wrong,
+    # just less visibly. ``tier_key`` therefore bands on the ACTUAL popularity
+    # value: two tracks may swap only if they rank equally.
+    #
+    # Omitted ``tier_key`` keeps the OLD whole-list behaviour for callers that
+    # really do want a random order.
+    if tier_key is not None:
+        out: list[Any] = []
+        start = 0
+        while start < len(rows):
+            band = tier_key(rows[start])
+            end = start + 1
+            while end < len(rows) and tier_key(rows[end]) == band:
+                end += 1
+            tier = list(rows[start:end])
+            rng.shuffle(tier)
+            out.extend(tier)
+            start = end
+        return out
+
     shuffled = list(rows)
-    random.Random(seed).shuffle(shuffled)
+    rng.shuffle(shuffled)
     return shuffled
 
 
@@ -2856,15 +2923,26 @@ def _essential_percentile(values: list[float], fraction: float) -> float | None:
     ``None`` (rather than 0.0) so a caller can tell "no data" from "the bottom of
     the catalogue" — an artist with no listener figures must not silently get an
     EMPTY collection because every track failed a threshold of zero.
+
+    ⚠️ LINEAR INTERPOLATION, NOT NEAREST-RANK. Nearest-rank lands the threshold
+    ON a data point, and a ``>=`` comparison then keeps that point plus everything
+    above it — so a "50th percentile" floor kept n/2 + 1 rows and, with ties, as
+    many as the data happened to share. Interpolating puts the median BETWEEN the
+    middle two values, which is what "the 50th percentile of all tracks in G"
+    means and makes the floor cut the intended half.
     """
     usable = sorted(float(v) for v in (values or []) if float(v or 0) > 0)
     if not usable:
         return None
     if len(usable) == 1:
         return usable[0]
-    # Nearest-rank: ceil(fraction * n), clamped into range.
-    index = min(len(usable) - 1, max(0, math.ceil(fraction * len(usable)) - 1))
-    return usable[index]
+    position = max(0.0, min(1.0, float(fraction))) * (len(usable) - 1)
+    lower = int(math.floor(position))
+    upper = min(len(usable) - 1, lower + 1)
+    if lower == upper:
+        return usable[lower]
+    weight = position - lower
+    return usable[lower] + (usable[upper] - usable[lower]) * weight
 
 
 def _essential_playlist_name(artist: str) -> str:
@@ -3683,21 +3761,24 @@ def _sync_essential_playlist(
         _delete_playlist_from_navidrome(playlist_name)
         return False
 
-    # ⭐ STEP 5 — ONE list, ordered by listener REACH, highest first.
+    # ⭐ STEP 5 — STAR TIER first, then POPULARITY inside each tier.
     #
-    # There is deliberately no separate "features" section and no star-tier
-    # grouping: an Essential Collection is the artist's best-of, so track 1 is
-    # their biggest and the last is their smallest. Features are compared on the
-    # same number as everything else. The old contract ranked by STAR TIER then
-    # score, so every 5★ preceded every 4★ — "the loudest, not the biggest".
+    # 5★ tracks lead, then 4★, and WITHIN each tier the order is listener reach
+    # (Last.fm, falling back to ListenBrainz — ``_essential_reach``). There is
+    # still no separate "features" section: a feature competes on the same reach
+    # number as everything else, it simply sits in its own star tier.
+    #
+    # ⚠️ This is a deliberate revision. It briefly ordered by reach ALONE, which
+    # put a huge 4★ track above the artist's biggest 5★ hit — the tier is part of
+    # what this playlist says, so it leads.
     #
     # No per-artist cap or interleave: this playlist is ONE artist's best-of, so
     # a cap would truncate it at ``max_per_artist``.
     winners = sorted(
         winners,
         key=lambda r: (
-            -float(_essential_reach(r) or 0.0),
             -int(r.get("stars") or 0),
+            -float(_essential_reach(r) or 0.0),
             str(r.get("title") or "").casefold(),
             str(r.get("id") or ""),
         ),
@@ -5695,7 +5776,10 @@ def _create_genre_top_track_playlists(
     create_threshold = max(1, int(cfg.get("genre_playlists_create_threshold", 100) or 100))
     delete_threshold = max(1, int(cfg.get("genre_playlists_delete_threshold", 80) or 80))
     max_tracks = _resolve_genre_max_tracks(cfg)
-    order_mode = _resolve_playlist_order_mode(cfg.get("playlist_order_mode"))
+    # ⚠️ ``playlists.playlist_order_mode`` is deliberately NOT read here: a genre
+    # Top Tracks list ranks by listener REACH (one cross-artist number), not by
+    # the album-relative score that switch selects between. The switch still
+    # governs the cross-artist *curated* builders, where it is meaningful.
     max_per_artist = _resolve_max_per_artist(cfg)
     interleave_artists = bool(cfg.get("playlist_interleave_artists", True))
 
@@ -5986,6 +6070,45 @@ def _create_genre_top_track_playlists(
             item["title"].casefold(),
         )
 
+    # ⭐ GENRE TOP TRACKS — ONE GLOBAL REACH RANKING PER GENRE.
+    #
+    # The owner's spec for genre G:
+    #
+    #   1. pool   — tracks whose FINAL genres include G, live/remix/demo removed,
+    #               duplicates merged keeping the original album version;
+    #   2. include — stars >= min_stars AND reach >= the GLOBAL 50th percentile
+    #               of all tracks in G (NOT artist-relative);
+    #   3. reach  — Last.fm listeners, falling back to ListenBrainz listens;
+    #   4. rank   — reach descending, with the artist cap applied WHILE WALKING
+    #               DOWN the ranking, so each artist's slots go to their biggest;
+    #   5. covers — held to the same threshold as anything else;
+    #   6. length — the existing max_tracks cap, order preserved.
+    #
+    # ⚠️ WHY GLOBAL AND NOT THE ARTIST COHORT. The previous order key led with
+    # ``artist_catalogue_percentile``, which answers "is this one of the artist's
+    # own hits". In a genre list that is the wrong question twice over: a minor
+    # act's best song outranked a major act's, and the 300-track cap filled with
+    # acts whose best song nobody has heard. Reach is the only cross-artist
+    # number available (the stored score is album-relative).
+    _genre_reach_thresholds: dict[str, float] = {}
+    _reach_by_genre: dict[str, list[float]] = defaultdict(list)
+    for _row in rows:
+        if not _track_is_playlist_eligible(_row):
+            continue
+        _row_reach = _essential_reach(_row)
+        if _row_reach <= 0:
+            continue
+        for _genre in _track_genres(_row):
+            _key = _pool_genre_key(_genre)
+            if _key:
+                _reach_by_genre[_key].append(_row_reach)
+    for _key, _values in _reach_by_genre.items():
+        _threshold = _essential_percentile(_values, 0.50)
+        if _threshold is not None:
+            _genre_reach_thresholds[_key] = _threshold
+
+    _relevance_dropped = 0
+
     def _unique_by_track_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Keep the FIRST row for each track id, preserving order.
 
@@ -6066,6 +6189,26 @@ def _create_genre_top_track_playlists(
         # — the reported "299 tracks instead of 300". Here the slot is freed
         # before the slice, so the next eligible track fills it.
         winners = _unique_by_track_id(winners)
+
+        # ⭐ STEP 2 — THE GLOBAL 50th-PERCENTILE RELEVANCE FLOOR.
+        #
+        # Applied to EVERY row including covers: the spec keeps the covers that
+        # earn their place ("Behind Blue Eyes", "Smooth Criminal") and drops the
+        # ones that only appear because something once tagged them. A cover is
+        # not a category here, so it gets no exemption.
+        #
+        # A genre with no usable reach data has no threshold and is left
+        # ungated — a floor of zero would keep everything, which looks identical
+        # but would silently disable the rule the moment the data came back.
+        _reach_floor = _genre_reach_thresholds.get(norm_key)
+        if _reach_floor is not None:
+            _kept_rows = [
+                row for row in winners
+                if _essential_reach(row) >= _reach_floor
+            ]
+            _relevance_dropped += len(winners) - len(_kept_rows)
+            winners = _kept_rows
+
         qualifying_count = len(winners)
         playlist_name = _genre_playlist_name(_display_genre(genre))
         playlist_exists = playlist_name.casefold() in existing_playlists
@@ -6082,15 +6225,27 @@ def _create_genre_top_track_playlists(
         if not create_enabled and not playlist_exists:
             continue
 
-        winners = _ordered_playlist_rows(
+        # ⭐ STEP 4 — RANK BY REACH, THEN APPLY THE ARTIST CAP WHILE WALKING DOWN.
+        #
+        # The cap is applied to the RANKED list, so each artist's five slots go
+        # to their five biggest tracks in this genre rather than to whichever
+        # five happened to survive a different ordering.
+        #
+        # ``_ordered_playlist_rows`` is not used here: its key leads with
+        # ``artist_catalogue_percentile`` (an artist-relative question) and then
+        # the configured ``playlist_order_mode``. A genre list spans artists, so
+        # it needs ONE cross-artist number — reach.
+        winners = sorted(
             winners,
-            order_mode=order_mode,
-            max_per_artist=max_per_artist,
-            # ⭐ No interleave yet: the TOP tracks must be the ones the score
-            # ordering selected, so the cap is sliced from the pure ranking.
-            # Spreading the artists afterwards only reorders the survivors.
-            interleave=False,
+            key=lambda r: (
+                0 if int(r.get("is_compilation") or 0) == 0 else 1,
+                -_essential_reach(r),
+                -int(r.get("stars") or 0),
+                str(r.get("title") or "").casefold(),
+                str(r.get("id") or ""),
+            ),
         )
+        winners = _apply_artist_cap(winners, max_per_artist)
         # ⭐ The post-cap pool, BEFORE the target slice. Kept so the self-check
         # can distinguish "the cap removed tracks" from "the playlist is short".
         _capped_pool = list(winners)
@@ -6135,8 +6290,18 @@ def _create_genre_top_track_playlists(
         # "genre_top_tracks" is a CHART, so it rotates: a top-tracks list that
         # always reads in the same sequence looks stale even when nothing about
         # the music changed.
+        #
+        # ⚠️ IT ROTATES WITHIN A POPULARITY BAND, NOT ACROSS THE WHOLE LIST. A
+        # whole-list shuffle would undo the reach ranking that was just computed
+        # — the pushed order would no longer be "most popular first", which is
+        # this playlist's contract. The band is the reach ROUNDED TO ONE
+        # SIGNIFICANT FIGURE, so only tracks of genuinely comparable popularity
+        # trade places; the top of the chart stays the top.
         winners = _weekly_shuffle(
-            winners, playlist_key=playlist_name, scope="genre_top_tracks"
+            winners,
+            playlist_key=playlist_name,
+            scope="genre_top_tracks",
+            tier_key=_genre_shuffle_band,
         )
 
         _song_ids = [str(t.get("id") or "").strip() for t in winners if str(t.get("id") or "").strip()]

@@ -101,8 +101,15 @@ class TestStep2VersionFilter:
 
 class TestStep3Percentile:
     def test_the_threshold_sits_at_the_80th_percentile(self):
+        """Linear interpolation between the two values around the 80th mark.
+
+        1..10 → position 0.8 × 9 = 7.2 → between the 8th (8.0) and 9th (9.0).
+        ⚠️ NOT 8.0: nearest-rank landed ON a data point, and a ``>=`` comparison
+        then kept that point plus everything above it, so a "p80" floor was
+        really keeping more than the top fifth.
+        """
         values = [float(v) for v in range(1, 11)]  # 1..10
-        assert fs._essential_percentile(values, 0.80) == 8.0
+        assert fs._essential_percentile(values, 0.80) == pytest.approx(8.2)
 
     def test_no_data_is_None_not_zero(self):
         """⚠️ None means "do not gate". 0.0 would keep everything; a caller that
@@ -154,10 +161,14 @@ class TestTheSpecIsRecordedInTheSource:
             "features must not enter the percentile basis"
         )
 
-    def test_step5_orders_by_reach(self, body):
+    def test_step5_leads_with_the_star_tier_then_reach(self, body):
         idx = body.index("winners = sorted(")
-        window = body[idx: idx + 260]
-        assert "_essential_reach(r)" in window
+        window = body[idx: idx + 300]
+        # The tier must be the FIRST key: a huge 4★ track must not outrank the
+        # artist's biggest 5★ hit.
+        assert window.index("stars") < window.index("_essential_reach"), (
+            "5★ must lead 4★; reach orders WITHIN a tier"
+        )
 
     def test_step6_prefers_a_non_compilation_copy(self, body):
         idx = body.index("group.sort(")
