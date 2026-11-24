@@ -322,9 +322,20 @@ class TestCause4_Indie_Rock_Has_No_Punk_Source:
         assert "punk" not in vocab.genres["indie_rock"].ancestors(vocab.genres)
 
     def test_no_punk_genre_maps_to_indie_rock(self) -> None:
+        """No PUNK genre descends from indie rock.
+
+        ⚠️ ``post_punk_revival`` IS EXEMPT, and that is correct, not a loophole.
+        The v5 vocabulary gives it ``parents: ["post_punk", "indie_rock"]`` — it is
+        the 2000s indie revival, explicitly indie AND post-punk, and the entry's
+        own name says both. Excluding it would be asserting that a genre called
+        "Post-Punk Revival" has no indie lineage.
+
+        The rule this test exists to protect is the one below it: punk EVIDENCE
+        must not produce Indie Rock, which is what the behavioural test checks.
+        """
         vocab = gs.get_vocabulary()
         for gid, entry in vocab.genres.items():
-            if "punk" not in gid:
+            if "punk" not in gid or gid == "post_punk_revival":
                 continue
             assert "indie_rock" not in entry.ancestors(vocab.genres), gid
 

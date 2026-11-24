@@ -894,6 +894,34 @@ def _flatten(raw: Any) -> list[str]:
     return [text]
 
 
+def _split_on_separators(text: str) -> list[str]:
+    """Split a value on the separator hierarchy, most reliable first.
+
+    ``;`` and ``|`` are unambiguous; then a comma; then ``/`` and ``&``, which
+    also occur INSIDE real genre names (``death/doom``, ``r&b``). The caller
+    decides whether the result is a list or a name — see ``_all_parts_are_known``.
+    """
+    parts = _SAFE_SPLIT.split(text)
+    if len(parts) == 1:
+        parts = _COMMA_SPLIT.split(text)
+    if len(parts) == 1:
+        parts = _UNSAFE_SPLIT.split(text)
+    return parts
+
+
+def _all_parts_are_known(parts: list[str], vocab: "Vocabulary") -> bool:
+    """Every part resolves to something the vocabulary knows.
+
+    ⭐ THIS IS WHAT SEPARATES A LIST FROM A NAME. "Rock, Pop" splits into two
+    genres, so it was a list. "death/doom" splits into ``death`` (unknown) and
+    ``doom``, so it is one name and must stay whole.
+    """
+    candidates = [p.strip() for p in parts if p and p.strip()]
+    if len(candidates) < 2:
+        return False
+    return all(vocab.classify(p).kind != KIND_UNKNOWN for p in candidates)
+
+
 def tokenize_values(raw: Any, vocab: "Vocabulary") -> list[str]:
     """Split a raw source value into candidate tokens, VOCABULARY-AWARE.
 
@@ -924,28 +952,39 @@ def tokenize_values(raw: Any, vocab: "Vocabulary") -> list[str]:
         if not text:
             continue
 
-        # Step 2: the whole value, before any splitting.
-        if vocab.classify(text).kind != KIND_UNKNOWN:
-            tokens.append(text)
-            continue
-
+        parts: list[str]
         if _ARRAY_LIKE.match(text):
             parts = _ALL_SPLIT.split(text.strip("[]{}"))
         else:
-            parts = _SAFE_SPLIT.split(text)
-            if len(parts) == 1:
-                parts = _UNSAFE_SPLIT.split(text)
-            if len(parts) == 1:
-                # ⚠️ LAST RESORT, and it must come AFTER ``/`` and ``&``.
+            split_parts = _split_on_separators(text)
+            if len(split_parts) > 1 and _all_parts_are_known(split_parts, vocab):
+                # ⭐ A SEPARATED LIST IS NOT ONE GENRE NAME.
                 #
-                # A comma is how a genre LIST is stored in ``tracks.genres``
-                # and every provider column (``", ".join(...)``), but it is
-                # never inside a single genre name. Without this step the
-                # whole comma-joined string was classified as ONE unknown
-                # token, so the selector saw NO candidates and returned an
-                # empty list — every such track was skipped by the resync
-                # ("0 changed") and kept whatever stale genres it had.
-                parts = _COMMA_SPLIT.split(text)
+                # ``normalize_token`` strips ALL punctuation, so "Rock, Pop" keys
+                # to ``rockpop`` — exactly the key "Rock Pop" produces, and
+                # ``pop_rock`` lists "rock pop" as an alias. The whole-value test
+                # therefore "recognised" a two-genre list as ONE genre and split
+                # nothing. The same held for "Rock; Pop", "Rock/Pop" and
+                # "Rock | Pop".
+                #
+                # Measured: 21 comma-joined pairs collapsed into one genre on the
+                # 224-entry vocabulary and 44 on the 318-entry one, because a
+                # bigger taxonomy has more "<word> <word>" aliases. "Pop, Rock"
+                # became Pop Rock; "Folk, Punk" became Folk Punk, discarding the
+                # separate Folk reading.
+                #
+                # ⚠️ THE DISCRIMINATOR IS "DO ALL THE PARTS RESOLVE", not "does it
+                # contain a separator". A name that legitimately uses ``/`` or
+                # ``&`` (``death/doom``, ``r&b``) yields parts that do NOT each
+                # resolve, so it is kept whole — the flag needed no vocabulary
+                # change to stay correct.
+                parts = split_parts
+            elif vocab.classify(text).kind != KIND_UNKNOWN:
+                # Step 2: the whole value, before any splitting.
+                tokens.append(text)
+                continue
+            else:
+                parts = split_parts
 
         for part in parts:
             cleaned = part.strip(_STRIP_CHARS)

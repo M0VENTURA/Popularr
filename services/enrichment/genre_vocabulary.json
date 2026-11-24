@@ -11,328 +11,3435 @@
     "  id           stable canonical identity, never a display string (snake_case)",
     "  display      what gets written to the file tags",
     "  parent       id of the immediate broader genre, or null for a family root",
+    "  parents      list form for hybrids; the FIRST parent is the primary lineage",
     "  specificity  0 family root, 1 broad, 2 established subgenre, 3 narrow/microgenre",
+    "               (a child is never less specific than any of its parents)",
     "  aliases      EXTRA spellings only - the lowercased display name and the",
     "               id-with-spaces are derived automatically, so do not repeat them",
     "  family       hierarchy branch used for the family-slot limit; defaults to the",
-    "               root ancestor's id when omitted",
+    "               root ancestor's id when omitted. Hybrids always set it explicitly.",
+    "  scope        OPTIONAL. Which evidence levels may create this genre and whether it",
+    "               takes a genre slot. Omitted = evidence_policy.default_scope.",
+    "                 levels                       track / album / artist",
+    "                 slot                         'genre' (default) or 'marker' (never uses a slot)",
+    "                 confirm_release_types        MusicBrainz release-group secondary types",
+    "                 confirm_album_title_patterns regex against the album title",
+    "                 confirm_title_patterns       regex against the track title",
+    "                 require_confirmation         true = rejected unless a confirm rule matches",
+    "                 artist_requires_min_sources  artist evidence counts only with N source groups",
+    "  redundant_with OPTIONAL (v5). If ANY listed genre is also selected for the track, this",
+    "               genre is dropped. Applied after slot selection; the freed slot is not",
+    "               refilled; never empties a track. An explicit keep_together pair wins.",
     "",
-    "Adding an entry is enough to make it selectable; nothing is hardcoded in Python.",
+    "v4 notes:",
+    "  'hardcore' is METALLIC hardcore (Hatebreed-style); 'hardcore_punk' is the punk lineage;",
+    "  'hardcore rap' / 'hardcore hip hop' resolve to Hardcore Hip-Hop, never to Hardcore.",
+    "  Soundtrack / Film Score / Video Game Music need a soundtrack release; artist evidence never counts.",
+    "  Christmas / Soundtrack / Comedy are markers and never use a Maximum Genres slot.",
+    "  Discogs 'Folk, World, & Country' must be read as ONE value, not split on commas.",
+    "  'noise_values' are dropped outright (chart artefacts, vocal descriptors).",
     "",
-    "v4 - per-genre scope and noise_values.",
-    "v5.2 - merged patch: aliases, noise values, redundant_with lists.",
-    "  scope.levels                       track / album / artist; evidence at",
-    "                                    any other level is ignored.",
-    "  scope.slot                         genre (default) or marker. A marker is",
-    "                                    appended AFTER the genres and never",
-    "                                    consumes a Maximum Genres slot.",
-    "  scope.confirm_release_types        MusicBrainz secondary types.",
-    "  scope.confirm_album_title_patterns regex against the ALBUM title.",
-    "  scope.confirm_title_patterns       regex against the TRACK title.",
-    "  scope.require_confirmation         true = rejected unless confirmed.",
-    "  scope.artist_requires_min_sources  artist evidence needs N groups."
+    "v5 notes (A -> Stray Kids audit, report 15):",
+    "  Added aliases for common unmapped source values and 7 noise values.",
+    "  Added redundant_with lists (Heavy Metal vs specific metal styles, Rap Metal vs Nu Metal,",
+    "  broad rock/pop vs specific punk styles, etc). Classic Rock is deliberately NOT redundant.",
+    "  Alternative Metal + Nu Metal is NOT redundant (kept together by design).",
+    "  evidence_policy.collection_policy holds the new selection rules.",
+    "",
+    "Adding an entry is enough to make it selectable; nothing is hardcoded in Python."
   ],
-
   "genres": [
-    {"id": "rock", "display": "Rock", "parent": null, "specificity": 0, "family": "rock", "aliases": ["aussie rock", "australian rock", "american rock", "mainstream rock"]},
-    {"id": "alternative_rock", "display": "Alternative Rock", "parent": "rock", "specificity": 1, "aliases": ["alt rock", "alt. rock", "alt-rock", "alternative", "geek rock"], "redundant_with": ["melodic_hardcore", "pop_punk", "post_hardcore", "ska_punk"]},
-    {"id": "indie_rock", "display": "Indie Rock", "parent": "alternative_rock", "specificity": 2},
-    {"id": "indie_pop", "display": "Indie Pop", "parent": "alternative_rock", "specificity": 2, "aliases": ["noise pop"]},
-    {"id": "jangle_pop", "display": "Jangle Pop", "parent": "alternative_rock", "specificity": 2},
-    {"id": "hard_rock", "display": "Hard Rock", "parent": "rock", "specificity": 1, "redundant_with": ["stoner_metal"]},
-    {"id": "blues_rock", "display": "Blues Rock", "parent": "hard_rock", "specificity": 2},
-    {"id": "psychedelic_rock", "display": "Psychedelic Rock", "parent": "rock", "specificity": 2, "aliases": ["psych rock"]},
-    {"id": "space_rock", "display": "Space Rock", "parent": "psychedelic_rock", "specificity": 2},
-    {"id": "progressive_rock", "display": "Progressive Rock", "parent": "rock", "specificity": 2, "aliases": ["prog rock", "prog-rock"]},
-    {"id": "art_rock", "display": "Art Rock", "parent": "progressive_rock", "specificity": 2},
-    {"id": "krautrock", "display": "Krautrock", "parent": "progressive_rock", "specificity": 2},
-    {"id": "post_rock", "display": "Post-Rock", "parent": "rock", "specificity": 2},
-    {"id": "math_rock", "display": "Math Rock", "parent": "post_rock", "specificity": 3},
-    {"id": "garage_rock", "display": "Garage Rock", "parent": "rock", "specificity": 2},
-    {"id": "surf_rock", "display": "Surf Rock", "parent": "rock", "specificity": 2},
-    {"id": "southern_rock", "display": "Southern Rock", "parent": "rock", "specificity": 2, "aliases": ["swamp rock"]},
-    {"id": "folk_rock", "display": "Folk Rock", "parents": ["rock", "folk"], "specificity": 2},
-    {"id": "country_rock", "display": "Country Rock", "parent": "rock", "specificity": 2},
-    {"id": "rockabilly", "display": "Rockabilly", "parent": "rock", "specificity": 2},
-    {"id": "grunge", "display": "Grunge", "parent": "alternative_rock", "specificity": 2},
-    {"id": "post_grunge", "display": "Post-Grunge", "parents": ["alternative_rock", "grunge"], "specificity": 3, "aliases": ["post-grunge alternative rock"]},
-    {"id": "shoegaze", "display": "Shoegaze", "parent": "alternative_rock", "specificity": 2},
-    {"id": "dream_pop", "display": "Dream Pop", "parent": "alternative_rock", "specificity": 2},
-    {"id": "noise_rock", "display": "Noise Rock", "parent": "alternative_rock", "specificity": 2},
-    {"id": "emo", "display": "Emo", "parent": "alternative_rock", "specificity": 2},
-    {"id": "midwest_emo", "display": "Midwest Emo", "parent": "emo", "specificity": 3},
-    {"id": "anatolian_rock", "display": "Anatolian Rock", "parent": "psychedelic_rock", "specificity": 3},
-
-    {"id": "metal", "display": "Metal", "parent": "rock", "specificity": 0, "family": "metal"},
-    {"id": "heavy_metal", "display": "Heavy Metal", "parent": "metal", "specificity": 1, "aliases": ["british metal", "general heavy metal", "melodic metal"], "redundant_with": ["alternative_metal", "deathcore", "funk_metal", "grindcore", "hardcore", "mathcore", "metalcore", "nu_metal", "post_metal", "rap_metal"]},
-    {"id": "alternative_metal", "display": "Alternative Metal", "parents": ["metal", "alternative_rock"], "specificity": 2, "family": "metal", "aliases": ["alt metal", "alt. metal", "alt-metal"], "redundant_with": ["nu_metal"]},
-    {"id": "nu_metal", "display": "Nu Metal", "parent": "alternative_metal", "specificity": 2, "aliases": ["nu-metal", "nü metal"]},
-    {"id": "thrash_metal", "display": "Thrash Metal", "parent": "heavy_metal", "specificity": 2, "aliases": ["thrash"]},
-    {"id": "speed_metal", "display": "Speed Metal", "parent": "heavy_metal", "specificity": 2},
-    {"id": "groove_metal", "display": "Groove Metal", "parent": "heavy_metal", "specificity": 2},
-    {"id": "death_metal", "display": "Death Metal", "parent": "heavy_metal", "specificity": 2},
-    {"id": "melodic_death_metal", "display": "Melodic Death Metal", "parent": "death_metal", "specificity": 3, "aliases": ["melodeath", "modern melodic death metal"]},
-    {"id": "technical_death_metal", "display": "Technical Death Metal", "parent": "death_metal", "specificity": 3, "aliases": ["tech death"]},
-    {"id": "black_metal", "display": "Black Metal", "parent": "heavy_metal", "specificity": 2},
-    {"id": "atmospheric_black_metal", "display": "Atmospheric Black Metal", "parent": "black_metal", "specificity": 3},
-    {"id": "symphonic_black_metal", "display": "Symphonic Black Metal", "parent": "black_metal", "specificity": 3},
-    {"id": "blackgaze", "display": "Blackgaze", "parent": "black_metal", "specificity": 3},
-    {"id": "doom_metal", "display": "Doom Metal", "parent": "heavy_metal", "specificity": 2},
-    {"id": "death_doom", "display": "Death-Doom", "parent": "doom_metal", "specificity": 3, "aliases": ["death doom", "death/doom", "death/doom metal"]},
-    {"id": "funeral_doom", "display": "Funeral Doom", "parent": "doom_metal", "specificity": 3},
-    {"id": "sludge_metal", "display": "Sludge Metal", "parent": "doom_metal", "specificity": 2, "aliases": ["sludge"]},
-    {"id": "stoner_metal", "display": "Stoner Metal", "parent": "doom_metal", "specificity": 2},
-    {"id": "stoner_rock", "display": "Stoner Rock", "parent": "psychedelic_rock", "specificity": 2, "family": "rock", "aliases": ["desert rock"]},
-    {"id": "power_metal", "display": "Power Metal", "parent": "heavy_metal", "specificity": 2},
-    {"id": "symphonic_metal", "display": "Symphonic Metal", "parent": "heavy_metal", "specificity": 2},
-    {"id": "gothic_metal", "display": "Gothic Metal", "parent": "heavy_metal", "specificity": 2, "aliases": ["goth metal"]},
-    {"id": "progressive_metal", "display": "Progressive Metal", "parent": "heavy_metal", "specificity": 2, "aliases": ["prog metal", "prog-metal"]},
-    {"id": "djent", "display": "Djent", "parent": "progressive_metal", "specificity": 3},
-    {"id": "folk_metal", "display": "Folk Metal", "parents": ["heavy_metal", "folk"], "specificity": 2, "family": "metal"},
-    {"id": "viking_metal", "display": "Viking Metal", "parent": "folk_metal", "specificity": 3},
-    {"id": "pagan_metal", "display": "Pagan Metal", "parent": "folk_metal", "specificity": 3},
-    {"id": "industrial_metal", "display": "Industrial Metal", "parents": ["heavy_metal", "industrial"], "specificity": 2},
-    {"id": "post_metal", "display": "Post-Metal", "parent": "metal", "specificity": 3},
-    {"id": "neue_deutsche_haerte", "display": "Neue Deutsche Härte", "parent": "industrial_metal", "specificity": 3, "aliases": ["neue deutsche harte", "ndh"]},
-    {"id": "hardcore", "display": "Hardcore", "parent": "metal", "specificity": 2, "aliases": ["metal hardcore"]},
-
-    {"id": "punk", "display": "Punk", "parent": "rock", "specificity": 0, "family": "punk", "aliases": ["punk rock", "punk-rock", "l.a. punk"]},
-    {"id": "pop_punk", "display": "Pop Punk", "parent": "punk", "specificity": 2},
-    {"id": "ska_punk", "display": "Ska Punk", "parent": "punk", "specificity": 2},
-    {"id": "riot_grrrl", "display": "Riot Grrrl", "parent": "punk", "specificity": 3},
-    {"id": "hardcore_punk", "display": "Hardcore Punk", "parent": "punk", "specificity": 2},
-    {"id": "melodic_hardcore", "display": "Melodic Hardcore", "parent": "hardcore_punk", "specificity": 3},
-    {"id": "post_hardcore", "display": "Post-Hardcore", "parent": "hardcore_punk", "specificity": 2},
-    {"id": "screamo", "display": "Screamo", "parent": "post_hardcore", "specificity": 3, "aliases": ["emoviolence", "pop screamo"]},
-    {"id": "metalcore", "display": "Metalcore", "parents": ["metal", "hardcore_punk"], "specificity": 2},
-    {"id": "deathcore", "display": "Deathcore", "parent": "metalcore", "specificity": 3},
-    {"id": "mathcore", "display": "Mathcore", "parent": "metalcore", "specificity": 3},
-    {"id": "grindcore", "display": "Grindcore", "parent": "hardcore_punk", "specificity": 2, "aliases": ["grind"]},
-    {"id": "post_punk", "display": "Post-Punk", "parent": "punk", "specificity": 2},
-    {"id": "gothic_rock", "display": "Gothic Rock", "parent": "post_punk", "specificity": 2, "family": "rock", "aliases": ["goth rock"]},
-    {"id": "coldwave", "display": "Coldwave", "parent": "post_punk", "specificity": 3},
-    {"id": "no_wave", "display": "No Wave", "parent": "post_punk", "specificity": 3},
-
-    {"id": "pop", "display": "Pop", "parent": null, "specificity": 0, "family": "pop"},
-    {"id": "synthpop", "display": "Synthpop", "parents": ["pop", "electronic"], "specificity": 2, "family": "electronic", "aliases": ["synth pop", "synth-pop"]},
-    {"id": "electropop", "display": "Electropop", "parent": "synthpop", "specificity": 2},
-    {"id": "new_wave", "display": "New Wave", "parent": "pop", "specificity": 2},
-    {"id": "power_pop", "display": "Power Pop", "parent": "pop", "specificity": 2, "redundant_with": ["pop_punk"]},
-    {"id": "chamber_pop", "display": "Chamber Pop", "parent": "pop", "specificity": 3},
-    {"id": "art_pop", "display": "Art Pop", "parent": "pop", "specificity": 3},
-    {"id": "baroque_pop", "display": "Baroque Pop", "parent": "pop", "specificity": 3},
-    {"id": "sophisti_pop", "display": "Sophisti-Pop", "parent": "pop", "specificity": 3},
-    {"id": "k_pop", "display": "K-Pop", "parent": "pop", "specificity": 2, "aliases": ["kpop", "k pop"]},
-    {"id": "j_pop", "display": "J-Pop", "parent": "pop", "specificity": 2, "aliases": ["jpop", "j pop"]},
-    {"id": "city_pop", "display": "City Pop", "parent": "pop", "specificity": 3},
-
-    {"id": "electronic", "display": "Electronic", "parent": null, "specificity": 0, "family": "electronic", "aliases": ["electronica", "edm"]},
-    {"id": "ambient", "display": "Ambient", "parent": "electronic", "specificity": 1},
-    {"id": "dark_ambient", "display": "Dark Ambient", "parent": "ambient", "specificity": 2},
-    {"id": "drone", "display": "Drone", "parent": "ambient", "specificity": 2},
-    {"id": "idm", "display": "IDM", "parent": "electronic", "specificity": 2, "aliases": ["intelligent dance music"]},
-    {"id": "techno", "display": "Techno", "parent": "electronic", "specificity": 2},
-    {"id": "house", "display": "House", "parent": "electronic", "specificity": 2},
-    {"id": "deep_house", "display": "Deep House", "parent": "house", "specificity": 3},
-    {"id": "progressive_house", "display": "Progressive House", "parent": "house", "specificity": 3},
-    {"id": "trance", "display": "Trance", "parent": "electronic", "specificity": 2},
-    {"id": "psytrance", "display": "Psytrance", "parent": "trance", "specificity": 3, "aliases": ["psy-trance", "psy trance"]},
-    {"id": "drum_and_bass", "display": "Drum and Bass", "parent": "electronic", "specificity": 2, "aliases": ["drum & bass", "dnb", "d&b"]},
-    {"id": "jungle", "display": "Jungle", "parent": "drum_and_bass", "specificity": 2},
-    {"id": "dubstep", "display": "Dubstep", "parent": "electronic", "specificity": 2},
-    {"id": "breakbeat", "display": "Breakbeat", "parent": "electronic", "specificity": 2, "aliases": ["breaks"]},
-    {"id": "big_beat", "display": "Big Beat", "parent": "breakbeat", "specificity": 3},
-    {"id": "trip_hop", "display": "Trip Hop", "parent": "electronic", "specificity": 2, "aliases": ["trip-hop"]},
-    {"id": "downtempo", "display": "Downtempo", "parent": "electronic", "specificity": 2},
-    {"id": "synthwave", "display": "Synthwave", "parent": "electronic", "specificity": 2, "aliases": ["retrowave", "outrun"]},
-    {"id": "vaporwave", "display": "Vaporwave", "parent": "electronic", "specificity": 3},
-    {"id": "chiptune", "display": "Chiptune", "parent": "electronic", "specificity": 2, "aliases": ["8-bit", "8 bit"]},
-    {"id": "electro", "display": "Electro", "parent": "electronic", "specificity": 2},
-    {"id": "industrial", "display": "Industrial", "parent": "electronic", "specificity": 1, "aliases": ["industrial music"]},
-    {"id": "ebm", "display": "EBM", "parent": "industrial", "specificity": 2, "aliases": ["electronic body music"]},
-    {"id": "glitch", "display": "Glitch", "parent": "electronic", "specificity": 2},
-    {"id": "hardstyle", "display": "Hardstyle", "parent": "electronic", "specificity": 2},
-    {"id": "gabber", "display": "Gabber", "parent": "electronic", "specificity": 2, "aliases": ["gabba"]},
-    {"id": "eurodance", "display": "Eurodance", "parent": "electronic", "specificity": 2, "aliases": ["euro dance"]},
-    {"id": "future_bass", "display": "Future Bass", "parent": "electronic", "specificity": 3},
-    {"id": "hardcore_techno", "display": "Hardcore Techno", "parent": "techno", "specificity": 3},
-
-    {"id": "folk", "display": "Folk", "parent": null, "specificity": 0, "family": "folk", "aliases": ["folk music"]},
-    {"id": "traditional_folk", "display": "Traditional Folk", "parent": "folk", "specificity": 1},
-    {"id": "neofolk", "display": "Neofolk", "parent": "folk", "specificity": 2, "aliases": ["neo-folk"]},
-    {"id": "americana", "display": "Americana", "parent": "folk", "specificity": 2},
-    {"id": "bluegrass", "display": "Bluegrass", "parent": "folk", "specificity": 2},
-    {"id": "celtic", "display": "Celtic", "parent": "folk", "specificity": 2, "aliases": ["celtic music"]},
-    {"id": "nordic_folk", "display": "Nordic Folk", "parent": "folk", "specificity": 3, "aliases": ["nordic folk music"]},
-    {"id": "singer_songwriter", "display": "Singer-Songwriter", "parent": "folk", "specificity": 1, "aliases": ["singer songwriter"]},
-
-    {"id": "country", "display": "Country", "parent": null, "specificity": 0, "aliases": ["country music", "traditional country"]},
-    {"id": "outlaw_country", "display": "Outlaw Country", "parent": "country", "specificity": 2},
-    {"id": "alt_country", "display": "Alt-Country", "parent": "country", "specificity": 2, "aliases": ["alternative country"]},
-
-    {"id": "blues", "display": "Blues", "parent": null, "specificity": 0},
-    {"id": "delta_blues", "display": "Delta Blues", "parent": "blues", "specificity": 2},
-    {"id": "electric_blues", "display": "Electric Blues", "parent": "blues", "specificity": 2},
-    {"id": "chicago_blues", "display": "Chicago Blues", "parent": "electric_blues", "specificity": 3},
-
-    {"id": "jazz", "display": "Jazz", "parent": null, "specificity": 0},
-    {"id": "bebop", "display": "Bebop", "parent": "jazz", "specificity": 2, "aliases": ["bop"]},
-    {"id": "cool_jazz", "display": "Cool Jazz", "parent": "jazz", "specificity": 2},
-    {"id": "free_jazz", "display": "Free Jazz", "parent": "jazz", "specificity": 2},
-    {"id": "jazz_fusion", "display": "Jazz Fusion", "parent": "jazz", "specificity": 2, "aliases": ["fusion", "jazz-rock"]},
-    {"id": "smooth_jazz", "display": "Smooth Jazz", "parent": "jazz", "specificity": 2},
-    {"id": "vocal_jazz", "display": "Vocal Jazz", "parent": "jazz", "specificity": 2},
-    {"id": "big_band", "display": "Big Band", "parent": "jazz", "specificity": 2},
-    {"id": "swing", "display": "Swing", "parent": "jazz", "specificity": 2},
-    {"id": "bossa_nova", "display": "Bossa Nova", "parent": "jazz", "specificity": 2},
-    {"id": "latin_jazz", "display": "Latin Jazz", "parent": "jazz", "specificity": 3},
-    {"id": "acid_jazz", "display": "Acid Jazz", "parent": "jazz", "specificity": 3},
-
-    {"id": "soul", "display": "Soul", "parent": null, "specificity": 0},
-    {"id": "neo_soul", "display": "Neo Soul", "parent": "soul", "specificity": 2, "aliases": ["neo-soul"]},
-    {"id": "motown", "display": "Motown", "parent": "soul", "specificity": 2},
-    {"id": "funk", "display": "Funk", "parent": null, "specificity": 0},
-    {"id": "funk_rock", "display": "Funk Rock", "parent": "funk", "specificity": 2},
-    {"id": "p_funk", "display": "P-Funk", "parent": "funk", "specificity": 3, "aliases": ["p funk", "pfunk"]},
-    {"id": "r_and_b", "display": "R&B", "parent": null, "specificity": 0, "aliases": ["rnb", "r and b", "rhythm and blues"]},
-    {"id": "contemporary_r_and_b", "display": "Contemporary R&B", "parent": "r_and_b", "specificity": 2, "aliases": ["contemporary rnb", "contemporary r and b"]},
-    {"id": "gospel", "display": "Gospel", "parent": null, "specificity": 0},
-
-    {"id": "hip_hop", "display": "Hip-Hop", "parent": null, "specificity": 0, "aliases": ["hip hop", "hiphop", "rap"]},
-    {"id": "boom_bap", "display": "Boom Bap", "parent": "hip_hop", "specificity": 2, "aliases": ["boom-bap"]},
-    {"id": "trap", "display": "Trap", "parent": "hip_hop", "specificity": 2},
-    {"id": "gangsta_rap", "display": "Gangsta Rap", "parent": "hip_hop", "specificity": 2, "aliases": ["gangster rap", "gangsta", "gangsta rap", "gangsta-rap", "thug rap"]},
-    {"id": "conscious_hip_hop", "display": "Conscious Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["conscious hip hop", "conscious rap"]},
-    {"id": "east_coast_hip_hop", "display": "East Coast Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["east coast hip hop", "east coast rap"]},
-    {"id": "west_coast_hip_hop", "display": "West Coast Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["west coast hip hop", "west coast rap"]},
-    {"id": "southern_hip_hop", "display": "Southern Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["southern hip hop", "dirty south"]},
-    {"id": "alternative_hip_hop", "display": "Alternative Hip-Hop", "parent": "hip_hop", "specificity": 2, "aliases": ["alternative hip hop"]},
-    {"id": "jazz_rap", "display": "Jazz Rap", "parent": "hip_hop", "specificity": 3, "aliases": ["jazz-rap"]},
-    {"id": "lo_fi_hip_hop", "display": "Lo-Fi Hip-Hop", "parent": "hip_hop", "specificity": 3, "aliases": ["lo-fi hip hop", "lofi hip hop"]},
-    {"id": "grime", "display": "Grime", "parent": "hip_hop", "specificity": 2},
-    {"id": "drill", "display": "Drill", "parent": "hip_hop", "specificity": 2},
-
-    {"id": "classical", "display": "Classical", "parent": null, "specificity": 0},
-    {"id": "orchestral", "display": "Orchestral", "parent": "classical", "specificity": 1},
-    {"id": "baroque", "display": "Baroque", "parent": "classical", "specificity": 2},
-    {"id": "romantic_era", "display": "Romantic Era", "parent": "classical", "specificity": 2, "aliases": ["romantic period"]},
-    {"id": "contemporary_classical", "display": "Contemporary Classical", "parent": "classical", "specificity": 2, "aliases": ["modern classical", "post-minimalism"]},
-    {"id": "chamber_music", "display": "Chamber Music", "parent": "classical", "specificity": 2},
-    {"id": "opera", "display": "Opera", "parent": "classical", "specificity": 2},
-    {"id": "choral", "display": "Choral", "parent": "classical", "specificity": 2},
-    {"id": "film_score", "display": "Film Score", "parent": "classical", "specificity": 2, "aliases": ["score", "original score"],
-     "scope": {"levels": ["track", "album"],
-               "confirm_release_types": ["Soundtrack"],
-               "require_confirmation": true}},
-    {"id": "video_game_music", "display": "Video Game Music", "parent": "classical", "specificity": 2, "aliases": ["game music", "vgm"],
-     "scope": {"levels": ["track", "album"],
-               "confirm_release_types": ["Soundtrack"],
-               "require_confirmation": true}},
-    {"id": "musical_theatre", "display": "Musical Theatre", "parent": "classical", "specificity": 2, "aliases": ["musical", "show tunes"],
-     "scope": {"levels": ["track", "album"],
-               "confirm_release_types": ["Soundtrack", "Audio drama"],
-               "require_confirmation": false}},
-
-    {"id": "world", "display": "World", "parent": null, "specificity": 0, "aliases": ["world music", "worldbeat"]},
-    {"id": "afrobeat", "display": "Afrobeat", "parent": "world", "specificity": 2, "aliases": ["afro-beat"]},
-    {"id": "highlife", "display": "Highlife", "parent": "afrobeat", "specificity": 3},
-    {"id": "latin", "display": "Latin", "parent": "world", "specificity": 1, "aliases": ["latin music"]},
-    {"id": "salsa", "display": "Salsa", "parent": "latin", "specificity": 2},
-    {"id": "flamenco", "display": "Flamenco", "parent": "latin", "specificity": 2},
-    {"id": "tango", "display": "Tango", "parent": "latin", "specificity": 2},
-    {"id": "bhangra", "display": "Bhangra", "parent": "world", "specificity": 2},
-    {"id": "arabic", "display": "Arabic", "parent": "world", "specificity": 2, "aliases": ["arabic music", "middle eastern"]},
-    {"id": "indian_classical", "display": "Indian Classical", "parent": "world", "specificity": 2},
-    {"id": "gagaku", "display": "Gagaku", "parent": "world", "specificity": 3},
-
-    {"id": "reggae", "display": "Reggae", "parent": null, "specificity": 0},
-    {"id": "dub", "display": "Dub", "parent": "reggae", "specificity": 2},
-    {"id": "dancehall", "display": "Dancehall", "parent": "reggae", "specificity": 2},
-    {"id": "ska", "display": "Ska", "parent": "reggae", "specificity": 2},
-    {"id": "rocksteady", "display": "Rocksteady", "parent": "reggae", "specificity": 3},
-
-    {"id": "experimental", "display": "Experimental", "parent": null, "specificity": 0},
-    {"id": "noise", "display": "Noise", "parent": "experimental", "specificity": 2},
-    {"id": "avant_garde", "display": "Avant-Garde", "parent": "experimental", "specificity": 2, "aliases": ["avant garde"]},
-    {"id": "comedy", "display": "Comedy", "parent": null, "specificity": 1,
-     "scope": {"levels": ["track", "album", "artist"],
-               "slot": "marker", "artist_requires_min_sources": 2}},
-    {"id": "soundtrack", "display": "Soundtrack", "parent": null, "specificity": 1, "aliases": ["original soundtrack", "ost"],
-     "scope": {"levels": ["track", "album"], "slot": "marker",
-               "confirm_release_types": ["Soundtrack"],
-               "confirm_album_title_patterns": ["(?i)\\b(original )?(motion picture )?soundtrack\\b", "(?i)\\bOST\\b"],
-               "require_confirmation": true}},
-    {"id": "christmas", "display": "Christmas", "parent": null, "specificity": 1, "aliases": ["xmas", "holiday", "yuletide", "christmas music"],
-     "scope": {"levels": ["track", "album"], "slot": "marker",
-               "confirm_title_patterns": ["(?i)\\b(christmas|xmas|noel|yule(tide)?|santa|sleigh|jingle bells?|silent night|mistletoe|holly)\\b"]}},
-
-    {"id": "pop_rock", "display": "Pop Rock", "parents": ["rock", "pop"], "specificity": 2, "family": "rock", "aliases": ["pop-rock"], "redundant_with": ["pop_punk"]},
-    {"id": "classic_rock", "display": "Classic Rock", "parent": "rock", "specificity": 2, "aliases": ["classic-rock"]},
-    {"id": "arena_rock", "display": "Arena Rock", "parent": "hard_rock", "specificity": 2, "aliases": ["stadium rock"]},
-    {"id": "acoustic_rock", "display": "Acoustic Rock", "parent": "rock", "specificity": 2, "aliases": ["acoustic-rock"]},
-    {"id": "symphonic_rock", "display": "Symphonic Rock", "parent": "rock", "specificity": 2, "aliases": ["symphonic-rock"]},
-    {"id": "piano_rock", "display": "Piano Rock", "parent": "rock", "specificity": 2, "aliases": ["piano-rock", "piano pop"]},
-    {"id": "ballad", "display": "Ballad", "parent": null, "specificity": 1, "aliases": ["power ballad", "acoustic ballad"]},
-    {"id": "industrial_rock", "display": "Industrial Rock", "parents": ["rock", "industrial"], "specificity": 2, "family": "rock", "aliases": ["industrial-rock"]},
-    {"id": "rock_and_roll", "display": "Rock & Roll", "parent": "rock", "specificity": 1, "aliases": ["rock and roll", "rock 'n' roll", "rock n roll", "rock'n'roll"]},
-    {"id": "glam_rock", "display": "Glam Rock", "parent": "rock", "specificity": 2, "aliases": ["glam", "glam-rock"]},
-    {"id": "psychobilly", "display": "Psychobilly", "parent": "rockabilly", "specificity": 2},
-    {"id": "britpop", "display": "Britpop", "parent": "alternative_rock", "specificity": 2, "aliases": ["brit pop", "brit-pop"]},
-    {"id": "disco", "display": "Disco", "parent": "pop", "specificity": 1, "aliases": ["euro-disco"]},
-    {"id": "dance_pop", "display": "Dance-Pop", "parent": "pop", "specificity": 2, "aliases": ["dance pop", "dancepop"]},
-    {"id": "europop", "display": "Europop", "parent": "pop", "specificity": 2, "aliases": ["euro pop", "euro-pop"], "redundant_with": ["eurodance"]},
-    {"id": "bubblegum_pop", "display": "Bubblegum Pop", "parent": "pop", "specificity": 2, "aliases": ["bubblegum", "bubblegum-pop"]},
-    {"id": "teen_pop", "display": "Teen Pop", "parent": "pop", "specificity": 2, "aliases": ["teen-pop"]},
-    {"id": "new_jack_swing", "display": "New Jack Swing", "parent": "r_and_b", "specificity": 2, "aliases": ["new-jack-swing"]},
-    {"id": "west_coast_swing", "display": "West Coast Swing", "parent": "swing", "specificity": 2, "aliases": ["west-coast-swing"]},
-    {"id": "euro_house", "display": "Euro House", "parent": "house", "specificity": 2, "aliases": ["euro-house"]},
-    {"id": "pop_rap", "display": "Pop Rap", "parent": "hip_hop", "specificity": 2, "aliases": ["pop-rap"]},
-    {"id": "funk_metal", "display": "Funk Metal", "parents": ["metal", "funk"], "specificity": 2, "family": "metal", "aliases": ["funk-metal"]},
-    {"id": "rap_metal", "display": "Rap Metal", "parents": ["metal", "hip_hop"], "specificity": 2, "family": "metal", "aliases": ["rap-metal", "rapcore", "rap rock", "rap-rock"], "redundant_with": ["nu_metal"]},
-    {"id": "sea_shanties", "display": "Sea Shanties", "parent": "folk", "specificity": 2, "aliases": ["sea shanty", "shanty", "shanties"]}
+    {
+      "id": "rock",
+      "display": "Rock",
+      "parent": null,
+      "specificity": 0,
+      "family": "rock",
+      "aliases": [
+        "rock music",
+        "aussie rock",
+        "australian rock",
+        "american rock",
+        "mainstream rock"
+      ]
+    },
+    {
+      "id": "rock_and_roll",
+      "display": "Rock & Roll",
+      "parent": "rock",
+      "specificity": 1,
+      "aliases": [
+        "rock and roll",
+        "rock 'n' roll",
+        "rock n roll",
+        "rock'n'roll"
+      ]
+    },
+    {
+      "id": "classic_rock",
+      "display": "Classic Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "classic-rock",
+        "album rock"
+      ]
+    },
+    {
+      "id": "soft_rock",
+      "display": "Soft Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "soft-rock",
+        "adult oriented rock",
+        "aor",
+        "yacht rock"
+      ]
+    },
+    {
+      "id": "heartland_rock",
+      "display": "Heartland Rock",
+      "parent": "rock",
+      "specificity": 2
+    },
+    {
+      "id": "roots_rock",
+      "display": "Roots Rock",
+      "parent": "rock",
+      "specificity": 2
+    },
+    {
+      "id": "pub_rock",
+      "display": "Pub Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "oz rock"
+      ]
+    },
+    {
+      "id": "j_rock",
+      "display": "J-Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "j rock",
+        "jrock",
+        "visual kei"
+      ]
+    },
+    {
+      "id": "alternative_rock",
+      "display": "Alternative Rock",
+      "parent": "rock",
+      "specificity": 1,
+      "aliases": [
+        "alt rock",
+        "alt. rock",
+        "alt-rock",
+        "alternative",
+        "modern rock",
+        "alternrock",
+        "geek rock"
+      ],
+      "redundant_with": [
+        "pop_punk",
+        "emo_pop",
+        "skate_punk",
+        "melodic_hardcore",
+        "post_hardcore",
+        "ska_punk"
+      ]
+    },
+    {
+      "id": "indie_rock",
+      "display": "Indie Rock",
+      "parent": "alternative_rock",
+      "specificity": 2,
+      "aliases": [
+        "indie"
+      ]
+    },
+    {
+      "id": "indie_pop",
+      "display": "Indie Pop",
+      "parents": [
+        "alternative_rock",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "indie-pop",
+        "noise pop"
+      ]
+    },
+    {
+      "id": "jangle_pop",
+      "display": "Jangle Pop",
+      "parent": "alternative_rock",
+      "specificity": 2
+    },
+    {
+      "id": "grunge",
+      "display": "Grunge",
+      "parent": "alternative_rock",
+      "specificity": 2
+    },
+    {
+      "id": "post_grunge",
+      "display": "Post-Grunge",
+      "parents": [
+        "alternative_rock",
+        "grunge"
+      ],
+      "specificity": 3,
+      "family": "rock",
+      "aliases": [
+        "post grunge",
+        "post-grunge alternative rock"
+      ]
+    },
+    {
+      "id": "britpop",
+      "display": "Britpop",
+      "parent": "alternative_rock",
+      "specificity": 2,
+      "aliases": [
+        "brit pop",
+        "brit-pop"
+      ]
+    },
+    {
+      "id": "post_britpop",
+      "display": "Post-Britpop",
+      "parent": "britpop",
+      "specificity": 3,
+      "aliases": [
+        "post britpop"
+      ]
+    },
+    {
+      "id": "shoegaze",
+      "display": "Shoegaze",
+      "parent": "alternative_rock",
+      "specificity": 2,
+      "aliases": [
+        "shoegazing"
+      ]
+    },
+    {
+      "id": "dream_pop",
+      "display": "Dream Pop",
+      "parents": [
+        "alternative_rock",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "dream-pop"
+      ]
+    },
+    {
+      "id": "noise_rock",
+      "display": "Noise Rock",
+      "parent": "alternative_rock",
+      "specificity": 2
+    },
+    {
+      "id": "emo",
+      "display": "Emo",
+      "parent": "alternative_rock",
+      "specificity": 2,
+      "aliases": [
+        "emo rock",
+        "emocore"
+      ]
+    },
+    {
+      "id": "emo_pop",
+      "display": "Emo Pop",
+      "parents": [
+        "emo",
+        "pop_punk"
+      ],
+      "specificity": 3,
+      "family": "punk",
+      "aliases": [
+        "emo-pop"
+      ]
+    },
+    {
+      "id": "midwest_emo",
+      "display": "Midwest Emo",
+      "parent": "emo",
+      "specificity": 3
+    },
+    {
+      "id": "dance_rock",
+      "display": "Dance-Rock",
+      "parents": [
+        "alternative_rock",
+        "dance_pop"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "dance rock",
+        "alternative dance",
+        "indie dance"
+      ]
+    },
+    {
+      "id": "hard_rock",
+      "display": "Hard Rock",
+      "parent": "rock",
+      "specificity": 1,
+      "aliases": [
+        "hard-rock",
+        "hardnheavy",
+        "hard n heavy"
+      ],
+      "redundant_with": [
+        "stoner_metal",
+        "southern_metal"
+      ]
+    },
+    {
+      "id": "blues_rock",
+      "display": "Blues Rock",
+      "parents": [
+        "hard_rock",
+        "blues"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "blues-rock"
+      ]
+    },
+    {
+      "id": "arena_rock",
+      "display": "Arena Rock",
+      "parent": "hard_rock",
+      "specificity": 2,
+      "aliases": [
+        "stadium rock"
+      ]
+    },
+    {
+      "id": "glam_rock",
+      "display": "Glam Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "glam",
+        "glam-rock"
+      ]
+    },
+    {
+      "id": "psychedelic_rock",
+      "display": "Psychedelic Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "psych rock",
+        "psychedelic",
+        "neo-psychedelia",
+        "heavy psych",
+        "acid rock"
+      ]
+    },
+    {
+      "id": "space_rock",
+      "display": "Space Rock",
+      "parent": "psychedelic_rock",
+      "specificity": 3
+    },
+    {
+      "id": "anatolian_rock",
+      "display": "Anatolian Rock",
+      "parent": "psychedelic_rock",
+      "specificity": 3
+    },
+    {
+      "id": "stoner_rock",
+      "display": "Stoner Rock",
+      "parent": "psychedelic_rock",
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "desert rock"
+      ]
+    },
+    {
+      "id": "progressive_rock",
+      "display": "Progressive Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "prog rock",
+        "prog-rock"
+      ]
+    },
+    {
+      "id": "art_rock",
+      "display": "Art Rock",
+      "parent": "progressive_rock",
+      "specificity": 2
+    },
+    {
+      "id": "symphonic_rock",
+      "display": "Symphonic Rock",
+      "parent": "progressive_rock",
+      "specificity": 2,
+      "aliases": [
+        "symphonic-rock"
+      ]
+    },
+    {
+      "id": "krautrock",
+      "display": "Krautrock",
+      "parent": "progressive_rock",
+      "specificity": 2
+    },
+    {
+      "id": "rock_opera",
+      "display": "Rock Opera",
+      "parent": "rock",
+      "specificity": 3
+    },
+    {
+      "id": "experimental_rock",
+      "display": "Experimental Rock",
+      "parents": [
+        "rock",
+        "experimental"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "avant-rock"
+      ]
+    },
+    {
+      "id": "post_rock",
+      "display": "Post-Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "post rock"
+      ]
+    },
+    {
+      "id": "math_rock",
+      "display": "Math Rock",
+      "parent": "post_rock",
+      "specificity": 3
+    },
+    {
+      "id": "garage_rock",
+      "display": "Garage Rock",
+      "parent": "rock",
+      "specificity": 2
+    },
+    {
+      "id": "surf_rock",
+      "display": "Surf Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "surf"
+      ]
+    },
+    {
+      "id": "southern_rock",
+      "display": "Southern Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "swamp rock"
+      ]
+    },
+    {
+      "id": "folk_rock",
+      "display": "Folk Rock",
+      "parents": [
+        "rock",
+        "folk"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "folk-rock"
+      ]
+    },
+    {
+      "id": "medieval_rock",
+      "display": "Medieval Rock",
+      "parents": [
+        "folk_rock",
+        "medieval"
+      ],
+      "specificity": 3,
+      "family": "rock",
+      "aliases": [
+        "mittelalter rock"
+      ]
+    },
+    {
+      "id": "country_rock",
+      "display": "Country Rock",
+      "parents": [
+        "rock",
+        "country"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "country-rock"
+      ]
+    },
+    {
+      "id": "rockabilly",
+      "display": "Rockabilly",
+      "parent": "rock",
+      "specificity": 2
+    },
+    {
+      "id": "psychobilly",
+      "display": "Psychobilly",
+      "parent": "rockabilly",
+      "specificity": 3
+    },
+    {
+      "id": "horror_rock",
+      "display": "Horror Rock",
+      "parent": "rock",
+      "specificity": 3,
+      "aliases": [
+        "horror punk"
+      ]
+    },
+    {
+      "id": "pop_rock",
+      "display": "Pop Rock",
+      "parents": [
+        "rock",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "pop-rock",
+        "rock pop"
+      ],
+      "redundant_with": [
+        "pop_punk",
+        "emo_pop"
+      ]
+    },
+    {
+      "id": "acoustic_rock",
+      "display": "Acoustic Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "acoustic-rock"
+      ]
+    },
+    {
+      "id": "piano_rock",
+      "display": "Piano Rock",
+      "parent": "rock",
+      "specificity": 2,
+      "aliases": [
+        "piano-rock",
+        "piano pop",
+        "pianorock"
+      ]
+    },
+    {
+      "id": "comedy_rock",
+      "display": "Comedy Rock",
+      "parents": [
+        "rock",
+        "comedy"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "comedy-rock"
+      ],
+      "scope": {
+        "levels": [
+          "track",
+          "album",
+          "artist"
+        ],
+        "artist_requires_min_sources": 2
+      }
+    },
+    {
+      "id": "funk_rock",
+      "display": "Funk Rock",
+      "parents": [
+        "rock",
+        "funk"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "funk-rock"
+      ]
+    },
+    {
+      "id": "industrial_rock",
+      "display": "Industrial Rock",
+      "parents": [
+        "rock",
+        "industrial"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "industrial-rock"
+      ]
+    },
+    {
+      "id": "electronic_rock",
+      "display": "Electronic Rock",
+      "parents": [
+        "rock",
+        "electronic"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "electro rock",
+        "electro-rock"
+      ],
+      "redundant_with": [
+        "industrial_rock",
+        "industrial_metal",
+        "dance_rock",
+        "electronicore"
+      ]
+    },
+    {
+      "id": "rap_rock",
+      "display": "Rap Rock",
+      "parents": [
+        "rock",
+        "hip_hop"
+      ],
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "rap-rock"
+      ]
+    },
+    {
+      "id": "christian_rock",
+      "display": "Christian Rock",
+      "parents": [
+        "rock",
+        "christian"
+      ],
+      "specificity": 2,
+      "family": "rock"
+    },
+    {
+      "id": "metal",
+      "display": "Metal",
+      "parent": "rock",
+      "specificity": 0,
+      "family": "metal",
+      "aliases": [
+        "metal music"
+      ]
+    },
+    {
+      "id": "heavy_metal",
+      "display": "Heavy Metal",
+      "parent": "metal",
+      "specificity": 1,
+      "aliases": [
+        "heavy-metal",
+        "british metal",
+        "general heavy metal",
+        "melodic metal"
+      ],
+      "redundant_with": [
+        "nu_metal",
+        "alternative_metal",
+        "metalcore",
+        "melodic_metalcore",
+        "progressive_metalcore",
+        "electronicore",
+        "mathcore",
+        "deathcore",
+        "hardcore",
+        "rap_metal",
+        "funk_metal",
+        "post_metal",
+        "kawaii_metal",
+        "grindcore",
+        "deathgrind",
+        "noisecore"
+      ]
+    },
+    {
+      "id": "traditional_heavy_metal",
+      "display": "Traditional Heavy Metal",
+      "parent": "heavy_metal",
+      "specificity": 2,
+      "aliases": [
+        "trad metal",
+        "nwobhm",
+        "new wave of british heavy metal",
+        "classic metal",
+        "classic british metal"
+      ]
+    },
+    {
+      "id": "glam_metal",
+      "display": "Glam Metal",
+      "parents": [
+        "heavy_metal",
+        "hard_rock"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "hair metal",
+        "pop metal",
+        "pop-metal",
+        "sleaze rock"
+      ]
+    },
+    {
+      "id": "neoclassical_metal",
+      "display": "Neoclassical Metal",
+      "parent": "heavy_metal",
+      "specificity": 3,
+      "aliases": [
+        "neo-classical metal"
+      ]
+    },
+    {
+      "id": "speed_metal",
+      "display": "Speed Metal",
+      "parent": "heavy_metal",
+      "specificity": 2
+    },
+    {
+      "id": "thrash_metal",
+      "display": "Thrash Metal",
+      "parent": "heavy_metal",
+      "specificity": 2,
+      "aliases": [
+        "thrash"
+      ]
+    },
+    {
+      "id": "technical_thrash_metal",
+      "display": "Technical Thrash Metal",
+      "parent": "thrash_metal",
+      "specificity": 3,
+      "aliases": [
+        "tech thrash"
+      ]
+    },
+    {
+      "id": "crossover_thrash",
+      "display": "Crossover Thrash",
+      "parents": [
+        "thrash_metal",
+        "hardcore_punk"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "crossover"
+      ]
+    },
+    {
+      "id": "groove_metal",
+      "display": "Groove Metal",
+      "parent": "heavy_metal",
+      "specificity": 2
+    },
+    {
+      "id": "southern_metal",
+      "display": "Southern Metal",
+      "parents": [
+        "heavy_metal",
+        "southern_rock"
+      ],
+      "specificity": 3,
+      "family": "metal"
+    },
+    {
+      "id": "death_metal",
+      "display": "Death Metal",
+      "parent": "heavy_metal",
+      "specificity": 2
+    },
+    {
+      "id": "melodic_death_metal",
+      "display": "Melodic Death Metal",
+      "parent": "death_metal",
+      "specificity": 3,
+      "aliases": [
+        "melodeath",
+        "modern melodic death metal"
+      ]
+    },
+    {
+      "id": "technical_death_metal",
+      "display": "Technical Death Metal",
+      "parent": "death_metal",
+      "specificity": 3,
+      "aliases": [
+        "tech death"
+      ]
+    },
+    {
+      "id": "progressive_death_metal",
+      "display": "Progressive Death Metal",
+      "parents": [
+        "death_metal",
+        "progressive_metal"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "prog death"
+      ]
+    },
+    {
+      "id": "black_metal",
+      "display": "Black Metal",
+      "parent": "heavy_metal",
+      "specificity": 2
+    },
+    {
+      "id": "melodic_black_metal",
+      "display": "Melodic Black Metal",
+      "parent": "black_metal",
+      "specificity": 3
+    },
+    {
+      "id": "atmospheric_black_metal",
+      "display": "Atmospheric Black Metal",
+      "parent": "black_metal",
+      "specificity": 3
+    },
+    {
+      "id": "symphonic_black_metal",
+      "display": "Symphonic Black Metal",
+      "parent": "black_metal",
+      "specificity": 3
+    },
+    {
+      "id": "blackgaze",
+      "display": "Blackgaze",
+      "parents": [
+        "black_metal",
+        "shoegaze"
+      ],
+      "specificity": 3,
+      "family": "metal"
+    },
+    {
+      "id": "doom_metal",
+      "display": "Doom Metal",
+      "parent": "heavy_metal",
+      "specificity": 2,
+      "aliases": [
+        "doom"
+      ]
+    },
+    {
+      "id": "traditional_doom_metal",
+      "display": "Traditional Doom Metal",
+      "parent": "doom_metal",
+      "specificity": 3,
+      "aliases": [
+        "traditional doom"
+      ]
+    },
+    {
+      "id": "epic_doom_metal",
+      "display": "Epic Doom Metal",
+      "parent": "doom_metal",
+      "specificity": 3,
+      "aliases": [
+        "epic doom"
+      ]
+    },
+    {
+      "id": "death_doom",
+      "display": "Death-Doom",
+      "parents": [
+        "doom_metal",
+        "death_metal"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "death doom",
+        "death/doom",
+        "death/doom metal",
+        "death-doom metal"
+      ]
+    },
+    {
+      "id": "funeral_doom",
+      "display": "Funeral Doom",
+      "parent": "doom_metal",
+      "specificity": 3
+    },
+    {
+      "id": "gothic_doom_metal",
+      "display": "Gothic Doom Metal",
+      "parents": [
+        "doom_metal",
+        "gothic_metal"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "gothic doom"
+      ]
+    },
+    {
+      "id": "sludge_metal",
+      "display": "Sludge Metal",
+      "parent": "doom_metal",
+      "specificity": 2,
+      "aliases": [
+        "sludge"
+      ]
+    },
+    {
+      "id": "stoner_metal",
+      "display": "Stoner Metal",
+      "parents": [
+        "doom_metal",
+        "stoner_rock"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "stoner doom"
+      ]
+    },
+    {
+      "id": "power_metal",
+      "display": "Power Metal",
+      "parent": "heavy_metal",
+      "specificity": 2,
+      "aliases": [
+        "melodic power metal"
+      ]
+    },
+    {
+      "id": "symphonic_power_metal",
+      "display": "Symphonic Power Metal",
+      "parents": [
+        "power_metal",
+        "symphonic_metal"
+      ],
+      "specificity": 3,
+      "family": "metal"
+    },
+    {
+      "id": "symphonic_metal",
+      "display": "Symphonic Metal",
+      "parent": "heavy_metal",
+      "specificity": 2
+    },
+    {
+      "id": "gothic_metal",
+      "display": "Gothic Metal",
+      "parent": "heavy_metal",
+      "specificity": 2,
+      "aliases": [
+        "goth metal"
+      ]
+    },
+    {
+      "id": "progressive_metal",
+      "display": "Progressive Metal",
+      "parent": "heavy_metal",
+      "specificity": 2,
+      "aliases": [
+        "prog metal",
+        "prog-metal"
+      ]
+    },
+    {
+      "id": "djent",
+      "display": "Djent",
+      "parent": "progressive_metal",
+      "specificity": 3
+    },
+    {
+      "id": "avant_garde_metal",
+      "display": "Avant-Garde Metal",
+      "parents": [
+        "heavy_metal",
+        "experimental"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "avantgarde metal",
+        "experimental metal"
+      ]
+    },
+    {
+      "id": "folk_metal",
+      "display": "Folk Metal",
+      "parents": [
+        "heavy_metal",
+        "folk"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "epic folk metal"
+      ]
+    },
+    {
+      "id": "viking_metal",
+      "display": "Viking Metal",
+      "parent": "folk_metal",
+      "specificity": 3
+    },
+    {
+      "id": "pagan_metal",
+      "display": "Pagan Metal",
+      "parent": "folk_metal",
+      "specificity": 3
+    },
+    {
+      "id": "celtic_metal",
+      "display": "Celtic Metal",
+      "parents": [
+        "folk_metal",
+        "celtic"
+      ],
+      "specificity": 3,
+      "family": "metal"
+    },
+    {
+      "id": "medieval_metal",
+      "display": "Medieval Metal",
+      "parents": [
+        "folk_metal",
+        "medieval"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "mittelalter metal"
+      ]
+    },
+    {
+      "id": "industrial_metal",
+      "display": "Industrial Metal",
+      "parents": [
+        "heavy_metal",
+        "industrial"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "cyber metal"
+      ]
+    },
+    {
+      "id": "neue_deutsche_haerte",
+      "display": "Neue Deutsche Härte",
+      "parent": "industrial_metal",
+      "specificity": 3,
+      "aliases": [
+        "neue deutsche harte",
+        "ndh"
+      ]
+    },
+    {
+      "id": "christian_metal",
+      "display": "Christian Metal",
+      "parents": [
+        "heavy_metal",
+        "christian"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "white metal"
+      ]
+    },
+    {
+      "id": "kawaii_metal",
+      "display": "Kawaii Metal",
+      "parents": [
+        "metal",
+        "j_pop"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "idol metal"
+      ]
+    },
+    {
+      "id": "post_metal",
+      "display": "Post-Metal",
+      "parent": "metal",
+      "specificity": 2,
+      "aliases": [
+        "post metal",
+        "atmospheric sludge"
+      ]
+    },
+    {
+      "id": "alternative_metal",
+      "display": "Alternative Metal",
+      "parents": [
+        "metal",
+        "alternative_rock"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "alt metal",
+        "alt. metal",
+        "alt-metal",
+        "heavy alternative"
+      ]
+    },
+    {
+      "id": "nu_metal",
+      "display": "Nu Metal",
+      "parent": "alternative_metal",
+      "specificity": 2,
+      "aliases": [
+        "nu-metal",
+        "nü metal",
+        "nü-metal"
+      ]
+    },
+    {
+      "id": "rap_metal",
+      "display": "Rap Metal",
+      "parents": [
+        "metal",
+        "hip_hop"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "rap-metal",
+        "rapcore"
+      ],
+      "redundant_with": [
+        "nu_metal"
+      ]
+    },
+    {
+      "id": "funk_metal",
+      "display": "Funk Metal",
+      "parents": [
+        "metal",
+        "funk"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "funk-metal"
+      ]
+    },
+    {
+      "id": "hardcore",
+      "display": "Hardcore",
+      "parents": [
+        "metal",
+        "hardcore_punk"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "metallic hardcore",
+        "beatdown",
+        "beatdown hardcore",
+        "hardcore metal",
+        "nyhc",
+        "new york hardcore",
+        "metal hardcore"
+      ]
+    },
+    {
+      "id": "metalcore",
+      "display": "Metalcore",
+      "parents": [
+        "hardcore",
+        "metal"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "metal-core"
+      ]
+    },
+    {
+      "id": "melodic_metalcore",
+      "display": "Melodic Metalcore",
+      "parent": "metalcore",
+      "specificity": 3,
+      "aliases": [
+        "alternative metalcore"
+      ]
+    },
+    {
+      "id": "progressive_metalcore",
+      "display": "Progressive Metalcore",
+      "parents": [
+        "metalcore",
+        "progressive_metal"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "prog metalcore"
+      ]
+    },
+    {
+      "id": "electronicore",
+      "display": "Electronicore",
+      "parents": [
+        "metalcore",
+        "electronic"
+      ],
+      "specificity": 3,
+      "family": "metal",
+      "aliases": [
+        "trancecore",
+        "synthcore",
+        "trance metal"
+      ]
+    },
+    {
+      "id": "deathcore",
+      "display": "Deathcore",
+      "parents": [
+        "metalcore",
+        "death_metal"
+      ],
+      "specificity": 3,
+      "family": "metal"
+    },
+    {
+      "id": "mathcore",
+      "display": "Mathcore",
+      "parent": "metalcore",
+      "specificity": 3
+    },
+    {
+      "id": "grindcore",
+      "display": "Grindcore",
+      "parents": [
+        "hardcore_punk",
+        "death_metal"
+      ],
+      "specificity": 2,
+      "family": "metal",
+      "aliases": [
+        "grind"
+      ]
+    },
+    {
+      "id": "deathgrind",
+      "display": "Deathgrind",
+      "parents": [
+        "grindcore",
+        "death_metal"
+      ],
+      "specificity": 3,
+      "family": "metal"
+    },
+    {
+      "id": "noisecore",
+      "display": "Noisecore",
+      "parent": "grindcore",
+      "specificity": 3
+    },
+    {
+      "id": "punk",
+      "display": "Punk",
+      "parent": "rock",
+      "specificity": 0,
+      "family": "punk",
+      "aliases": [
+        "punk rock",
+        "punk-rock",
+        "punk revival",
+        "l.a. punk"
+      ]
+    },
+    {
+      "id": "pop_punk",
+      "display": "Pop Punk",
+      "parent": "punk",
+      "specificity": 2,
+      "aliases": [
+        "pop-punk",
+        "punk-pop",
+        "punk pop",
+        "classic pop punk"
+      ]
+    },
+    {
+      "id": "skate_punk",
+      "display": "Skate Punk",
+      "parent": "punk",
+      "specificity": 3,
+      "aliases": [
+        "skatepunk",
+        "skate-punk",
+        "melodic punk"
+      ]
+    },
+    {
+      "id": "ska_punk",
+      "display": "Ska Punk",
+      "parents": [
+        "punk",
+        "ska"
+      ],
+      "specificity": 2,
+      "family": "punk",
+      "aliases": [
+        "ska-punk",
+        "third wave ska revival"
+      ]
+    },
+    {
+      "id": "celtic_punk",
+      "display": "Celtic Punk",
+      "parents": [
+        "punk",
+        "celtic"
+      ],
+      "specificity": 3,
+      "family": "punk"
+    },
+    {
+      "id": "folk_punk",
+      "display": "Folk Punk",
+      "parents": [
+        "punk",
+        "folk"
+      ],
+      "specificity": 3,
+      "family": "punk",
+      "aliases": [
+        "folk-punk"
+      ],
+      "redundant_with": [
+        "celtic_punk"
+      ]
+    },
+    {
+      "id": "gypsy_punk",
+      "display": "Gypsy Punk",
+      "parents": [
+        "punk",
+        "folk_punk"
+      ],
+      "specificity": 3,
+      "family": "punk"
+    },
+    {
+      "id": "punk_blues",
+      "display": "Punk Blues",
+      "parents": [
+        "punk",
+        "blues"
+      ],
+      "specificity": 3,
+      "family": "punk"
+    },
+    {
+      "id": "anarcho_punk",
+      "display": "Anarcho-Punk",
+      "parent": "punk",
+      "specificity": 3,
+      "aliases": [
+        "anarcho punk"
+      ]
+    },
+    {
+      "id": "oi",
+      "display": "Oi!",
+      "parent": "punk",
+      "specificity": 3,
+      "aliases": [
+        "street punk"
+      ]
+    },
+    {
+      "id": "riot_grrrl",
+      "display": "Riot Grrrl",
+      "parent": "punk",
+      "specificity": 3
+    },
+    {
+      "id": "alternative_punk",
+      "display": "Alternative Punk",
+      "parents": [
+        "punk",
+        "alternative_rock"
+      ],
+      "specificity": 2,
+      "family": "punk",
+      "aliases": [
+        "alt punk"
+      ],
+      "redundant_with": [
+        "pop_punk",
+        "skate_punk",
+        "hardcore_punk",
+        "melodic_hardcore",
+        "post_hardcore",
+        "screamo",
+        "ska_punk",
+        "celtic_punk",
+        "folk_punk",
+        "gypsy_punk",
+        "emo_pop",
+        "anarcho_punk",
+        "oi",
+        "crossover_thrash"
+      ]
+    },
+    {
+      "id": "hardcore_punk",
+      "display": "Hardcore Punk",
+      "parent": "punk",
+      "specificity": 2,
+      "aliases": [
+        "hardcore punk rock",
+        "hc punk"
+      ]
+    },
+    {
+      "id": "melodic_hardcore",
+      "display": "Melodic Hardcore",
+      "parent": "hardcore_punk",
+      "specificity": 3
+    },
+    {
+      "id": "post_hardcore",
+      "display": "Post-Hardcore",
+      "parent": "hardcore_punk",
+      "specificity": 2,
+      "aliases": [
+        "post hardcore"
+      ]
+    },
+    {
+      "id": "screamo",
+      "display": "Screamo",
+      "parent": "post_hardcore",
+      "specificity": 3,
+      "aliases": [
+        "emoviolence",
+        "pop screamo"
+      ]
+    },
+    {
+      "id": "post_punk",
+      "display": "Post-Punk",
+      "parent": "punk",
+      "specificity": 2,
+      "aliases": [
+        "post punk"
+      ]
+    },
+    {
+      "id": "post_punk_revival",
+      "display": "Post-Punk Revival",
+      "parents": [
+        "post_punk",
+        "indie_rock"
+      ],
+      "specificity": 3,
+      "family": "punk",
+      "aliases": [
+        "garage rock revival"
+      ]
+    },
+    {
+      "id": "dance_punk",
+      "display": "Dance-Punk",
+      "parents": [
+        "post_punk",
+        "dance_rock"
+      ],
+      "specificity": 3,
+      "family": "punk",
+      "aliases": [
+        "dance punk",
+        "new rave",
+        "synthpunk",
+        "dance-punk revival"
+      ]
+    },
+    {
+      "id": "gothic_rock",
+      "display": "Gothic Rock",
+      "parent": "post_punk",
+      "specificity": 2,
+      "family": "rock",
+      "aliases": [
+        "goth rock",
+        "goth",
+        "gothic"
+      ]
+    },
+    {
+      "id": "deathrock",
+      "display": "Deathrock",
+      "parent": "gothic_rock",
+      "specificity": 3,
+      "aliases": [
+        "death rock"
+      ]
+    },
+    {
+      "id": "dark_cabaret",
+      "display": "Dark Cabaret",
+      "parent": "gothic_rock",
+      "specificity": 3
+    },
+    {
+      "id": "darkwave",
+      "display": "Darkwave",
+      "parents": [
+        "post_punk",
+        "electronic"
+      ],
+      "specificity": 2,
+      "family": "punk",
+      "aliases": [
+        "dark wave",
+        "neoclassical dark wave"
+      ]
+    },
+    {
+      "id": "coldwave",
+      "display": "Coldwave",
+      "parents": [
+        "post_punk",
+        "darkwave"
+      ],
+      "specificity": 3,
+      "family": "punk"
+    },
+    {
+      "id": "no_wave",
+      "display": "No Wave",
+      "parent": "post_punk",
+      "specificity": 3
+    },
+    {
+      "id": "pop",
+      "display": "Pop",
+      "parent": null,
+      "specificity": 0,
+      "family": "pop",
+      "aliases": [
+        "contemporary pop",
+        "pop music"
+      ]
+    },
+    {
+      "id": "adult_contemporary",
+      "display": "Adult Contemporary",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "soft pop"
+      ]
+    },
+    {
+      "id": "alternative_pop",
+      "display": "Alternative Pop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "alt-pop",
+        "alt pop",
+        "adult alternative pop",
+        "indie electropop"
+      ],
+      "redundant_with": [
+        "indie_pop",
+        "dream_pop",
+        "art_pop",
+        "electropop"
+      ]
+    },
+    {
+      "id": "dance_pop",
+      "display": "Dance-Pop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "dance pop",
+        "dancepop"
+      ]
+    },
+    {
+      "id": "europop",
+      "display": "Europop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "euro pop",
+        "euro-pop"
+      ],
+      "redundant_with": [
+        "eurodance"
+      ]
+    },
+    {
+      "id": "teen_pop",
+      "display": "Teen Pop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "teen-pop"
+      ]
+    },
+    {
+      "id": "bubblegum_pop",
+      "display": "Bubblegum Pop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "bubblegum",
+        "bubblegum-pop"
+      ]
+    },
+    {
+      "id": "disco",
+      "display": "Disco",
+      "parent": "pop",
+      "specificity": 1,
+      "aliases": [
+        "euro-disco"
+      ]
+    },
+    {
+      "id": "nu_disco",
+      "display": "Nu-Disco",
+      "parent": "disco",
+      "specificity": 3,
+      "aliases": [
+        "nu disco"
+      ]
+    },
+    {
+      "id": "new_wave",
+      "display": "New Wave",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "new-wave",
+        "permanent wave"
+      ]
+    },
+    {
+      "id": "power_pop",
+      "display": "Power Pop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "power-pop"
+      ],
+      "redundant_with": [
+        "pop_punk",
+        "emo_pop"
+      ]
+    },
+    {
+      "id": "chamber_pop",
+      "display": "Chamber Pop",
+      "parent": "pop",
+      "specificity": 3
+    },
+    {
+      "id": "art_pop",
+      "display": "Art Pop",
+      "parent": "pop",
+      "specificity": 3
+    },
+    {
+      "id": "baroque_pop",
+      "display": "Baroque Pop",
+      "parent": "pop",
+      "specificity": 3
+    },
+    {
+      "id": "sophisti_pop",
+      "display": "Sophisti-Pop",
+      "parent": "pop",
+      "specificity": 3
+    },
+    {
+      "id": "psychedelic_pop",
+      "display": "Psychedelic Pop",
+      "parents": [
+        "pop",
+        "psychedelic_rock"
+      ],
+      "specificity": 3,
+      "family": "pop",
+      "aliases": [
+        "sunshine pop"
+      ]
+    },
+    {
+      "id": "hyperpop",
+      "display": "Hyperpop",
+      "parent": "pop",
+      "specificity": 3
+    },
+    {
+      "id": "k_pop",
+      "display": "K-Pop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "kpop",
+        "k pop"
+      ]
+    },
+    {
+      "id": "j_pop",
+      "display": "J-Pop",
+      "parent": "pop",
+      "specificity": 2,
+      "aliases": [
+        "jpop",
+        "j pop"
+      ]
+    },
+    {
+      "id": "city_pop",
+      "display": "City Pop",
+      "parent": "pop",
+      "specificity": 3
+    },
+    {
+      "id": "synthpop",
+      "display": "Synthpop",
+      "parents": [
+        "pop",
+        "electronic"
+      ],
+      "specificity": 2,
+      "family": "electronic",
+      "aliases": [
+        "synth pop",
+        "synth-pop"
+      ]
+    },
+    {
+      "id": "electropop",
+      "display": "Electropop",
+      "parent": "synthpop",
+      "specificity": 2,
+      "aliases": [
+        "electro pop",
+        "electro-pop"
+      ]
+    },
+    {
+      "id": "futurepop",
+      "display": "Futurepop",
+      "parents": [
+        "ebm",
+        "synthpop"
+      ],
+      "specificity": 3,
+      "family": "electronic"
+    },
+    {
+      "id": "electronic",
+      "display": "Electronic",
+      "parent": null,
+      "specificity": 0,
+      "family": "electronic",
+      "aliases": [
+        "electronica",
+        "electronic music"
+      ]
+    },
+    {
+      "id": "edm",
+      "display": "EDM",
+      "parent": "electronic",
+      "specificity": 1,
+      "aliases": [
+        "electronic dance music"
+      ]
+    },
+    {
+      "id": "ambient",
+      "display": "Ambient",
+      "parent": "electronic",
+      "specificity": 1
+    },
+    {
+      "id": "dark_ambient",
+      "display": "Dark Ambient",
+      "parent": "ambient",
+      "specificity": 2
+    },
+    {
+      "id": "dungeon_synth",
+      "display": "Dungeon Synth",
+      "parent": "dark_ambient",
+      "specificity": 3
+    },
+    {
+      "id": "new_age",
+      "display": "New Age",
+      "parent": "ambient",
+      "specificity": 2,
+      "aliases": [
+        "new-age"
+      ]
+    },
+    {
+      "id": "drone",
+      "display": "Drone",
+      "parent": "ambient",
+      "specificity": 2
+    },
+    {
+      "id": "idm",
+      "display": "IDM",
+      "parent": "electronic",
+      "specificity": 2,
+      "aliases": [
+        "intelligent dance music"
+      ]
+    },
+    {
+      "id": "glitch",
+      "display": "Glitch",
+      "parent": "electronic",
+      "specificity": 2
+    },
+    {
+      "id": "leftfield",
+      "display": "Leftfield",
+      "parent": "electronic",
+      "specificity": 3
+    },
+    {
+      "id": "downtempo",
+      "display": "Downtempo",
+      "parent": "electronic",
+      "specificity": 2
+    },
+    {
+      "id": "trip_hop",
+      "display": "Trip Hop",
+      "parent": "electronic",
+      "specificity": 2,
+      "aliases": [
+        "trip-hop"
+      ]
+    },
+    {
+      "id": "synthwave",
+      "display": "Synthwave",
+      "parent": "electronic",
+      "specificity": 2,
+      "aliases": [
+        "retrowave",
+        "outrun"
+      ]
+    },
+    {
+      "id": "vaporwave",
+      "display": "Vaporwave",
+      "parent": "electronic",
+      "specificity": 3
+    },
+    {
+      "id": "chiptune",
+      "display": "Chiptune",
+      "parent": "electronic",
+      "specificity": 2,
+      "aliases": [
+        "8-bit",
+        "8 bit"
+      ]
+    },
+    {
+      "id": "electro",
+      "display": "Electro",
+      "parent": "electronic",
+      "specificity": 2,
+      "aliases": [
+        "elektro"
+      ]
+    },
+    {
+      "id": "electroclash",
+      "display": "Electroclash",
+      "parent": "electro",
+      "specificity": 3
+    },
+    {
+      "id": "industrial",
+      "display": "Industrial",
+      "parent": "electronic",
+      "specificity": 1,
+      "aliases": [
+        "industrial music"
+      ]
+    },
+    {
+      "id": "post_industrial",
+      "display": "Post-Industrial",
+      "parent": "industrial",
+      "specificity": 2,
+      "aliases": [
+        "post industrial"
+      ]
+    },
+    {
+      "id": "ebm",
+      "display": "EBM",
+      "parent": "industrial",
+      "specificity": 2,
+      "aliases": [
+        "electronic body music",
+        "industrial dance"
+      ]
+    },
+    {
+      "id": "electro_industrial",
+      "display": "Electro-Industrial",
+      "parent": "industrial",
+      "specificity": 2,
+      "aliases": [
+        "electro industrial"
+      ]
+    },
+    {
+      "id": "aggrotech",
+      "display": "Aggrotech",
+      "parent": "electro_industrial",
+      "specificity": 3,
+      "aliases": [
+        "hellektro"
+      ]
+    },
+    {
+      "id": "house",
+      "display": "House",
+      "parent": "edm",
+      "specificity": 2,
+      "aliases": [
+        "house music"
+      ]
+    },
+    {
+      "id": "deep_house",
+      "display": "Deep House",
+      "parent": "house",
+      "specificity": 3
+    },
+    {
+      "id": "progressive_house",
+      "display": "Progressive House",
+      "parent": "house",
+      "specificity": 3
+    },
+    {
+      "id": "tech_house",
+      "display": "Tech House",
+      "parent": "house",
+      "specificity": 3
+    },
+    {
+      "id": "acid_house",
+      "display": "Acid House",
+      "parent": "house",
+      "specificity": 3
+    },
+    {
+      "id": "electro_house",
+      "display": "Electro House",
+      "parent": "house",
+      "specificity": 3,
+      "aliases": [
+        "electro-house"
+      ]
+    },
+    {
+      "id": "euro_house",
+      "display": "Euro House",
+      "parent": "house",
+      "specificity": 3,
+      "aliases": [
+        "euro-house"
+      ]
+    },
+    {
+      "id": "techno",
+      "display": "Techno",
+      "parent": "edm",
+      "specificity": 2
+    },
+    {
+      "id": "minimal_techno",
+      "display": "Minimal Techno",
+      "parent": "techno",
+      "specificity": 3,
+      "aliases": [
+        "minimal"
+      ]
+    },
+    {
+      "id": "hardcore_techno",
+      "display": "Hardcore Techno",
+      "parent": "techno",
+      "specificity": 3,
+      "aliases": [
+        "hardcore electronic",
+        "happy hardcore"
+      ]
+    },
+    {
+      "id": "gabber",
+      "display": "Gabber",
+      "parent": "hardcore_techno",
+      "specificity": 3,
+      "aliases": [
+        "gabba"
+      ]
+    },
+    {
+      "id": "hardstyle",
+      "display": "Hardstyle",
+      "parent": "edm",
+      "specificity": 2
+    },
+    {
+      "id": "trance",
+      "display": "Trance",
+      "parent": "edm",
+      "specificity": 2
+    },
+    {
+      "id": "progressive_trance",
+      "display": "Progressive Trance",
+      "parent": "trance",
+      "specificity": 3
+    },
+    {
+      "id": "psytrance",
+      "display": "Psytrance",
+      "parent": "trance",
+      "specificity": 3,
+      "aliases": [
+        "psy-trance",
+        "psy trance",
+        "psychedelic trance",
+        "goa trance"
+      ]
+    },
+    {
+      "id": "eurodance",
+      "display": "Eurodance",
+      "parent": "edm",
+      "specificity": 2,
+      "aliases": [
+        "euro dance"
+      ]
+    },
+    {
+      "id": "jungle",
+      "display": "Jungle",
+      "parent": "electronic",
+      "specificity": 2
+    },
+    {
+      "id": "drum_and_bass",
+      "display": "Drum and Bass",
+      "parent": "edm",
+      "specificity": 2,
+      "aliases": [
+        "drum & bass",
+        "drum n bass",
+        "dnb",
+        "d&b"
+      ]
+    },
+    {
+      "id": "liquid_drum_and_bass",
+      "display": "Liquid Drum and Bass",
+      "parent": "drum_and_bass",
+      "specificity": 3,
+      "aliases": [
+        "liquid funk",
+        "liquid dnb"
+      ]
+    },
+    {
+      "id": "neurofunk",
+      "display": "Neurofunk",
+      "parent": "drum_and_bass",
+      "specificity": 3
+    },
+    {
+      "id": "breakbeat",
+      "display": "Breakbeat",
+      "parent": "electronic",
+      "specificity": 2,
+      "aliases": [
+        "breaks"
+      ]
+    },
+    {
+      "id": "progressive_breaks",
+      "display": "Progressive Breaks",
+      "parent": "breakbeat",
+      "specificity": 3
+    },
+    {
+      "id": "big_beat",
+      "display": "Big Beat",
+      "parent": "breakbeat",
+      "specificity": 3
+    },
+    {
+      "id": "breakcore",
+      "display": "Breakcore",
+      "parent": "breakbeat",
+      "specificity": 3
+    },
+    {
+      "id": "uk_garage",
+      "display": "UK Garage",
+      "parent": "edm",
+      "specificity": 2,
+      "aliases": [
+        "ukg",
+        "2-step",
+        "2 step",
+        "speed garage"
+      ]
+    },
+    {
+      "id": "dubstep",
+      "display": "Dubstep",
+      "parent": "edm",
+      "specificity": 2,
+      "aliases": [
+        "brostep"
+      ]
+    },
+    {
+      "id": "future_bass",
+      "display": "Future Bass",
+      "parent": "edm",
+      "specificity": 3
+    },
+    {
+      "id": "phonk",
+      "display": "Phonk",
+      "parents": [
+        "hip_hop",
+        "electronic"
+      ],
+      "specificity": 3,
+      "family": "hip_hop"
+    },
+    {
+      "id": "folk",
+      "display": "Folk",
+      "parent": null,
+      "specificity": 0,
+      "family": "folk",
+      "aliases": [
+        "folk music"
+      ]
+    },
+    {
+      "id": "traditional_folk",
+      "display": "Traditional Folk",
+      "parent": "folk",
+      "specificity": 1
+    },
+    {
+      "id": "singer_songwriter",
+      "display": "Singer-Songwriter",
+      "parent": "folk",
+      "specificity": 1,
+      "aliases": [
+        "singer songwriter",
+        "songwriter"
+      ]
+    },
+    {
+      "id": "contemporary_folk",
+      "display": "Contemporary Folk",
+      "parent": "folk",
+      "specificity": 2,
+      "aliases": [
+        "indie folk",
+        "modern folk",
+        "alternative folk"
+      ]
+    },
+    {
+      "id": "folk_pop",
+      "display": "Folk Pop",
+      "parents": [
+        "folk",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "folk",
+      "aliases": [
+        "folk-pop"
+      ]
+    },
+    {
+      "id": "neofolk",
+      "display": "Neofolk",
+      "parent": "folk",
+      "specificity": 2,
+      "aliases": [
+        "neo-folk"
+      ]
+    },
+    {
+      "id": "dark_folk",
+      "display": "Dark Folk",
+      "parent": "neofolk",
+      "specificity": 3,
+      "aliases": [
+        "darkfolk"
+      ]
+    },
+    {
+      "id": "pagan_folk",
+      "display": "Pagan Folk",
+      "parent": "neofolk",
+      "specificity": 3,
+      "aliases": [
+        "neopagan",
+        "neo-pagan",
+        "tribal folk"
+      ]
+    },
+    {
+      "id": "nordic_folk",
+      "display": "Nordic Folk",
+      "parent": "folk",
+      "specificity": 3,
+      "aliases": [
+        "nordic folk music",
+        "scandinavian folk",
+        "rune singing"
+      ]
+    },
+    {
+      "id": "medieval",
+      "display": "Medieval",
+      "parent": "folk",
+      "specificity": 2,
+      "aliases": [
+        "medieval folk",
+        "mittelalter",
+        "medieval music"
+      ]
+    },
+    {
+      "id": "americana",
+      "display": "Americana",
+      "parent": "folk",
+      "specificity": 2
+    },
+    {
+      "id": "bluegrass",
+      "display": "Bluegrass",
+      "parents": [
+        "folk",
+        "country"
+      ],
+      "specificity": 2,
+      "family": "folk"
+    },
+    {
+      "id": "celtic",
+      "display": "Celtic",
+      "parent": "folk",
+      "specificity": 2,
+      "aliases": [
+        "celtic music",
+        "celtic folk",
+        "irish folk"
+      ]
+    },
+    {
+      "id": "sea_shanties",
+      "display": "Sea Shanties",
+      "parent": "folk",
+      "specificity": 2,
+      "aliases": [
+        "sea shanty",
+        "shanty",
+        "shanties"
+      ]
+    },
+    {
+      "id": "country",
+      "display": "Country",
+      "parent": null,
+      "specificity": 0,
+      "family": "country",
+      "aliases": [
+        "country music",
+        "contemporary country",
+        "traditional country"
+      ]
+    },
+    {
+      "id": "outlaw_country",
+      "display": "Outlaw Country",
+      "parent": "country",
+      "specificity": 2
+    },
+    {
+      "id": "alt_country",
+      "display": "Alt-Country",
+      "parent": "country",
+      "specificity": 2,
+      "aliases": [
+        "alternative country",
+        "alt country"
+      ]
+    },
+    {
+      "id": "gothic_country",
+      "display": "Gothic Country",
+      "parent": "alt_country",
+      "specificity": 3
+    },
+    {
+      "id": "country_pop",
+      "display": "Country Pop",
+      "parents": [
+        "country",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "country",
+      "aliases": [
+        "country-pop"
+      ]
+    },
+    {
+      "id": "blues",
+      "display": "Blues",
+      "parent": null,
+      "specificity": 0,
+      "family": "blues"
+    },
+    {
+      "id": "delta_blues",
+      "display": "Delta Blues",
+      "parent": "blues",
+      "specificity": 2
+    },
+    {
+      "id": "country_blues",
+      "display": "Country Blues",
+      "parent": "blues",
+      "specificity": 2
+    },
+    {
+      "id": "electric_blues",
+      "display": "Electric Blues",
+      "parent": "blues",
+      "specificity": 2
+    },
+    {
+      "id": "chicago_blues",
+      "display": "Chicago Blues",
+      "parent": "electric_blues",
+      "specificity": 3
+    },
+    {
+      "id": "jazz",
+      "display": "Jazz",
+      "parent": null,
+      "specificity": 0,
+      "family": "jazz"
+    },
+    {
+      "id": "bebop",
+      "display": "Bebop",
+      "parent": "jazz",
+      "specificity": 2,
+      "aliases": [
+        "bop"
+      ]
+    },
+    {
+      "id": "cool_jazz",
+      "display": "Cool Jazz",
+      "parent": "jazz",
+      "specificity": 2
+    },
+    {
+      "id": "free_jazz",
+      "display": "Free Jazz",
+      "parent": "jazz",
+      "specificity": 2,
+      "aliases": [
+        "free improvisation"
+      ]
+    },
+    {
+      "id": "jazz_fusion",
+      "display": "Jazz Fusion",
+      "parent": "jazz",
+      "specificity": 2,
+      "aliases": [
+        "fusion",
+        "jazz-rock"
+      ]
+    },
+    {
+      "id": "smooth_jazz",
+      "display": "Smooth Jazz",
+      "parent": "jazz",
+      "specificity": 2
+    },
+    {
+      "id": "vocal_jazz",
+      "display": "Vocal Jazz",
+      "parent": "jazz",
+      "specificity": 2
+    },
+    {
+      "id": "big_band",
+      "display": "Big Band",
+      "parent": "jazz",
+      "specificity": 2
+    },
+    {
+      "id": "swing",
+      "display": "Swing",
+      "parent": "jazz",
+      "specificity": 2
+    },
+    {
+      "id": "west_coast_swing",
+      "display": "West Coast Swing",
+      "parent": "swing",
+      "specificity": 3,
+      "aliases": [
+        "west-coast-swing"
+      ]
+    },
+    {
+      "id": "bossa_nova",
+      "display": "Bossa Nova",
+      "parents": [
+        "jazz",
+        "latin"
+      ],
+      "specificity": 2,
+      "family": "jazz"
+    },
+    {
+      "id": "latin_jazz",
+      "display": "Latin Jazz",
+      "parents": [
+        "jazz",
+        "latin"
+      ],
+      "specificity": 3,
+      "family": "jazz"
+    },
+    {
+      "id": "acid_jazz",
+      "display": "Acid Jazz",
+      "parent": "jazz",
+      "specificity": 3
+    },
+    {
+      "id": "soul",
+      "display": "Soul",
+      "parent": null,
+      "specificity": 0,
+      "family": "soul",
+      "aliases": [
+        "soul music",
+        "blue-eyed soul"
+      ]
+    },
+    {
+      "id": "neo_soul",
+      "display": "Neo Soul",
+      "parent": "soul",
+      "specificity": 2,
+      "aliases": [
+        "neo-soul"
+      ]
+    },
+    {
+      "id": "motown",
+      "display": "Motown",
+      "parent": "soul",
+      "specificity": 2
+    },
+    {
+      "id": "pop_soul",
+      "display": "Pop Soul",
+      "parents": [
+        "soul",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "soul"
+    },
+    {
+      "id": "funk",
+      "display": "Funk",
+      "parent": null,
+      "specificity": 0,
+      "family": "funk"
+    },
+    {
+      "id": "p_funk",
+      "display": "P-Funk",
+      "parent": "funk",
+      "specificity": 3,
+      "aliases": [
+        "p funk",
+        "pfunk"
+      ]
+    },
+    {
+      "id": "r_and_b",
+      "display": "R&B",
+      "parent": null,
+      "specificity": 0,
+      "family": "r_and_b",
+      "aliases": [
+        "rnb",
+        "r and b",
+        "rhythm and blues",
+        "rhythm & blues"
+      ]
+    },
+    {
+      "id": "contemporary_r_and_b",
+      "display": "Contemporary R&B",
+      "parent": "r_and_b",
+      "specificity": 2,
+      "aliases": [
+        "contemporary rnb",
+        "contemporary r and b"
+      ]
+    },
+    {
+      "id": "new_jack_swing",
+      "display": "New Jack Swing",
+      "parent": "r_and_b",
+      "specificity": 2,
+      "aliases": [
+        "new-jack-swing"
+      ]
+    },
+    {
+      "id": "doo_wop",
+      "display": "Doo-Wop",
+      "parent": "r_and_b",
+      "specificity": 2,
+      "aliases": [
+        "doo wop"
+      ]
+    },
+    {
+      "id": "gospel",
+      "display": "Gospel",
+      "parent": null,
+      "specificity": 0,
+      "family": "gospel"
+    },
+    {
+      "id": "christian",
+      "display": "Christian",
+      "parent": null,
+      "specificity": 0,
+      "family": "christian",
+      "aliases": [
+        "contemporary christian",
+        "ccm",
+        "christian music",
+        "worship",
+        "praise & worship"
+      ]
+    },
+    {
+      "id": "hip_hop",
+      "display": "Hip-Hop",
+      "parent": null,
+      "specificity": 0,
+      "family": "hip_hop",
+      "aliases": [
+        "hip hop",
+        "hiphop",
+        "rap",
+        "hip hop rap"
+      ]
+    },
+    {
+      "id": "hardcore_hip_hop",
+      "display": "Hardcore Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "hardcore hip hop",
+        "hardcore rap"
+      ]
+    },
+    {
+      "id": "horrorcore",
+      "display": "Horrorcore",
+      "parent": "hardcore_hip_hop",
+      "specificity": 3
+    },
+    {
+      "id": "boom_bap",
+      "display": "Boom Bap",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "boom-bap"
+      ]
+    },
+    {
+      "id": "trap",
+      "display": "Trap",
+      "parent": "hip_hop",
+      "specificity": 2
+    },
+    {
+      "id": "gangsta_rap",
+      "display": "Gangsta Rap",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "gangster rap",
+        "gangsta",
+        "gangsta-rap",
+        "thug rap"
+      ]
+    },
+    {
+      "id": "conscious_hip_hop",
+      "display": "Conscious Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "conscious hip hop",
+        "conscious rap",
+        "conscious",
+        "political hip hop"
+      ]
+    },
+    {
+      "id": "east_coast_hip_hop",
+      "display": "East Coast Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "east coast hip hop",
+        "east coast rap"
+      ]
+    },
+    {
+      "id": "west_coast_hip_hop",
+      "display": "West Coast Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "west coast hip hop",
+        "west coast rap",
+        "g-funk"
+      ]
+    },
+    {
+      "id": "southern_hip_hop",
+      "display": "Southern Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "southern hip hop",
+        "dirty south"
+      ]
+    },
+    {
+      "id": "midwest_hip_hop",
+      "display": "Midwest Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "midwest hip hop",
+        "detroit hip-hop",
+        "detroit hip hop",
+        "midwest rap",
+        "midwestern hip hop"
+      ]
+    },
+    {
+      "id": "alternative_hip_hop",
+      "display": "Alternative Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 2,
+      "aliases": [
+        "alternative hip hop",
+        "alternative rap"
+      ]
+    },
+    {
+      "id": "industrial_hip_hop",
+      "display": "Industrial Hip-Hop",
+      "parents": [
+        "hip_hop",
+        "industrial"
+      ],
+      "specificity": 3,
+      "family": "hip_hop",
+      "aliases": [
+        "industrial hip hop"
+      ]
+    },
+    {
+      "id": "pop_rap",
+      "display": "Pop Rap",
+      "parents": [
+        "hip_hop",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "hip_hop",
+      "aliases": [
+        "pop-rap"
+      ]
+    },
+    {
+      "id": "jazz_rap",
+      "display": "Jazz Rap",
+      "parent": "hip_hop",
+      "specificity": 3,
+      "aliases": [
+        "jazz-rap"
+      ]
+    },
+    {
+      "id": "lo_fi_hip_hop",
+      "display": "Lo-Fi Hip-Hop",
+      "parent": "hip_hop",
+      "specificity": 3,
+      "aliases": [
+        "lo-fi hip hop",
+        "lofi hip hop",
+        "lofi"
+      ]
+    },
+    {
+      "id": "grime",
+      "display": "Grime",
+      "parent": "hip_hop",
+      "specificity": 2
+    },
+    {
+      "id": "drill",
+      "display": "Drill",
+      "parent": "hip_hop",
+      "specificity": 2
+    },
+    {
+      "id": "classical",
+      "display": "Classical",
+      "parent": null,
+      "specificity": 0,
+      "family": "classical",
+      "aliases": [
+        "classical music"
+      ]
+    },
+    {
+      "id": "orchestral",
+      "display": "Orchestral",
+      "parent": "classical",
+      "specificity": 1
+    },
+    {
+      "id": "baroque",
+      "display": "Baroque",
+      "parent": "classical",
+      "specificity": 2,
+      "aliases": [
+        "baroque period"
+      ]
+    },
+    {
+      "id": "romantic_era",
+      "display": "Romantic Era",
+      "parent": "classical",
+      "specificity": 2,
+      "aliases": [
+        "romantic period"
+      ]
+    },
+    {
+      "id": "contemporary_classical",
+      "display": "Contemporary Classical",
+      "parent": "classical",
+      "specificity": 2,
+      "aliases": [
+        "modern classical",
+        "neoclassical",
+        "neo-classical",
+        "post-minimalism"
+      ]
+    },
+    {
+      "id": "classical_crossover",
+      "display": "Classical Crossover",
+      "parents": [
+        "classical",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "classical"
+    },
+    {
+      "id": "chamber_music",
+      "display": "Chamber Music",
+      "parent": "classical",
+      "specificity": 2
+    },
+    {
+      "id": "opera",
+      "display": "Opera",
+      "parent": "classical",
+      "specificity": 2
+    },
+    {
+      "id": "choral",
+      "display": "Choral",
+      "parent": "classical",
+      "specificity": 2,
+      "aliases": [
+        "choir"
+      ]
+    },
+    {
+      "id": "film_score",
+      "display": "Film Score",
+      "parent": "classical",
+      "specificity": 2,
+      "aliases": [
+        "score",
+        "original score",
+        "film music"
+      ],
+      "scope": {
+        "levels": [
+          "track",
+          "album"
+        ],
+        "confirm_release_types": [
+          "Soundtrack"
+        ],
+        "require_confirmation": true
+      }
+    },
+    {
+      "id": "video_game_music",
+      "display": "Video Game Music",
+      "parent": "classical",
+      "specificity": 2,
+      "aliases": [
+        "game music",
+        "vgm",
+        "video game soundtrack"
+      ],
+      "scope": {
+        "levels": [
+          "track",
+          "album"
+        ],
+        "confirm_release_types": [
+          "Soundtrack"
+        ],
+        "require_confirmation": true
+      }
+    },
+    {
+      "id": "musical_theatre",
+      "display": "Musical Theatre",
+      "parent": "classical",
+      "specificity": 2,
+      "aliases": [
+        "musical",
+        "show tunes",
+        "musical theater",
+        "broadway"
+      ],
+      "scope": {
+        "levels": [
+          "track",
+          "album"
+        ],
+        "confirm_release_types": [
+          "Soundtrack",
+          "Audio drama"
+        ],
+        "require_confirmation": false
+      }
+    },
+    {
+      "id": "world",
+      "display": "World",
+      "parent": null,
+      "specificity": 0,
+      "family": "world",
+      "aliases": [
+        "world music",
+        "worldbeat"
+      ]
+    },
+    {
+      "id": "afrobeat",
+      "display": "Afrobeat",
+      "parent": "world",
+      "specificity": 2,
+      "aliases": [
+        "afro-beat"
+      ]
+    },
+    {
+      "id": "afrobeats",
+      "display": "Afrobeats",
+      "parent": "world",
+      "specificity": 2,
+      "aliases": [
+        "afropop",
+        "afro pop"
+      ]
+    },
+    {
+      "id": "highlife",
+      "display": "Highlife",
+      "parent": "world",
+      "specificity": 3
+    },
+    {
+      "id": "latin",
+      "display": "Latin",
+      "parent": "world",
+      "specificity": 1,
+      "aliases": [
+        "latin music"
+      ]
+    },
+    {
+      "id": "latin_pop",
+      "display": "Latin Pop",
+      "parents": [
+        "latin",
+        "pop"
+      ],
+      "specificity": 2,
+      "family": "latin"
+    },
+    {
+      "id": "salsa",
+      "display": "Salsa",
+      "parent": "latin",
+      "specificity": 2
+    },
+    {
+      "id": "reggaeton",
+      "display": "Reggaeton",
+      "parent": "latin",
+      "specificity": 2,
+      "aliases": [
+        "reggaetón"
+      ]
+    },
+    {
+      "id": "tango",
+      "display": "Tango",
+      "parent": "latin",
+      "specificity": 2
+    },
+    {
+      "id": "flamenco",
+      "display": "Flamenco",
+      "parent": "world",
+      "specificity": 2
+    },
+    {
+      "id": "bhangra",
+      "display": "Bhangra",
+      "parent": "world",
+      "specificity": 2
+    },
+    {
+      "id": "arabic",
+      "display": "Arabic",
+      "parent": "world",
+      "specificity": 2,
+      "aliases": [
+        "arabic music",
+        "middle eastern"
+      ]
+    },
+    {
+      "id": "indian_classical",
+      "display": "Indian Classical",
+      "parent": "world",
+      "specificity": 2
+    },
+    {
+      "id": "gagaku",
+      "display": "Gagaku",
+      "parent": "world",
+      "specificity": 3
+    },
+    {
+      "id": "reggae",
+      "display": "Reggae",
+      "parent": null,
+      "specificity": 0,
+      "family": "reggae"
+    },
+    {
+      "id": "ska",
+      "display": "Ska",
+      "parent": "reggae",
+      "specificity": 2
+    },
+    {
+      "id": "rocksteady",
+      "display": "Rocksteady",
+      "parent": "reggae",
+      "specificity": 3
+    },
+    {
+      "id": "dub",
+      "display": "Dub",
+      "parent": "reggae",
+      "specificity": 2
+    },
+    {
+      "id": "dancehall",
+      "display": "Dancehall",
+      "parent": "reggae",
+      "specificity": 2
+    },
+    {
+      "id": "experimental",
+      "display": "Experimental",
+      "parent": null,
+      "specificity": 0,
+      "family": "experimental"
+    },
+    {
+      "id": "noise",
+      "display": "Noise",
+      "parent": "experimental",
+      "specificity": 2
+    },
+    {
+      "id": "avant_garde",
+      "display": "Avant-Garde",
+      "parent": "experimental",
+      "specificity": 2,
+      "aliases": [
+        "avant garde",
+        "avantgarde"
+      ]
+    },
+    {
+      "id": "comedy",
+      "display": "Comedy",
+      "parent": null,
+      "specificity": 1,
+      "family": "comedy",
+      "aliases": [
+        "comedy music",
+        "parody",
+        "novelty"
+      ],
+      "scope": {
+        "levels": [
+          "track",
+          "album",
+          "artist"
+        ],
+        "slot": "marker",
+        "artist_requires_min_sources": 2
+      }
+    },
+    {
+      "id": "soundtrack",
+      "display": "Soundtrack",
+      "parent": null,
+      "specificity": 1,
+      "family": "soundtrack",
+      "aliases": [
+        "original soundtrack",
+        "ost",
+        "soundtracks",
+        "stage & screen",
+        "stage and screen",
+        "movie soundtrack",
+        "theme"
+      ],
+      "scope": {
+        "levels": [
+          "track",
+          "album"
+        ],
+        "slot": "marker",
+        "confirm_release_types": [
+          "Soundtrack"
+        ],
+        "confirm_album_title_patterns": [
+          "(?i)\\b(original )?(motion picture )?soundtrack\\b",
+          "(?i)\\bOST\\b",
+          "(?i)\\bmusic from (and inspired by )?the\\b"
+        ],
+        "require_confirmation": true
+      }
+    },
+    {
+      "id": "christmas",
+      "display": "Christmas",
+      "parent": null,
+      "specificity": 1,
+      "family": "christmas",
+      "aliases": [
+        "xmas",
+        "holiday",
+        "yuletide",
+        "christmas music",
+        "noel"
+      ],
+      "scope": {
+        "levels": [
+          "track",
+          "album"
+        ],
+        "slot": "marker",
+        "confirm_title_patterns": [
+          "(?i)\\b(christmas|xmas|noel|yule(tide)?|santa|sleigh|jingle bells?|silent night|mistletoe|holly)\\b"
+        ],
+        "require_confirmation": false
+      }
+    }
   ],
-
   "moods": [
-    {"id": "calm", "display": "Calm", "family": "energy", "aliases": ["peaceful", "serene", "quiet"]},
-    {"id": "relaxed", "display": "Relaxed", "family": "energy", "aliases": ["chill", "chillout", "mellow", "laid back", "easy listening"]},
-    {"id": "energetic", "display": "Energetic", "family": "energy", "aliases": ["high energy", "upbeat", "driving"]},
-    {"id": "intense", "display": "Intense", "family": "energy", "aliases": ["powerful", "fierce"]},
-    {"id": "aggressive", "display": "Aggressive", "family": "energy", "aliases": ["brutal", "angry", "abrasive"]},
-    {"id": "happy", "display": "Happy", "family": "valence", "aliases": ["cheerful", "joyful", "feel good", "fun"]},
-    {"id": "uplifting", "display": "Uplifting", "family": "valence", "aliases": ["positive", "inspiring", "hopeful", "triumphant"]},
-    {"id": "playful", "display": "Playful", "family": "valence", "aliases": ["quirky", "whimsical", "funny"]},
-    {"id": "melancholic", "display": "Melancholic", "family": "valence", "aliases": ["melancholy", "sad", "somber", "sombre", "moody", "bittersweet", "wistful"]},
-    {"id": "dark", "display": "Dark", "family": "valence", "aliases": ["dark atmosphere", "sinister", "ominous", "brooding"]},
-    {"id": "atmospheric", "display": "Atmospheric", "family": "atmosphere", "aliases": ["ambient atmosphere", "spacious", "ambiance", "ambience"]},
-    {"id": "dreamy", "display": "Dreamy", "family": "atmosphere", "aliases": ["hazy", "ethereal"]},
-    {"id": "haunting", "display": "Haunting", "family": "atmosphere", "aliases": ["eerie", "unsettling"]},
-    {"id": "meditative", "display": "Meditative", "family": "atmosphere", "aliases": ["hypnotic", "trance like"]},
-    {"id": "mysterious", "display": "Mysterious", "family": "atmosphere", "aliases": ["enigmatic"]},
-    {"id": "epic", "display": "Epic", "family": "atmosphere", "aliases": ["cinematic", "grand", "sweeping"]},
-    {"id": "danceable", "display": "Danceable", "family": "function", "aliases": ["dance", "club", "party"]},
-    {"id": "romantic", "display": "Romantic", "family": "function", "aliases": ["love", "sensual", "sexy"]},
-    {"id": "focus", "display": "Focus", "family": "function", "aliases": ["study", "concentration"]},
-    {"id": "sleep", "display": "Sleep", "family": "function", "aliases": ["bedtime", "nighttime"]},
-    {"id": "melodic", "display": "Melodic", "family": "texture", "aliases": ["melody", "melodic music"]},
-    {"id": "heavy", "display": "Heavy", "family": "texture", "aliases": ["heaviness"]}
+    {
+      "id": "calm",
+      "display": "Calm",
+      "family": "energy",
+      "aliases": [
+        "peaceful",
+        "serene",
+        "quiet"
+      ]
+    },
+    {
+      "id": "relaxed",
+      "display": "Relaxed",
+      "family": "energy",
+      "aliases": [
+        "chill",
+        "chillout",
+        "chill out",
+        "mellow",
+        "laid back",
+        "easy listening"
+      ]
+    },
+    {
+      "id": "energetic",
+      "display": "Energetic",
+      "family": "energy",
+      "aliases": [
+        "high energy",
+        "upbeat",
+        "driving",
+        "speed"
+      ]
+    },
+    {
+      "id": "intense",
+      "display": "Intense",
+      "family": "energy",
+      "aliases": [
+        "powerful",
+        "fierce"
+      ]
+    },
+    {
+      "id": "aggressive",
+      "display": "Aggressive",
+      "family": "energy",
+      "aliases": [
+        "brutal",
+        "angry",
+        "abrasive"
+      ]
+    },
+    {
+      "id": "happy",
+      "display": "Happy",
+      "family": "valence",
+      "aliases": [
+        "cheerful",
+        "joyful",
+        "feel good",
+        "fun"
+      ]
+    },
+    {
+      "id": "uplifting",
+      "display": "Uplifting",
+      "family": "valence",
+      "aliases": [
+        "positive",
+        "inspiring",
+        "hopeful",
+        "triumphant"
+      ]
+    },
+    {
+      "id": "playful",
+      "display": "Playful",
+      "family": "valence",
+      "aliases": [
+        "quirky",
+        "whimsical",
+        "funny"
+      ]
+    },
+    {
+      "id": "melancholic",
+      "display": "Melancholic",
+      "family": "valence",
+      "aliases": [
+        "melancholy",
+        "sad",
+        "somber",
+        "sombre",
+        "moody",
+        "bittersweet",
+        "wistful"
+      ]
+    },
+    {
+      "id": "dark",
+      "display": "Dark",
+      "family": "valence",
+      "aliases": [
+        "dark atmosphere",
+        "sinister",
+        "ominous",
+        "brooding"
+      ]
+    },
+    {
+      "id": "atmospheric",
+      "display": "Atmospheric",
+      "family": "atmosphere",
+      "aliases": [
+        "ambient atmosphere",
+        "spacious",
+        "ambiance",
+        "ambience"
+      ]
+    },
+    {
+      "id": "dreamy",
+      "display": "Dreamy",
+      "family": "atmosphere",
+      "aliases": [
+        "hazy",
+        "ethereal"
+      ]
+    },
+    {
+      "id": "haunting",
+      "display": "Haunting",
+      "family": "atmosphere",
+      "aliases": [
+        "eerie",
+        "unsettling"
+      ]
+    },
+    {
+      "id": "meditative",
+      "display": "Meditative",
+      "family": "atmosphere",
+      "aliases": [
+        "hypnotic",
+        "trance like"
+      ]
+    },
+    {
+      "id": "mysterious",
+      "display": "Mysterious",
+      "family": "atmosphere",
+      "aliases": [
+        "enigmatic"
+      ]
+    },
+    {
+      "id": "epic",
+      "display": "Epic",
+      "family": "atmosphere",
+      "aliases": [
+        "cinematic",
+        "grand",
+        "sweeping"
+      ]
+    },
+    {
+      "id": "catchy",
+      "display": "Catchy",
+      "family": "atmosphere",
+      "aliases": [
+        "catchy as fuck",
+        "earworm"
+      ]
+    },
+    {
+      "id": "danceable",
+      "display": "Danceable",
+      "family": "function",
+      "aliases": [
+        "dance",
+        "club",
+        "party"
+      ]
+    },
+    {
+      "id": "romantic",
+      "display": "Romantic",
+      "family": "function",
+      "aliases": [
+        "love",
+        "sensual",
+        "sexy",
+        "sex"
+      ]
+    },
+    {
+      "id": "focus",
+      "display": "Focus",
+      "family": "function",
+      "aliases": [
+        "study",
+        "concentration"
+      ]
+    },
+    {
+      "id": "sleep",
+      "display": "Sleep",
+      "family": "function",
+      "aliases": [
+        "bedtime",
+        "nighttime"
+      ]
+    },
+    {
+      "id": "workout",
+      "display": "Workout",
+      "family": "function",
+      "aliases": [
+        "gym",
+        "running",
+        "training"
+      ]
+    },
+    {
+      "id": "ballad",
+      "display": "Ballad",
+      "family": "function",
+      "aliases": [
+        "ballads",
+        "acoustic ballad",
+        "rock ballad",
+        "slow song"
+      ]
+    },
+    {
+      "id": "power_ballad",
+      "display": "Power Ballad",
+      "family": "function",
+      "aliases": [
+        "power ballads"
+      ]
+    },
+    {
+      "id": "melodic",
+      "display": "Melodic",
+      "family": "texture",
+      "aliases": [
+        "melody",
+        "melodic music"
+      ]
+    },
+    {
+      "id": "heavy",
+      "display": "Heavy",
+      "family": "texture",
+      "aliases": [
+        "heaviness"
+      ]
+    }
   ],
-
-  "noise_values": {
-    "_comment": [
-      "Values that are never genres, moods, places or attributes. Matched EXACTLY",
-      "(normalised) and dropped BEFORE tokenisation, so a value containing a",
-      "separator - 'folk, world, & country' - can be listed whole."
-    ],
-    "values": [
-      "vocal", "female vocalists", "male vocalists", "offizielle charts",
-      "1\u20134 wochen", "1-4 wochen", "5\u20138 wochen", "5-8 wochen", "seen live",
-      "favorites", "favourite", "under 2000 listeners", "albums i own",
-      "alternative and punk", "alternative & punk",
-      "folk, world, & country", "& country", "folk, world",
-      "punk metal", "scandinavian metal", "am\u00e9ricain", "billboard hot 100",
-      "general alternative", "american underground", "ph_temp_checken"
-    ]
-  },
   "geography": {
     "_comment": [
       "Adjective -> country. Applied ONLY to values that are not a recognised genre,",
@@ -342,96 +3449,494 @@
       "genre, because genre is classified first."
     ],
     "countries": {
-      "australian": "Australia", "aussie": "Australia", "australia": "Australia",
-      "american": "United States", "usa": "United States", "us": "United States",
-      "united states": "United States", "america": "United States",
-      "british": "United Kingdom", "english": "United Kingdom", "scottish": "United Kingdom",
-      "welsh": "United Kingdom", "uk": "United Kingdom", "united kingdom": "United Kingdom",
-      "england": "United Kingdom", "scotland": "United Kingdom", "wales": "United Kingdom",
-      "irish": "Ireland", "ireland": "Ireland",
-      "german": "Germany", "deutsch": "Germany", "germany": "Germany",
-      "french": "France", "france": "France",
-      "spanish": "Spain", "spain": "Spain", "italian": "Italy", "italy": "Italy",
-      "swedish": "Sweden", "sweden": "Sweden",
-      "norwegian": "Norway", "norway": "Norway",
-      "finnish": "Finland", "finland": "Finland",
-      "danish": "Denmark", "denmark": "Denmark",
-      "icelandic": "Iceland", "iceland": "Iceland",
-      "dutch": "Netherlands", "netherlands": "Netherlands", "holland": "Netherlands",
-      "belgian": "Belgium", "belgium": "Belgium",
-      "polish": "Poland", "poland": "Poland",
-      "russian": "Russia", "russia": "Russia",
-      "ukrainian": "Ukraine", "ukraine": "Ukraine",
-      "greek": "Greece", "greece": "Greece",
-      "portuguese": "Portugal", "portugal": "Portugal",
-      "brazilian": "Brazil", "brazil": "Brazil",
-      "mexican": "Mexico", "mexico": "Mexico",
-      "argentinian": "Argentina", "argentina": "Argentina",
-      "chilean": "Chile", "chile": "Chile",
-      "colombian": "Colombia", "colombia": "Colombia",
-      "canadian": "Canada", "canada": "Canada",
-      "japanese": "Japan", "japan": "Japan",
-      "korean": "South Korea", "south korean": "South Korea", "south korea": "South Korea",
-      "chinese": "China", "china": "China",
-      "taiwanese": "Taiwan", "taiwan": "Taiwan",
-      "indian": "India", "india": "India",
-      "pakistani": "Pakistan", "pakistan": "Pakistan",
-      "thai": "Thailand", "thailand": "Thailand",
-      "indonesian": "Indonesia", "indonesia": "Indonesia",
-      "malaysian": "Malaysia", "malaysia": "Malaysia",
-      "vietnamese": "Vietnam", "vietnam": "Vietnam",
-      "nigerian": "Nigeria", "nigeria": "Nigeria",
-      "ghanaian": "Ghana", "ghana": "Ghana",
-      "south african": "South Africa", "south africa": "South Africa",
-      "ethiopian": "Ethiopia", "ethiopia": "Ethiopia",
-      "moroccan": "Morocco", "morocco": "Morocco",
-      "egyptian": "Egypt", "egypt": "Egypt",
-      "israeli": "Israel", "israel": "Israel",
-      "turkish": "Türkiye", "turkiye": "Türkiye", "turkey": "Türkiye",
-      "lebanese": "Lebanon", "lebanon": "Lebanon",
-      "iranian": "Iran", "iran": "Iran",
-      "new zealand": "New Zealand", "kiwi": "New Zealand"
+      "australian": "Australia",
+      "aussie": "Australia",
+      "australia": "Australia",
+      "american": "United States",
+      "usa": "United States",
+      "us": "United States",
+      "united states": "United States",
+      "america": "United States",
+      "british": "United Kingdom",
+      "english": "United Kingdom",
+      "scottish": "United Kingdom",
+      "welsh": "United Kingdom",
+      "uk": "United Kingdom",
+      "united kingdom": "United Kingdom",
+      "england": "United Kingdom",
+      "scotland": "United Kingdom",
+      "wales": "United Kingdom",
+      "irish": "Ireland",
+      "ireland": "Ireland",
+      "german": "Germany",
+      "deutsch": "Germany",
+      "germany": "Germany",
+      "french": "France",
+      "france": "France",
+      "spanish": "Spain",
+      "spain": "Spain",
+      "italian": "Italy",
+      "italy": "Italy",
+      "swedish": "Sweden",
+      "sweden": "Sweden",
+      "norwegian": "Norway",
+      "norway": "Norway",
+      "finnish": "Finland",
+      "finland": "Finland",
+      "danish": "Denmark",
+      "denmark": "Denmark",
+      "icelandic": "Iceland",
+      "iceland": "Iceland",
+      "dutch": "Netherlands",
+      "netherlands": "Netherlands",
+      "holland": "Netherlands",
+      "belgian": "Belgium",
+      "belgium": "Belgium",
+      "polish": "Poland",
+      "poland": "Poland",
+      "russian": "Russia",
+      "russia": "Russia",
+      "ukrainian": "Ukraine",
+      "ukraine": "Ukraine",
+      "greek": "Greece",
+      "greece": "Greece",
+      "portuguese": "Portugal",
+      "portugal": "Portugal",
+      "brazilian": "Brazil",
+      "brazil": "Brazil",
+      "mexican": "Mexico",
+      "mexico": "Mexico",
+      "argentinian": "Argentina",
+      "argentine": "Argentina",
+      "argentina": "Argentina",
+      "chilean": "Chile",
+      "chile": "Chile",
+      "colombian": "Colombia",
+      "colombia": "Colombia",
+      "canadian": "Canada",
+      "canada": "Canada",
+      "japanese": "Japan",
+      "japan": "Japan",
+      "korean": "South Korea",
+      "south korean": "South Korea",
+      "south korea": "South Korea",
+      "chinese": "China",
+      "china": "China",
+      "taiwanese": "Taiwan",
+      "taiwan": "Taiwan",
+      "indian": "India",
+      "india": "India",
+      "pakistani": "Pakistan",
+      "pakistan": "Pakistan",
+      "thai": "Thailand",
+      "thailand": "Thailand",
+      "indonesian": "Indonesia",
+      "indonesia": "Indonesia",
+      "malaysian": "Malaysia",
+      "malaysia": "Malaysia",
+      "vietnamese": "Vietnam",
+      "vietnam": "Vietnam",
+      "nigerian": "Nigeria",
+      "nigeria": "Nigeria",
+      "ghanaian": "Ghana",
+      "ghana": "Ghana",
+      "south african": "South Africa",
+      "south africa": "South Africa",
+      "ethiopian": "Ethiopia",
+      "ethiopia": "Ethiopia",
+      "moroccan": "Morocco",
+      "morocco": "Morocco",
+      "egyptian": "Egypt",
+      "egypt": "Egypt",
+      "israeli": "Israel",
+      "israel": "Israel",
+      "turkish": "Türkiye",
+      "turkiye": "Türkiye",
+      "türkiye": "Türkiye",
+      "turkey": "Türkiye",
+      "lebanese": "Lebanon",
+      "lebanon": "Lebanon",
+      "iranian": "Iran",
+      "iran": "Iran",
+      "new zealand": "New Zealand",
+      "kiwi": "New Zealand",
+      "new zealander": "New Zealand",
+      "austrian": "Austria",
+      "austria": "Austria",
+      "swiss": "Switzerland",
+      "switzerland": "Switzerland",
+      "czech": "Czechia",
+      "czechia": "Czechia",
+      "czech republic": "Czechia",
+      "hungarian": "Hungary",
+      "hungary": "Hungary",
+      "romanian": "Romania",
+      "romania": "Romania",
+      "estonian": "Estonia",
+      "estonia": "Estonia",
+      "faroese": "Faroe Islands",
+      "faroe islands": "Faroe Islands",
+      "croatian": "Croatia",
+      "croatia": "Croatia",
+      "serbian": "Serbia",
+      "serbia": "Serbia",
+      "jamaican": "Jamaica",
+      "jamaica": "Jamaica",
+      "cuban": "Cuba",
+      "cuba": "Cuba",
+      "puerto rican": "Puerto Rico",
+      "puerto rico": "Puerto Rico",
+      "filipino": "Philippines",
+      "philippines": "Philippines"
     },
     "regions": {
-      "northern europe": "Northern Europe", "scandinavia": "Scandinavia",
-      "scandinavian": "Scandinavia", "nordic": "Nordic Countries",
-      "western europe": "Western Europe", "eastern europe": "Eastern Europe",
-      "southern europe": "Southern Europe", "central europe": "Central Europe",
-      "latin america": "Latin America", "south america": "South America",
-      "north america": "North America", "east asia": "East Asia",
-      "southeast asia": "Southeast Asia", "south asia": "South Asia",
-      "middle east": "Middle East", "north africa": "North Africa",
-      "sub-saharan africa": "Sub-Saharan Africa", "west africa": "West Africa",
-      "caribbean": "Caribbean", "oceania": "Oceania", "balkans": "Balkans"
+      "northern europe": "Northern Europe",
+      "western europe": "Western Europe",
+      "eastern europe": "Eastern Europe",
+      "southern europe": "Southern Europe",
+      "central europe": "Central Europe",
+      "latin america": "Latin America",
+      "south america": "South America",
+      "north america": "North America",
+      "east asia": "East Asia",
+      "southeast asia": "Southeast Asia",
+      "south asia": "South Asia",
+      "middle east": "Middle East",
+      "north africa": "North Africa",
+      "west africa": "West Africa",
+      "caribbean": "Caribbean",
+      "oceania": "Oceania",
+      "balkans": "Balkans",
+      "sub-saharan africa": "Sub-Saharan Africa",
+      "scandinavia": "Scandinavia",
+      "scandinavian": "Scandinavia",
+      "nordic": "Nordic Countries"
     }
   },
-
   "attributes": {
     "_comment": [
-      "Performance/recording attributes - never genre slots. These are already handled",
-      "by the filter-tag machinery; listed here so the classifier can name them.",
-      "is_* booleans on the tracks table remain the authoritative store."
+      "Performance/recording attributes - never genre slots. is_* booleans on the tracks",
+      "table remain the authoritative store."
     ],
     "performance": {
-      "cover": ["cover", "covers", "cover version"],
-      "live": ["live", "live version", "concert"],
-      "remix": ["remix", "remixed", "rmx"],
-      "remaster": ["remaster", "remastered", "remastered version"],
-      "acoustic": ["acoustic", "unplugged", "acoustic version"],
-      "instrumental": ["instrumental", "instrumentals", "instrumental version"],
-      "demo": ["demo", "demos"],
-      "bootleg": ["bootleg", "bootlegs", "unofficial"],
-      "karaoke": ["karaoke"],
-      "re_recording": ["re-recording", "rerecording", "re-recorded"]
+      "cover": [
+        "cover",
+        "covers",
+        "cover version"
+      ],
+      "live": [
+        "live",
+        "live version",
+        "concert",
+        "live recording",
+        "concert film"
+      ],
+      "remix": [
+        "remix",
+        "remixed",
+        "rmx"
+      ],
+      "remaster": [
+        "remaster",
+        "remastered",
+        "remastered version"
+      ],
+      "acoustic": [
+        "acoustic",
+        "unplugged",
+        "acoustic version",
+        "stripped"
+      ],
+      "instrumental": [
+        "instrumental",
+        "instrumentals",
+        "instrumental version"
+      ],
+      "demo": [
+        "demo",
+        "demos"
+      ],
+      "bootleg": [
+        "bootleg",
+        "bootlegs",
+        "unofficial"
+      ],
+      "karaoke": [
+        "karaoke"
+      ],
+      "re_recording": [
+        "re-recording",
+        "rerecording",
+        "re-recorded"
+      ],
+      "radio_edit": [
+        "radio edit",
+        "single edit"
+      ],
+      "orchestral_version": [
+        "orchestral version",
+        "symphonic version"
+      ]
     },
     "content": {
-      "audiobook": ["audiobook", "audio book"],
-      "spoken_word": ["spoken word", "poetry", "interview"],
-      "radioplay": ["radioplay", "radio play"],
-      "field_recording": ["field recording"],
-      "special_effects": ["special effects", "sound effects"],
-      "nursery_rhymes": ["nursery rhymes", "children's music", "kids"],
-      "educational": ["educational"]
+      "audiobook": [
+        "audiobook",
+        "audio book"
+      ],
+      "spoken_word": [
+        "spoken word",
+        "poetry",
+        "interview",
+        "story"
+      ],
+      "radioplay": [
+        "radioplay",
+        "radio play"
+      ],
+      "field_recording": [
+        "field recording"
+      ],
+      "special_effects": [
+        "special effects",
+        "sound effects"
+      ],
+      "nursery_rhymes": [
+        "nursery rhymes",
+        "children's music",
+        "children's",
+        "kids",
+        "childrens music"
+      ],
+      "educational": [
+        "educational"
+      ],
+      "non_music": [
+        "non-music",
+        "music video"
+      ]
+    }
+  },
+  "noise_values": {
+    "_comment": [
+      "Values that are never genres, moods, places or attributes. Matched exactly",
+      "(lowercased) and dropped before scoring. Decades are caught by the junk filter."
+    ],
+    "values": [
+      "vocal",
+      "female vocalists",
+      "male vocalists",
+      "offizielle charts",
+      "1–4 wochen",
+      "1-4 wochen",
+      "5–8 wochen",
+      "5-8 wochen",
+      "seen live",
+      "favorites",
+      "favourite",
+      "guitar",
+      "saxophone",
+      "abstract",
+      "oldies",
+      "progressive",
+      "alternative and punk",
+      "alternative & punk",
+      "folk, world, & country",
+      "& country",
+      "folk, world",
+      "magic music",
+      "under 2000 listeners",
+      "albums i own",
+      "laut.de",
+      "plattentests.de",
+      "remark",
+      "silence",
+      "international",
+      "singer",
+      "alternative singer",
+      "rhythmic",
+      "passionate",
+      "dialogue",
+      "dj",
+      "contemporary",
+      "religious",
+      "extreme metal",
+      "punk metal",
+      "scandinavian metal",
+      "américain",
+      "billboard hot 100",
+      "general alternative",
+      "american underground",
+      "ph_temp_checken"
+    ]
+  },
+  "evidence_policy": {
+    "_comment": [
+      "How genre evidence becomes a score, and what each Final Genre position requires.",
+      "evidence = provider_trust x level_weight x tag_dilution; a genre's score is the sum over",
+      "sources, then x corroboration. Per-genre 'scope' is applied BEFORE scoring.",
+      "Provider trust itself stays in config (Provider Trust panel) - it is not duplicated here."
+    ],
+    "level_weights": {
+      "track": 1.0,
+      "album": 0.7,
+      "artist": 0.35
+    },
+    "source_levels": {
+      "_comment": "Level a provider's evidence represents when the provider does not report one.",
+      "musicbrainz": "track",
+      "musicbrainz_tags": "track",
+      "listenbrainz": "track",
+      "lastfm": "track",
+      "discogs": "album",
+      "wikidata": "album",
+      "audiodb": "artist",
+      "spotify": "artist",
+      "essentia": "track",
+      "navidrome": "track",
+      "manual": "track"
+    },
+    "source_groups": {
+      "_comment": "Sources in one group count as ONE voice for corroboration (ListenBrainz genres derive from MusicBrainz).",
+      "metabrainz": [
+        "musicbrainz",
+        "musicbrainz_tags",
+        "listenbrainz"
+      ],
+      "lastfm": [
+        "lastfm"
+      ],
+      "discogs": [
+        "discogs"
+      ],
+      "wikidata": [
+        "wikidata"
+      ],
+      "audiodb": [
+        "audiodb"
+      ],
+      "spotify": [
+        "spotify"
+      ],
+      "essentia": [
+        "essentia"
+      ],
+      "navidrome": [
+        "navidrome"
+      ],
+      "manual": [
+        "manual"
+      ]
+    },
+    "default_scope": {
+      "levels": [
+        "track",
+        "album",
+        "artist"
+      ],
+      "slot": "genre"
+    },
+    "positions": [
+      {
+        "position": 1,
+        "min_score": 0.6,
+        "relative_floor": null,
+        "requires_levels_any": [
+          "track",
+          "album",
+          "artist"
+        ],
+        "min_source_groups": 1
+      },
+      {
+        "position": 2,
+        "min_score": 0.45,
+        "relative_floor": 0.45,
+        "requires_levels_any": [
+          "track",
+          "album"
+        ],
+        "min_source_groups": 1
+      },
+      {
+        "position": 3,
+        "min_score": 0.35,
+        "relative_floor": 0.45,
+        "requires_levels_any": [
+          "track",
+          "album"
+        ],
+        "min_source_groups": 2
+      }
+    ],
+    "artist_only": {
+      "_comment": "A genre backed ONLY by artist-level evidence may fill position 1 for a track with no other evidence, never more.",
+      "max_positions": 1,
+      "min_source_groups": 2
+    },
+    "corroboration": {
+      "single_group_multiplier": 0.7,
+      "multi_group_bonus_per_extra_group": 0.1,
+      "multi_group_bonus_cap": 0.25,
+      "exempt_sources": [
+        "manual"
+      ]
+    },
+    "tag_dilution": {
+      "_comment": "When one source lists more than 'threshold' tags for a track, each is weighted sqrt(threshold/n).",
+      "threshold": 8,
+      "mode": "sqrt"
+    },
+    "hybrid_support": {
+      "_comment": "A multi-parent genre needs direct evidence above this score, or support in at least this many of its parents' families.",
+      "min_parent_families_supported": 1,
+      "direct_evidence_min_score": 0.35
+    },
+    "markers": {
+      "_comment": "Genres with scope.slot = 'marker' are written on top of the selected genres and never take a slot.",
+      "max_markers": 2,
+      "order": [
+        "christmas",
+        "soundtrack",
+        "comedy"
+      ]
+    },
+    "collection_policy": {
+      "_comment": [
+        "v5 selection rules, applied in this order after scoring and outlier rejection:",
+        "1. metal_rock_arbitration: symmetric. Share = metal / (metal + rock) over rival candidates,",
+        "   using trust x level x corroboration ONLY (no tag-position weighting), roots excluded.",
+        "   share >= metal_wins_at -> drop rock family; share <= rock_wins_at -> drop metal family;",
+        "   between the two -> keep both. Same-sound pairs (e.g. Gothic Rock + Gothic Metal, both selected)",
+        "   are not arbitrated: the metal name wins. Crossover companions (Nu/Alt Metal + Hard Rock) still apply.",
+        "2. root_fallback_only: specificity-0 genres are excluded from the pool and the relative-floor",
+        "   reference whenever a non-root candidate scores >= position 1 min_score.",
+        "3. restore_parent_if_empty: if ancestor condensing leaves nothing passing position 1, re-select",
+        "   without condensing.",
+        "4. position3_new_family: position 3 may accept 1 source group when the genre is named by BOTH",
+        "   MusicBrainz and ListenBrainz at track level and its family is not already in positions 1-2.",
+        "5. artist_only_same_family: artist-only evidence may only add a genre whose family already",
+        "   appears in track/album evidence.",
+        "6. redundant_genres: apply each genre's redundant_with after selection; no refill; never empty;",
+        "   explicit keep_together pairs always win."
+      ],
+      "metal_rock_arbitration": {
+        "enabled": true,
+        "metal_wins_at": 0.6,
+        "rock_wins_at": 0.4,
+        "exclude_roots_from_share": true,
+        "ignore_tag_position_weighting": true,
+        "same_sound_pairs_metal_wins": true
+      },
+      "root_fallback_only": true,
+      "restore_parent_if_empty": true,
+      "position3_new_family": true,
+      "artist_only_same_family": true,
+      "redundant_genres": {
+        "enabled": true,
+        "refill_slot": false,
+        "never_empty": true,
+        "keep_together_wins": true
+      }
     }
   }
 }

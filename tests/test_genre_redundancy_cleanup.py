@@ -205,9 +205,7 @@ class TestCrossoverGenresAreRecognised:
       metal genre.
     """
 
-    @pytest.mark.parametrize(
-        "value", ["rap metal", "rapcore", "rap rock", "rap-metal", "rap-rock"]
-    )
+    @pytest.mark.parametrize("value", ["rap metal", "rapcore", "rap-metal"])
     def test_rap_metal_is_a_recognised_genre(self, value) -> None:
         vocab = get_vocabulary()
         classification = vocab.classify(value)
@@ -215,6 +213,27 @@ class TestCrossoverGenresAreRecognised:
             f"{value!r} is discarded as unknown, so the tag is silently lost"
         )
         assert classification.canonical == "rap_metal"
+
+    @pytest.mark.parametrize("value", ["rap rock", "rap-rock"])
+    def test_rap_rock_is_its_own_genre_not_rap_metal(self, value) -> None:
+        """⚠️ CHANGED DELIBERATELY when the v5 vocabulary landed.
+
+        ``rap rock`` used to be an ALIAS of ``rap_metal``, so a Rage Against the
+        Machine track came out as a metal genre. The v5 file gives it its own
+        entry (rock + hip hop parents), which is more accurate: rap rock is a rock
+        hybrid, and folding it into metal made the metal/rock arbitration treat a
+        rock track as metal.
+
+        What this test protects is unchanged — the tag must not be silently
+        discarded as unknown, which is what the original defect was.
+        """
+        vocab = get_vocabulary()
+        classification = vocab.classify(value)
+        assert classification.kind == "genre", (
+            f"{value!r} is discarded as unknown, so the tag is silently lost"
+        )
+        assert classification.canonical == "rap_rock"
+        assert (vocab.genres["rap_rock"].family or "") == "rock"
 
     def test_rap_metal_is_metal_family(self) -> None:
         vocab = get_vocabulary()
