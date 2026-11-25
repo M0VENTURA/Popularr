@@ -53,7 +53,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_SITE = REPO_ROOT / "test_site"
 PAGES_DIR = TEST_SITE / "templates" / "Pages"
 REBUILT_STATIC = TEST_SITE / "static"
-LIVE_STATIC = REPO_ROOT / "static"
+LIVE_STATIC = TEST_SITE / "static"
 
 # Keywords that can legally start a handler but are not functions we define.
 _NOT_A_FUNCTION = frozenset({
@@ -187,12 +187,9 @@ def _collect_templates(start: Path) -> list[Path]:
 
 
 def _resolve_script(filename: str) -> Path | None:
-    """Mirror the runtime static lookup: rebuilt tree first, live tree second."""
-    for root in (REBUILT_STATIC, LIVE_STATIC):
-        candidate = root / filename
-        if candidate.is_file():
-            return candidate
-    return None
+    """Resolve a script in the one served static tree."""
+    candidate = REBUILT_STATIC / filename
+    return candidate if candidate.is_file() else None
 
 
 def _defined_names(sources: list[str]) -> set[str]:
@@ -379,16 +376,10 @@ class TestNoUnreachableButtonHandlers:
         pages = _page_files()
         assert len(pages) >= 20, f"only found {len(pages)} pages under {PAGES_DIR}"
 
-    def test_the_harness_resolves_scripts_through_the_fallback(self):
-        """``js/downloads.js`` exists only in the live tree.
-
-        If the resolver ignored the live fallback it would drop every definition
-        that file contributes and report working pages as broken.
-        """
+    def test_the_harness_resolves_scripts_in_the_served_tree(self):
+        """A discovery bug would silently drop definitions from the scan."""
         assert _resolve_script("js/services/slskd.js") is not None
-        assert _resolve_script("js/downloads.js") is not None, (
-            "the live-tree fallback is not being applied"
-        )
+        assert _resolve_script("js/pages/download-queue.js") is not None
 
     def test_the_harness_ignores_commented_out_handlers(self):
         """A commented-out onclick must not be reported."""

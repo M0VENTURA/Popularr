@@ -958,10 +958,31 @@
     ]);
   }
 
+  async function loadPopularityReportReady() {
+    const host = document.getElementById('popularityReportReady');
+    if (!host) return;
+    try {
+      const resp = await fetch('/api/popularity/report/latest', { cache: 'no-store' });
+      const data = await resp.json().catch(() => null);
+      const job = data && data.job;
+      if (!job || job.status !== 'done') return;
+      const kb = Number(job.bytes || 0) / 1024;
+      const size = kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb.toFixed(0) + ' KB';
+      host.className = 'alert alert-info shadow-sm d-flex align-items-center flex-wrap gap-2';
+      host.innerHTML = '<i class="bi bi-filetype-csv"></i>'
+        + '<span>Popularity CSV ready — ' + Number(job.rows || 0) + ' rows, ' + size + '.</span>'
+        + '<a class="btn btn-sm btn-primary ms-auto" href="'
+        + esc(job.download_url || '#') + '"><i class="bi bi-download"></i> Download</a>';
+    } catch (_error) {
+      // No report ready is the normal state.
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     renderRecentScans((global._pd && global._pd.recentScans) || []);
     initRecentHistoryTabs();
     initRecentlyAddedActions();
+    loadPopularityReportReady();
 
     try {
       const stored = sessionStorage.getItem('dashboardTableFilter');

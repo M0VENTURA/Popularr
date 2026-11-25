@@ -31,55 +31,6 @@
     <strong>First-run setup incomplete:</strong> Some required fields are missing. Please complete setup using the Setup Wizard or fill in all required fields below.
   </div>
   {% endif %}
-
-  {# ── UI tree (test-site cutover) ─────────────────────────────────────────
-     Switches the whole app between the live templates/static tree and the
-     rebuilt test_site/ tree. Applied at STARTUP, so a change needs a restart:
-     both mechanisms it drives (the Jinja loader and the /static view function)
-     are one-time app-level rebinds, and mutating them per request would race
-     under the concurrent workers.
-
-     `test_site` carries the REAL state — `enabled` is what config says and
-     `active` is whether the cutover actually applied. They differ when the
-     rebuilt tree is missing, which is exactly the case worth surfacing.
-
-     Offered on BOTH Config pages (ids match) so an operator can switch back
-     and forth. `use_test_site` is in `moved_feature_keys` below so the Advanced
-     Features sweeper never emits it twice; `feature_use_test_site` is collected
-     by `collectFeatureFieldOverrides`, which every tree's collector runs.
-  #}
-  <div class="card shadow-sm mb-3" id="ui-tree">
-    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-layers"></i> User Interface</h5>
-    </div>
-    <div class="card-body">
-      <div class="row g-3 align-items-start">
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_use_test_site">Interface</label>
-          <select class="form-select form-select-sm feature-field" id="feature_use_test_site" name="feature_use_test_site">
-            <option value="false" {% if not config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Live (templates/)</option>
-            <option value="true" {% if config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Rebuilt (test_site/)</option>
-          </select>
-          <small class="form-text text-muted">
-            <strong>Requires a restart</strong> — the interface is bound at startup.
-          </small>
-        </div>
-        <div class="col-12 col-lg-8">
-          {% if test_site and test_site.get('active') %}
-            <div class="alert alert-success py-2 mb-0 small">
-              <i class="bi bi-check-circle-fill"></i>
-              <strong>Rebuilt UI is active</strong> — select Live and restart to go back.
-            </div>
-          {% else %}
-            <div class="alert alert-secondary py-2 mb-0 small">
-              <i class="bi bi-window"></i>
-              <strong>Live UI active.</strong> The rebuilt tree is served once switched on and the app restarted.
-            </div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </div>
   <!-- Vertical Tab Navigation -->
   <div class="row mt-3">
     <div class="col-12 col-md-3 col-xl-2 mb-4">

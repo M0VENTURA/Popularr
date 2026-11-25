@@ -358,12 +358,27 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
 
         library_rows = session.execute(
             text(
-                "SELECT id, title, track_number, disc_number, mbid, album, duration FROM tracks "
+                "SELECT id, title, track_number, disc_number, mbid, album, duration, file_path "
+                "FROM tracks "
                 "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
             ),
             {"artist": artist},
         ).mappings().all()
         library_rows = _rows_in_album(library_rows)
+        # ⭐ A PLACEHOLDER ROW IS NOT A FILE. Missing-track rows are inserted
+        # with no ``file_path`` (and queued rows carry the sentinel). They used
+        # to be counted as "in the library" by the title/position gates below,
+        # so a genuinely missing track that already had a placeholder row was
+        # hidden from the missing list — the reported "track 1 is missing but
+        # does not appear under missing releases".
+        library_rows = [
+            r for r in library_rows
+            if "file_path" not in r
+            or (
+                str(r.get("file_path") or "").strip()
+                and "__queued_for_download__" not in str(r.get("file_path") or "")
+            )
+        ]
         library_count = len(library_rows)
 
     # ⭐ An explicit release (the album page's Lookup MBID just resolved one)

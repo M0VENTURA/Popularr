@@ -66,10 +66,11 @@ from sqlalchemy import text
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-LIVE_STATIC = REPO_ROOT / "static"
+# One served tree; keep the old names as aliases for the contract checks.
 REBUILT_STATIC = REPO_ROOT / "test_site" / "static"
-LIVE_TEMPLATES = REPO_ROOT / "templates"
 REBUILT_TEMPLATES = REPO_ROOT / "test_site" / "templates"
+LIVE_STATIC = REPO_ROOT / "test_site" / "static"
+LIVE_TEMPLATES = REPO_ROOT / "test_site" / "templates"
 
 ARTIST_ROUTES = REPO_ROOT / "routes" / "artist_routes.py"
 
@@ -79,19 +80,24 @@ MISSING_TRACKLIST_ROUTE = "/api/artist/release/tracklist"
 #: The route it used to call, which has never existed.
 RETIRED_MISSING_TRACKLIST_ROUTE = "/api/musicbrainz/release/tracks"
 
+#: A release-GROUP MBID used by the group→release fallback tests.
+RELEASE_GROUP_MBID = "11111111-2222-3333-4444-555555555555"
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _module_body(path: Path) -> str:
-    """A static JS file with its leading block comment removed."""
-    body = _read(path).lstrip()
-    if body.startswith("/*"):
-        end = body.find("*/")
-        if end != -1:
-            body = body[end + 2:].strip()
-    return body
+    """A static JS file with comments removed.
+
+    Comments legitimately QUOTE retired URLs to explain the fix; scanning them
+    as live calls would fail on documentation, not behaviour.
+    """
+    body = _read(path)
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
+    body = re.sub(r"^\s*//.*$", "", body, flags=re.MULTILINE)
+    return body.strip()
 
 
 def _release_module_paths() -> list[Path]:
@@ -748,7 +754,6 @@ class TestConfigPageExposesTheBackfillLimit:
     """Every configurable option must be settable from the Config page."""
 
     @pytest.mark.parametrize("path", [
-        REPO_ROOT / "templates/pages/config.html",
         REPO_ROOT / "test_site/templates/Pages/config.html",
     ])
     def test_option_is_rendered_as_a_feature_field(self, path: Path) -> None:

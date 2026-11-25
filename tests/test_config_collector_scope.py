@@ -43,7 +43,7 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROBE = REPO_ROOT / "tests" / "js" / "config-load-probe.js"
 
-LIVE_CONFIG_JS = REPO_ROOT / "static" / "js" / "config.js"
+LIVE_CONFIG_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "config.js"
 REBUILT_CONFIG_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "config.js"
 
 CONFIG_SCRIPTS = (LIVE_CONFIG_JS, REBUILT_CONFIG_JS)

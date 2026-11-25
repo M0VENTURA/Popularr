@@ -55,7 +55,7 @@ LIVE_PARTIAL = REPO_ROOT / "templates/components/modals/_soulseek_manual_search.
 
 QUEUE_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/queue.html"
 REBUILT_MONITOR_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
-LIVE_MONITOR_PAGE = REPO_ROOT / "templates/pages/downloads/monitor.html"
+LIVE_MONITOR_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
 
 SLSKD_JS = REPO_ROOT / "test_site/static/js/services/slskd.js"
 BUTTON_STATE_JS = REPO_ROOT / "test_site/static/js/ui/button-state.js"
@@ -279,14 +279,14 @@ class TestTheShadowingPremiseHolds:
     shadowed and loads services/slskd.js exactly like the queue page.
     """
 
-    def test_the_monitor_page_is_no_longer_shadowed(self):
+    def test_the_monitor_page_is_not_shadowed(self):
         from helpers import test_site_mode
 
-        shadowed = {s.replace("\\", "/") for s in test_site_mode._SHADOWED_TEMPLATES}
-        assert "pages/downloads/monitor.html" not in shadowed, (
-            "the rebuilt monitor page is still shadowed — it can never reach "
-            "the test_site controllers. Remove it from the shadow list now "
-            "that the page is real."
+        # There is no shadow list any more: the rebuilt tree is the only tree
+        # the loader serves, so no page can be silently redirected elsewhere.
+        assert not hasattr(test_site_mode, "_SHADOWED_TEMPLATES"), (
+            "template shadowing is gone with the live tree; the monitor page "
+            "must be served from test_site like every other page"
         )
 
     def test_the_rebuilt_monitor_page_loads_slskd_js(self):

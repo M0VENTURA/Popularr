@@ -39,9 +39,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-LIVE_ALBUM = REPO_ROOT / "static" / "js" / "album_detail.js"
+LIVE_ALBUM = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 REBUILT_ALBUM = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
-LIVE_REVIEW = REPO_ROOT / "static" / "js" / "metadata-review.js"
+LIVE_REVIEW = REPO_ROOT / "test_site" / "static" / "js" / "services" / "metadata-review.js"
 REBUILT_REVIEW = REPO_ROOT / "test_site" / "static" / "js" / "services" / "metadata-review.js"
 
 # A compilation track: the recording has its own credit, the ALBUM does not
@@ -202,16 +202,7 @@ class TestTheDurationCheckReportsWhoToSearchFor:
 
 
 class TestTheQueueButtonsSendTheTrackArtist:
-    """Client side: three buttons, both trees."""
-
-    def test_the_live_missing_row_prefers_the_track_artist(self):
-        src = _src(LIVE_ALBUM)
-        assert (
-            'data-artist="${escapeHtml(trackComp.track_artist || trackComp.mb_artist || pageArtist)}"'
-            in src
-        ), "the live missing-row button still queues the album artist"
-        # The album artist keeps its own, correct, meaning.
-        assert 'data-album-artist="${escapeHtml(pageArtist)}"' in src
+    """Client side: the served page's buttons."""
 
     def test_the_rebuilt_missing_row_payload_prefers_the_track_artist(self):
         src = _src(REBUILT_ALBUM)
@@ -221,10 +212,7 @@ class TestTheQueueButtonsSendTheTrackArtist:
         ), "the rebuilt missing-row payload still queues the album artist"
         assert "album_artist: pageArtist()," in src
 
-    def test_both_redownload_buttons_use_the_check_artist(self):
-        live = _src(LIVE_REVIEW)
-        assert "btn.dataset.artist = check.artist || pageArtist();" in live
-
+    def test_the_redownload_button_uses_the_check_artist(self):
         rebuilt = _src(REBUILT_REVIEW)
         assert "artist: check.artist || pageArtist()," in rebuilt
 

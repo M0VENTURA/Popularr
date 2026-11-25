@@ -163,34 +163,17 @@ class TestThePageRouteIsRetired:
             "bookmark lands on a dashboard with no logs in sight"
         )
 
-    async def test_live_mode_still_serves_its_page(self, client, monkeypatch):
-        """CONTROL — the modal work is test_site scoped, so live mode keeps the
-        page it has. Redirecting there too would remove the file picker and
-        filters with nothing to replace them."""
-        monkeypatch.setattr(
-            "helpers.test_site_mode.config_enables_test_site", lambda: False
-        )
-
-        response = await client.get("/logs")
-
-        assert response.status_code == 200
-        body = await response.get_data(as_text=True)
-        assert "Application Logs" in body, "the live page must still render"
-
-    def test_the_redirect_is_gated_on_the_cutover_helper(self):
-        """Not a raw read of ``features.use_test_site``: the helper is the one
-        the cutover itself uses, and it fails SAFE to disabled."""
+    def test_the_route_has_no_second_viewer_branch(self):
+        """One UI now: the route always hands off to the modal."""
         source = UI_ROUTES.read_text(encoding="utf-8")
         block = source[source.index('@ui_bp.route("/logs")'):]
         block = block[: block.index('@ui_bp.route("/help")')]
-        # Comments out: this file's own docstring names features.use_test_site
-        # to say it does NOT read it.
         code = py_code(block)
 
-        assert "config_enables_test_site()" in code
-        assert "features.use_test_site" not in code, (
-            "the route re-read features.use_test_site directly"
-        )
+        assert "redirect(url_for(\"ui.dashboard\", logs=\"1\"))" in code
+        assert "config_enables_test_site" not in code
+        assert "features.use_test_site" not in code
+        assert "pages/logs.html" not in code
 
 
 class TestTheSystemMenuStillReachesLogs:

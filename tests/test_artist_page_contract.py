@@ -48,10 +48,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-LIVE_TEMPLATES = REPO_ROOT / "templates"
+# There is one UI tree now. The former "live" names are kept as aliases so the
+# contract checks below keep running against the served tree.
 REBUILT_TEMPLATES = REPO_ROOT / "test_site" / "templates"
-LIVE_STATIC = REPO_ROOT / "static"
 REBUILT_STATIC = REPO_ROOT / "test_site" / "static"
+LIVE_TEMPLATES = REPO_ROOT / "test_site" / "templates"
+LIVE_STATIC = REPO_ROOT / "test_site" / "static"
 
 #: The page the artist route actually renders (routes/ui_routes.py).
 ARTIST_PAGE_TEMPLATE = "artist_detail_v2.html"
@@ -141,13 +143,17 @@ def _release_components() -> list[Path]:
     ) if p.is_file()]
 
 
-def test_release_component_exists_in_both_trees() -> None:
-    """Under the cutover the rebuilt copy is preferred, so both must exist."""
+def _release_components() -> list[Path]:
+    return [REBUILT_TEMPLATES / RELEASE_COMPONENT] if (
+        REBUILT_TEMPLATES / RELEASE_COMPONENT
+    ).is_file() else []
+
+
+def test_release_component_exists_in_the_served_tree() -> None:
     found = {p.relative_to(REPO_ROOT).as_posix() for p in _release_components()}
-    assert "templates/components/_release_section.html" in found
     assert "test_site/templates/components/_release_section.html" in found, (
-        "the rebuilt tree has no components/_release_section.html; the cutover "
-        "would fall back to the live macro and the two trees could diverge"
+        "the served tree has no components/_release_section.html; the artist "
+        "page imports its macro"
     )
 
 
@@ -481,28 +487,18 @@ def _module_body(path: Path) -> str:
 def test_shared_module_copies_do_not_drift(
     live_rel: str, rebuilt_rel: str, canary: str
 ) -> None:
-    """A module served by BOTH trees must be one implementation.
+    """The served tree must contain the module and it must not be gutted.
 
-    ``artist-releases.js`` touches no tree-specific global — it feature-detects
-    ``toast`` / ``api`` / ``ui.modal`` and falls back to ``showToast`` / ``fetch``
-    / ``bootstrap.Modal`` — so a single body serves both trees. Divergence would
-    mean the page behaves differently depending only on the cutover flag, which
-    is the exact class of bug this suite exists to prevent.
+    The former live copy no longer exists; ``live_rel`` is retained in the
+    parametrization only as documentation of the old path.
     """
-    live = LIVE_STATIC / live_rel
     rebuilt = REBUILT_STATIC / rebuilt_rel
-    assert live.is_file(), f"missing {live.relative_to(REPO_ROOT)}"
     assert rebuilt.is_file(), f"missing {rebuilt.relative_to(REPO_ROOT)}"
 
-    live_code = _module_body(live)
-    assert canary in live_code, (
-        f"{live.relative_to(REPO_ROOT)} does not publish `{canary}` — "
+    code = _module_body(rebuilt)
+    assert canary in code, (
+        f"{rebuilt.relative_to(REPO_ROOT)} does not publish `{canary}` — "
         "either the header-stripping above is wrong or the module was gutted"
-    )
-    assert live_code == _module_body(rebuilt), (
-        f"The code in {live_rel} (live) and {rebuilt_rel} (rebuilt) has drifted. "
-        "Both trees serve this module, so any difference is a behaviour change "
-        "that appears in only one mode. Port the change to both copies."
     )
 
 

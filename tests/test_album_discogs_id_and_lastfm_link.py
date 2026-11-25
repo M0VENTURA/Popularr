@@ -33,7 +33,7 @@ import pytest
 from services.popularity.stages import album_stage
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_TEMPLATE = REPO_ROOT / "templates" / "pages" / "album_detail.html"
+LIVE_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 REBUILT_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 
 TEMPLATES = [LIVE_TEMPLATE, REBUILT_TEMPLATE]

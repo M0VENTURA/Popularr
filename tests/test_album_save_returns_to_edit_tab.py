@@ -43,9 +43,9 @@ import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 UI_ROUTES = REPO_ROOT / "routes" / "ui_routes.py"
-LIVE_JS = REPO_ROOT / "static" / "js" / "album_detail.js"
+LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
-LIVE_TEMPLATE = REPO_ROOT / "templates" / "pages" / "album_detail.html"
+LIVE_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 REBUILT_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 
 FRAGMENT = '"#tab-details"'

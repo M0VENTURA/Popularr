@@ -1,0 +1,36 @@
+{#
+  Match Missing Track Modal — match a MusicBrainz-missing track to an existing library song.
+  Included by album_detail.html.
+#}
+<div class="modal fade" id="albumMatchTrackModal" tabindex="-1" aria-labelledby="albumMatchTrackModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="albumMatchTrackModalLabel">Match Missing Track to Existing Song</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted mb-2">
+                    <strong id="albumMatchMbTitle"></strong> (Track <span id="albumMatchMbTrackNum"></span>)
+                    — select a track from the library to sync this MB metadata to it.
+                </p>
+                <div class="table-responsive">
+                    <table class="table table-hover table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Current Title</th>
+                                <th>File</th>
+                                <th class="text-center">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="albumMatchCandidatesTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>

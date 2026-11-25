@@ -18,10 +18,10 @@ const isWatch = process.argv.includes("--watch");
 
 /** Entry points — add new JS files here to include them in the bundle */
 const entryPoints = {
-  main: join(__dirname, "static", "js", "main.js"),
+  main: join(__dirname, "test_site", "static", "js", "main.js"),
 };
 
-const outDir = join(__dirname, "static", "dist");
+const outDir = join(__dirname, "test_site", "static", "dist");
 
 // Ensure output directory exists
 if (!existsSync(outDir)) {
@@ -30,7 +30,7 @@ if (!existsSync(outDir)) {
 
 /**
  * Copy vendor files (Bootstrap CSS/JS, Bootstrap Icons) from node_modules
- * into static/dist so they can be served locally instead of from CDN.
+ * into test_site/static/dist so they can be served locally instead of from CDN.
  *
  * Run `npm install bootstrap bootstrap-icons` before building.
  */
@@ -38,19 +38,19 @@ function copyVendorAssets() {
   const vendorDirs = [
     {
       src: "node_modules/bootstrap/dist/css/bootstrap.min.css",
-      dest: "static/dist/vendor/bootstrap.min.css",
+      dest: "test_site/static/dist/vendor/bootstrap.min.css",
     },
     {
       src: "node_modules/bootstrap/dist/js/bootstrap.bundle.min.js",
-      dest: "static/dist/vendor/bootstrap.bundle.min.js",
+      dest: "test_site/static/dist/vendor/bootstrap.bundle.min.js",
     },
     {
       src: "node_modules/bootstrap-icons/font/bootstrap-icons.css",
-      dest: "static/dist/vendor/bootstrap-icons.css",
+      dest: "test_site/static/dist/vendor/bootstrap-icons.css",
     },
     {
       src: "node_modules/bootstrap-icons/font/fonts",
-      dest: "static/dist/vendor/fonts",
+      dest: "test_site/static/dist/vendor/fonts",
     },
   ];
 

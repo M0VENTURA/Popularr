@@ -35,47 +35,6 @@
   </div>
   {% endif %}
 
-  {# ── UI tree (test-site cutover) ─────────────────────────────────────────
-     Switches the whole app between the live templates/static tree and this
-     rebuilt tree. Present HERE as well as on the live Config page so that
-     once the rebuilt UI is active there is a way back to the live one —
-     without it, switching would be a one-way door.
-
-     Applied at STARTUP (`test_site.active` is the real state; `enabled` is
-     just what config says), so switching needs a restart. #}
-  <div class="card shadow-sm mb-3" id="ui-tree">
-    <div class="card-header bg-secondary bg-opacity-10 border-bottom">
-      <h5 class="mb-0"><i class="bi bi-layers"></i> User Interface</h5>
-    </div>
-    <div class="card-body">
-      <div class="row g-3 align-items-start">
-        <div class="col-12 col-sm-6 col-lg-4">
-          <label class="form-label form-label-sm" for="feature_use_test_site">Interface</label>
-          <select class="form-select form-select-sm feature-field" id="feature_use_test_site" name="feature_use_test_site">
-            <option value="false" {% if not config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Live (templates/)</option>
-            <option value="true" {% if config.get('features', {}).get('use_test_site', False) %}selected{% endif %}>Rebuilt (test_site/)</option>
-          </select>
-          <small class="form-text text-muted">
-            <strong>Requires a restart</strong> — the interface is bound at startup.
-          </small>
-        </div>
-        <div class="col-12 col-lg-8">
-          {% if test_site and test_site.get('active') %}
-            <div class="alert alert-success py-2 mb-0 small">
-              <i class="bi bi-check-circle-fill"></i>
-              <strong>Rebuilt UI is active</strong> — select Live and restart to go back.
-            </div>
-          {% else %}
-            <div class="alert alert-secondary py-2 mb-0 small">
-              <i class="bi bi-window"></i>
-              <strong>Live UI active.</strong> The rebuilt tree is served once switched on and the app restarted.
-            </div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- Vertical Tab Navigation -->
   <div class="row mt-3">
     <div class="col-12 col-md-3 col-xl-2 mb-4">
@@ -425,11 +384,11 @@
           {% set moved_feature_keys = ['album_skip_days', 'popularity_skip_days', 'singles_skip_days', 'genre_skip_days', 'metadata_skip_days', 'album_skip_min_tracks', 'skip_unchanged_albums', 'run_singles_on_skipped_albums', 'cover_detection_enabled', 'mature_track_min_age_years',
             'old_album_age_months', 'album_old_album_skip_days', 'popularity_old_album_skip_days', 'singles_old_album_skip_days', 'metadata_old_album_skip_days', 'missing_release_tracklist_limit', 'prefetch_cache_days',
             'forced_finalise_skip_days', 'forced_singles_skip_days',
-            'deep_genre_search', 'use_test_site',
+            'deep_genre_search',
             'source_discogs_confidence', 'source_musicbrainz_confidence', 'source_musicbrainz_compilation_confidence',
             'source_discogs_video_confidence', 'source_lastfm_confidence', 'source_radio_edit_confidence'] %}
           {# Legacy keys from the old system with no readers in the current codebase — never shown or re-saved #}
-          {% set dead_feature_keys = ['dry_run', 'sync', 'force', 'verbose', 'perpetual', 'batchrate', 'full_scan', 'auto_boot_navidrome_scan', 'artist'] %}
+          {% set dead_feature_keys = ['dry_run', 'sync', 'force', 'verbose', 'perpetual', 'batchrate', 'full_scan', 'auto_boot_navidrome_scan', 'artist', 'use_test_site'] %}
           {% for key, value in config.get('features', {}).items() %}
           {% if key not in moved_feature_keys and key not in dead_feature_keys %}
           <div class="col-md-4">
@@ -2257,11 +2216,13 @@
           per-album reports on those pages, so a track keeps its relative position
           whichever file you open.
         </p>
-        <a href="{{ url_for('misc_api.api_collection_popularity_report') }}"
-           class="btn btn-primary btn-sm text-nowrap"
-           title="CSV of every track in the collection: Last.fm + ListenBrainz listens, source scores, combined score and stars — most popular first">
-          <i class="bi bi-download"></i> Download Collection CSV
-        </a>
+        <div class="text-end">
+          <button type="button" class="btn btn-primary btn-sm text-nowrap" id="popularity_export_start_btn"
+                  title="Builds the CSV in the background; the download link appears here and on the dashboard">
+            <i class="bi bi-download"></i> Download Collection CSV
+          </button>
+          <div id="popularity_export_output" class="small text-muted mt-2 text-start"></div>
+        </div>
       </div>
     </div>
   </div>

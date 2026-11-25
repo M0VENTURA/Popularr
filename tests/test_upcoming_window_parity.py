@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-LIVE_DASHBOARD = ROOT / "static" / "js" / "dashboard.js"
+LIVE_DASHBOARD = ROOT / "test_site" / "static" / "js" / "pages" / "dashboard.js"
 REBUILT_DASHBOARD = ROOT / "test_site" / "static" / "js" / "pages" / "dashboard.js"
 API_ROUTE = ROOT / "routes" / "upcoming_releases_routes.py"
 

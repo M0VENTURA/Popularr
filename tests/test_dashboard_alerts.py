@@ -46,10 +46,10 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROBE = REPO_ROOT / "tests" / "js" / "dashboard-alerts-probe.js"
 
-LIVE_JS = REPO_ROOT / "static" / "js" / "dashboard.js"
-LIVE_HTML = REPO_ROOT / "templates" / "pages" / "dashboard.html"
-LIVE_CONFIG_JS = REPO_ROOT / "static" / "js" / "config.js"
-LIVE_CONFIG_HTML = REPO_ROOT / "templates" / "pages" / "config.html"
+LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "dashboard.js"
+LIVE_HTML = REPO_ROOT / "test_site" / "templates" / "Pages" / "dashboard.html"
+LIVE_CONFIG_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "config.js"
+LIVE_CONFIG_HTML = REPO_ROOT / "test_site" / "templates" / "Pages" / "config.html"
 
 REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "dashboard.js"
 REBUILT_HTML = REPO_ROOT / "test_site" / "templates" / "Pages" / "dashboard.html"

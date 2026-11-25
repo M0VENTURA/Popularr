@@ -43,11 +43,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROBE = REPO_ROOT / "tests" / "js" / "mobile-navbar-flicker-probe.js"
-LIVE_MAIN = "static/js/main.js"
+LIVE_MAIN = "test_site/static/js/main.js"
 REBUILT_MAIN = "test_site/static/js/main.js"
-LIVE_CSS = REPO_ROOT / "static" / "css" / "popularr.css"
+LIVE_CSS = REPO_ROOT / "test_site" / "static" / "css" / "popularr.css"
 REBUILT_CSS = REPO_ROOT / "test_site" / "static" / "css" / "popularr.css"
-LIVE_BASE = "templates/base.html"
+LIVE_BASE = "test_site/templates/base.html"
 REBUILT_BASE = "test_site/templates/base.html"
 
 

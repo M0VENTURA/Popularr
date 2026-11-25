@@ -99,11 +99,12 @@ def _seed(tid: str, title: str, track_number, *, disc: str, album: str,
         session.execute(
             text(
                 "INSERT INTO tracks (id, title, track_number, disc_number, album, "
-                "artist, album_artist, duration) "
-                "VALUES (:id, :title, :tn, :dn, :album, :artist, :aa, 200)"
+                "artist, album_artist, duration, file_path) "
+                "VALUES (:id, :title, :tn, :dn, :album, :artist, :aa, 200, :fp)"
             ),
             {"id": tid, "title": title, "tn": track_number, "dn": disc,
-             "album": album, "artist": artist, "aa": album_artist},
+             "album": album, "artist": artist, "aa": album_artist,
+             "fp": f"/music/{tid}.mp3"},
         )
         session.commit()
 

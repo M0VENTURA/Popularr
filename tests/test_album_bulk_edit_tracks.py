@@ -31,9 +31,9 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIVE_TEMPLATE = REPO_ROOT / "templates" / "pages" / "album_detail.html"
+LIVE_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 REBUILT_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
-LIVE_JS = REPO_ROOT / "static" / "js" / "album_detail.js"
+LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 TRACK_ROUTES = REPO_ROOT / "routes" / "track_routes.py"
 
@@ -293,26 +293,19 @@ class TestTheAlbumPageRendersIt:
             assert "applyEditTracks(this)" in html
 
 
-class TestBothScriptsWireIt:
+class TestTheServedScriptWiresIt:
     def test_the_handlers_are_defined_and_exported(self):
-        for path in (LIVE_JS, REBUILT_JS):
-            src = path.read_text(encoding="utf-8")
-            assert "openEditTracksModal" in src, f"{path.name}: opener missing"
-            assert "applyEditTracks" in src, f"{path.name}: apply handler missing"
-            export = (
-                "window.openEditTracksModal" if path == LIVE_JS
-                else "global.openEditTracksModal"
-            )
-            assert export in src, f"{path.name}: {export} not exported for the onclick"
+        src = REBUILT_JS.read_text(encoding="utf-8")
+        assert "openEditTracksModal" in src, "opener missing"
+        assert "applyEditTracks" in src, "apply handler missing"
+        assert "global.openEditTracksModal" in src, "opener not exported for the onclick"
 
     def test_it_posts_to_the_bulk_endpoint_with_the_selection(self):
-        for path in (LIVE_JS, REBUILT_JS):
-            src = path.read_text(encoding="utf-8")
-            assert "/api/track/bulk-update" in src, f"{path.name}: no endpoint call"
-            # The ids come from the SELECTION helper, not from the whole album.
-            ids = "_getSelectedTrackIds()" if path == LIVE_JS else "selectedTrackIds()"
-            assert ids in src, f"{path.name}: {ids} not used to build track_ids"
-            assert "sync_to_file: true" in src, (
-                f"{path.name}: the file fan-out was dropped — a metadata change "
-                "must reach the rows AND the tags Navidrome reads"
-            )
+        src = REBUILT_JS.read_text(encoding="utf-8")
+        assert "/api/track/bulk-update" in src, "no endpoint call"
+        # The ids come from the SELECTION helper, not from the whole album.
+        assert "selectedTrackIds()" in src, "selection helper not used for track_ids"
+        assert "sync_to_file: true" in src, (
+            "the file fan-out was dropped — a metadata change must reach the "
+            "rows AND the tags Navidrome reads"
+        )

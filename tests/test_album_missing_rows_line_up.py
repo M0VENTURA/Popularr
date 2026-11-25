@@ -44,9 +44,9 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_JS = REPO_ROOT / "static" / "js" / "album_detail.js"
+LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
-LIVE_TEMPLATE = REPO_ROOT / "templates" / "pages" / "album_detail.html"
+LIVE_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 REBUILT_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 
 pytestmark = pytest.mark.skipif(

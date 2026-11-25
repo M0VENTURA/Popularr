@@ -41,7 +41,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UI_ROUTES = REPO_ROOT / "routes" / "ui_routes.py"
-LIVE_SECTION = REPO_ROOT / "templates" / "components" / "_album_category_section.html"
+LIVE_SECTION = REPO_ROOT / "test_site" / "templates" / "components" / "_album_category_section.html"
 REBUILT_SECTION = REPO_ROOT / "test_site" / "templates" / "components" / "_album_category_section.html"
 
 

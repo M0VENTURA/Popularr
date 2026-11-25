@@ -14,7 +14,7 @@ from urllib.parse import unquote
 
 import httpx
 import structlog
-from quart import Blueprint, jsonify, request, Response
+from quart import Blueprint, jsonify, request, Response, send_file
 from sqlalchemy import text
 
 from db.engine import db_session
@@ -2039,6 +2039,58 @@ def api_essentia_download_status() -> Any:
 # ===========================================================================
 # COLLECTION POPULARITY REPORT
 # ===========================================================================
+
+@misc_api_bp.route("/popularity/report/start", methods=["POST"])
+async def api_collection_popularity_report_start() -> Any:
+    """Start the collection CSV in the background; poll ``status/<job_id>``.
+
+    Building the whole ``tracks`` table CSV inside the request is what timed out
+    for this library. The dashboard and the Config card both read the job list,
+    so a finished report stays downloadable without re-running the export.
+    """
+    from services.popularity.popularity_report_export_service import (
+        create_report_job,
+    )
+
+    job = create_report_job()
+    return jsonify({"success": True, "job": job}), 202
+
+
+@misc_api_bp.route("/popularity/report/status/<job_id>", methods=["GET"])
+def api_collection_popularity_report_status(job_id: str) -> Any:
+    from services.popularity.popularity_report_export_service import (
+        get_report_job,
+    )
+
+    job = get_report_job(job_id)
+    if job is None:
+        return jsonify({"success": False, "error": "Report job not found"}), 404
+    return jsonify({"success": True, "job": job})
+
+
+@misc_api_bp.route("/popularity/report/latest", methods=["GET"])
+def api_collection_popularity_report_latest() -> Any:
+    """The newest completed report, for the dashboard's ready link."""
+    from services.popularity.popularity_report_export_service import (
+        latest_completed_job,
+    )
+
+    job = latest_completed_job()
+    return jsonify({"success": True, "job": job})
+
+
+@misc_api_bp.route("/popularity/report/download/<job_id>", methods=["GET"])
+async def api_collection_popularity_report_download(job_id: str) -> Any:
+    from services.popularity.popularity_report_export_service import (
+        report_file,
+    )
+
+    found = report_file(job_id)
+    if not found:
+        return jsonify({"success": False, "error": "Report not ready"}), 404
+    path, filename = found
+    return await send_file(path, as_attachment=True)
+
 
 @misc_api_bp.route("/popularity/report")
 async def api_collection_popularity_report() -> Any:

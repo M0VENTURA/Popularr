@@ -142,6 +142,80 @@
       + '</div>';
   }
 
+  /* ── Collection popularity CSV (background) ─────────────────────────── */
+  const POPULARITY_EXPORT_START = '/api/popularity/report/start';
+  const POPULARITY_EXPORT_STATUS = '/api/popularity/report/status/';
+  const POPULARITY_EXPORT_LATEST = '/api/popularity/report/latest';
+
+  function renderPopularityExport(job) {
+    const out = document.getElementById('popularity_export_output');
+    if (!out || !job) return;
+    if (job.status === 'done') {
+      const kb = Number(job.bytes || 0) / 1024;
+      out.innerHTML = '<span class="text-success"><i class="bi bi-check-circle"></i> '
+        + 'Ready — ' + Number(job.rows || 0) + ' rows, '
+        + (kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb.toFixed(0) + ' KB')
+        + '.</span> <a class="ms-1" href="' + esc(job.download_url || '#') + '">Download CSV</a>';
+      return;
+    }
+    if (job.status === 'error') {
+      out.innerHTML = '<span class="text-danger">Export failed: ' + esc(job.error || 'unknown error') + '</span>';
+      return;
+    }
+    out.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>'
+      + 'Building the CSV in the background… you can leave this page.';
+  }
+
+  async function runPopularityExport() {
+    const btn = document.getElementById('popularity_export_start_btn');
+    const out = document.getElementById('popularity_export_output');
+    if (btn) btn.disabled = true;
+    if (out) out.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Starting…';
+
+    try {
+      const resp = await fetch(POPULARITY_EXPORT_START, { method: 'POST' });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.success === false) {
+        if (out) out.innerHTML = '<span class="text-danger">'
+          + esc(data.error || ('HTTP ' + resp.status)) + '</span>';
+        return;
+      }
+      renderPopularityExport(data.job);
+      pollPopularityExport(data.job.id);
+    } catch (error) {
+      if (out) out.innerHTML = '<span class="text-danger">' + esc(String(error)) + '</span>';
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function pollPopularityExport(jobId) {
+    try {
+      const resp = await fetch(POPULARITY_EXPORT_STATUS + encodeURIComponent(jobId), { cache: 'no-store' });
+      const data = await resp.json().catch(() => null);
+      if (!data || !data.job) return;
+      renderPopularityExport(data.job);
+      if (data.job.status === 'pending' || data.job.status === 'running') {
+        setTimeout(function () { pollPopularityExport(jobId); }, 1500);
+      }
+    } catch (_error) {
+      // A failed poll is not a failed export.
+    }
+  }
+
+  async function loadPopularityExportLatest() {
+    if (!document.getElementById('popularity_export_output')) return;
+    try {
+      const resp = await fetch(POPULARITY_EXPORT_LATEST, { cache: 'no-store' });
+      const data = await resp.json().catch(() => null);
+      if (data && data.job && data.job.status === 'done') {
+        renderPopularityExport(data.job);
+      }
+    } catch (_error) {
+      // no ready report is a normal state
+    }
+  }
+
   /**
    * Preview or apply a star-rating resync.
    *
@@ -3463,6 +3537,9 @@
     if (resyncApply && document.getElementById('star_resync_output')) {
       pollStarResync(true);
     }
+    const popularityExportBtn = document.getElementById('popularity_export_start_btn');
+    if (popularityExportBtn) popularityExportBtn.addEventListener('click', runPopularityExport);
+    if (popularityExportBtn) loadPopularityExportLatest();
     const genreResyncPreview = document.getElementById('genre_resync_preview_btn');
     if (genreResyncPreview) genreResyncPreview.addEventListener('click', () => runGenreResync(true));
     const genreResyncApply = document.getElementById('genre_resync_apply_btn');

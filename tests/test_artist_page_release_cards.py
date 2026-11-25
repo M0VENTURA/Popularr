@@ -40,11 +40,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_ROUTES = REPO_ROOT / "routes" / "ui_routes.py"
 ALBUM_ROUTES = REPO_ROOT / "routes" / "album_routes.py"
-LIVE_SECTION = REPO_ROOT / "templates" / "components" / "_release_section.html"
+LIVE_SECTION = REPO_ROOT / "test_site" / "templates" / "components" / "_release_section.html"
 REBUILT_SECTION = REPO_ROOT / "test_site" / "templates" / "components" / "_release_section.html"
-LIVE_JS = REPO_ROOT / "static" / "js" / "artist-releases.js"
+LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-releases.js"
 REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-releases.js"
-LIVE_MODAL = REPO_ROOT / "templates" / "components" / "modals" / "_artist_modals.html"
+LIVE_MODAL = REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_modals.html"
 REBUILT_MODAL = REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_modals.html"
 
 RG_ONE = "11111111-1111-4111-8111-111111111111"

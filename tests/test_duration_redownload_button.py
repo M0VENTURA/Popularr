@@ -34,7 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIVE_REVIEW = REPO_ROOT / "static" / "js" / "metadata-review.js"
+LIVE_REVIEW = REPO_ROOT / "test_site" / "static" / "js" / "services" / "metadata-review.js"
 REBUILT_REVIEW = REPO_ROOT / "test_site" / "static" / "js" / "services" / "metadata-review.js"
 REBUILT_ALBUM = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 
@@ -80,13 +80,6 @@ class TestBothTreesOfferTheButton:
 
 
 class TestItUsesTheExistingQueuePath:
-    def test_live_calls_the_window_implementation(self):
-        src = _src(LIVE_REVIEW)
-        assert "window.queueMissingTrack(btn)" in src, (
-            "the live tree must reuse queueMissingTrack — it owns the linked-"
-            "release fallback, the busy popup and the already_queued rule"
-        )
-
     def test_rebuilt_calls_the_exported_implementation_with_a_payload(self):
         src = _src(REBUILT_REVIEW)
         assert "global.albumDetail.queueMissingTrack(payload, btn)" in src, (

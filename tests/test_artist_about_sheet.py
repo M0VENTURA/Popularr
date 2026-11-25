@@ -41,7 +41,7 @@ SHEETS = (
     REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_about_modal.html",
 )
 
-LIVE_JS = REPO_ROOT / "static" / "js" / "artist-page.js"
+LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-detail-extras.js"
 REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-detail-extras.js"
 
 

@@ -36,9 +36,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Directories served to the browser as static assets. old_system/ is a frozen
-# reference snapshot and is excluded.
-STATIC_ROOTS = (REPO_ROOT / "static", REPO_ROOT / "test_site" / "static")
+# The single served static root. old_system/ is a frozen reference snapshot.
+STATIC_ROOTS = (REPO_ROOT / "test_site" / "static",)
 
 _JINJA_TOKEN = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.DOTALL)
 
@@ -66,7 +65,7 @@ def test_js_files_are_discovered() -> None:
     files = _js_files()
     assert files, "no .js files discovered - STATIC_ROOTS is wrong"
     names = {f.name for f in files}
-    assert "artist-album-filter.js" in names
+    assert "main.js" in names
 
 
 @pytest.mark.parametrize(
@@ -94,50 +93,17 @@ def test_static_js_contains_no_jinja(js_file: Path) -> None:
     )
 
 
-def test_artist_filter_module_is_loaded_and_publishes_globals() -> None:
-    """The artist album filter must be a real module AND still be loaded.
+def test_artist_page_keeps_the_releases_sections_gate() -> None:
+    """``#releases-sections`` is the initialisation gate for the release module.
 
-    Pins the specific regression: the page-wide filter bar called
-    ``setArtistFilter(...)`` from inline onclick attributes, so the function had
-    to exist on ``window``.
-
-    That page-wide bar is GONE — the artist page now filters PER RELEASE
-    SECTION (All / Library / Missing radios inside each
-    components/_release_section.html card, wired by
-    static/js/artist-releases.js). The module is still kept and loaded as the
-    shared helper for any remaining page-wide control, so its globals must
-    still resolve — but asserting that the artist page calls
-    ``setArtistFilter`` from an onclick would now assert markup that was
-    deliberately removed.
+    The old page-wide filter bar (and ``artist-album-filter.js``) is gone; the
+    artist page now filters per release section inside
+    ``components/_release_section.html``, wired by
+    ``js/pages/artist-releases.js``. Losing this marker makes that module inert.
     """
-    module = REPO_ROOT / "static" / "js" / "artist-album-filter.js"
-    assert module.is_file(), "static/js/artist-album-filter.js is missing"
-
-    body = module.read_text(encoding="utf-8")
-    assert "function setArtistFilter(" in body
-    assert "window.setArtistFilter" in body, (
-        "setArtistFilter must be published on window — inline onclick handlers "
-        "resolve by global name"
-    )
-
-    # The module understood only the OLD `.category-section .album-row` markup
-    # and had to be retargeted when the release rows moved to .release-item.
-    # A selector that can never match is valid CSS/JS, so this needs pinning.
-    assert "release-item" in body, (
-        "artist-album-filter.js does not reference the new .release-item rows. "
-        "Its old selector (.category-section .album-row) matches nothing after "
-        "the release-section migration, which makes the whole module inert "
-        "while looking entirely correct."
-    )
-
-    template = REPO_ROOT / "templates" / "pages" / "artist_detail_v2.html"
+    template = REPO_ROOT / "test_site" / "templates" / "Pages" / "artist_detail_v2.html"
     html = template.read_text(encoding="utf-8")
-    assert "artist-album-filter.js" in html, (
-        "artist_detail_v2.html does not load the filter module"
-    )
-
     assert "releases-sections" in html, (
         "artist_detail_v2.html lost the #releases-sections marker, so "
-        "js/artist-releases.js (which owns the per-section All/Library/Missing "
-        "filter and the tracklists) never initialises"
+        "js/pages/artist-releases.js never initialises"
     )

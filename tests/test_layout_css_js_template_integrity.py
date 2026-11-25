@@ -34,13 +34,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Trees that ship to users. old_system/ is a frozen reference snapshot.
-LIVE_TEMPLATES = REPO_ROOT / "templates"
+# The single served tree. There is no live/test-site split any more.
 REBUILT_TEMPLATES = REPO_ROOT / "test_site" / "templates"
-LIVE_STATIC = REPO_ROOT / "static"
 REBUILT_STATIC = REPO_ROOT / "test_site" / "static"
 
-TEMPLATE_ROOTS = (LIVE_TEMPLATES, REBUILT_TEMPLATES)
+TEMPLATE_ROOTS = (REBUILT_TEMPLATES,)
 
 
 def _templates() -> list[Path]:
@@ -52,9 +50,7 @@ def _templates() -> list[Path]:
 
 
 def _stylesheet_dirs() -> list[Path]:
-    return [
-        d for d in (LIVE_STATIC / "css", REBUILT_STATIC / "css") if d.is_dir()
-    ]
+    return [REBUILT_STATIC / "css"] if (REBUILT_STATIC / "css").is_dir() else []
 
 
 # --------------------------------------------------------------------------
@@ -136,19 +132,11 @@ def _artist_stylesheets() -> list[Path]:
     return found
 
 
-def test_artist_stylesheets_exist_in_both_trees() -> None:
-    """Cutover mode reads the rebuilt tree first, so both copies must exist.
-
-    ``versioned_static()`` searches ``test_site/static`` before ``static``
-    (helpers/test_site_mode.py::static_roots), so a rule present only in the
-    live copy silently disappears under ``features.use_test_site`` — and vice
-    versa in live mode, which is the DEFAULT.
-    """
+def test_artist_stylesheet_is_in_the_served_tree() -> None:
+    """The single served tree must ship the artist stylesheet."""
     paths = {p.relative_to(REPO_ROOT).as_posix() for p in _artist_stylesheets()}
-    assert "static/css/artist.css" in paths, "live artist.css is missing"
     assert "test_site/static/css/artist.css" in paths, (
-        "test_site artist.css is missing; the rebuilt tree would serve the live "
-        "copy, so the two trees would diverge"
+        "test_site artist.css is missing; the artist page would render unstyled"
     )
 
 
@@ -187,7 +175,7 @@ def test_album_row_markup_matches_that_assertion() -> None:
     assertion at the artist page would make it assert the absence of markup that
     moved, rather than the element type of markup that exists.
     """
-    component = LIVE_TEMPLATES / "components" / "_album_category_section.html"
+    component = REBUILT_TEMPLATES / "components" / "_album_category_section.html"
     assert component.is_file(), (
         f"{component.relative_to(REPO_ROOT)} is gone; it is the component that "
         "emits .album-row, so the dead-selector guard has nothing to check "
@@ -211,7 +199,7 @@ def test_artist_page_links_its_stylesheet_and_has_no_duplicate_inline_block() ->
     inline block is re-parsed with every HTML response and defeats caching; a
     stylesheet is parsed and cached once.
     """
-    tpl = LIVE_TEMPLATES / "pages" / "artist_detail_v2.html"
+    tpl = REBUILT_TEMPLATES / "Pages" / "artist_detail_v2.html"
     body = tpl.read_text(encoding="utf-8")
 
     assert "versioned_static('css/artist.css')" in body, (
@@ -292,7 +280,7 @@ def test_mobile_cards_tables_label_every_cell(tpl: Path) -> None:
 
 def _js_files() -> list[Path]:
     files: list[Path] = []
-    for root in (LIVE_STATIC, REBUILT_STATIC):
+    for root in (REBUILT_STATIC,):
         if root.is_dir():
             files.extend(sorted(root.rglob("*.js")))
     return files
@@ -402,7 +390,7 @@ def test_no_100vh_inside_viewport_calc(tpl: Path) -> None:
 
 @pytest.mark.parametrize(
     "base",
-    (LIVE_TEMPLATES / "base.html", REBUILT_TEMPLATES / "base.html"),
+    (REBUILT_TEMPLATES / "base.html",),
     ids=lambda p: p.relative_to(REPO_ROOT).as_posix(),
 )
 def test_player_transport_controls_meet_touch_target(base: Path) -> None:

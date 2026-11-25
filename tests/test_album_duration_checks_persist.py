@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIVE_JS = REPO_ROOT / "static" / "js" / "metadata-review.js"
+LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "services" / "metadata-review.js"
 REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "services" / "metadata-review.js"
 ALBUM_ROUTES = REPO_ROOT / "routes" / "album_routes.py"
 

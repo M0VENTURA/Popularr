@@ -1811,6 +1811,65 @@ def _track_keeps_its_own_genres(
     return bool(staged) and _has_genre_value(staged.get("musicbrainz_genres"))
 
 
+def _apply_album_track_genres_batch(
+    track_ids: list[Any], genres_str: str,
+) -> tuple[int, int]:
+    """Fill the album genre list onto many bare tracks in ONE UPDATE.
+
+    The per-track ``update_track_genres`` opened a session and committed for
+    every track, so a 100-track compilation paid 100 commits inside the save
+    request — the reported timeout. All these tracks receive the same value, so
+    one statement is both correct and O(1).
+    """
+    ids = [str(value).strip() for value in track_ids or [] if str(value or "").strip()]
+    if not ids:
+        return 0, 0
+
+    genres_list = [
+        g.strip()
+        for g in re.split(r"[,;/\\]+", genres_str)
+        if g.strip()
+    ]
+    try:
+        from services.enrichment.genre_aggregation_service import (
+            is_propagatable_genre,
+        )
+    except Exception as exc:
+        logger.debug("Album save: affiliation filter unavailable", error=str(exc))
+        is_propagatable_genre = _fallback_is_affiliation_tag
+
+    genres_list = [g for g in genres_list if is_propagatable_genre(g)]
+    if not genres_list:
+        return 0, 0
+
+    placeholders = ", ".join(f":g{i}" for i in range(len(ids)))
+    params: dict[str, Any] = {
+        "genres": ", ".join(genres_list),
+        **{f"g{i}": value for i, value in enumerate(ids)},
+    }
+    try:
+        # Use the repository's engine session, exactly like the per-track
+        # helper this replaces: the route's ``db_session`` may be a read-only
+        # fake in tests, and the write must still reach the real rows.
+        from db.engine import db_session as _db_session
+
+        with _db_session() as session:
+            result = session.execute(
+                text(
+                    "UPDATE tracks SET genres = :genres "
+                    f"WHERE CAST(id AS TEXT) IN ({placeholders})"
+                ),
+                params,
+            )
+            return int(getattr(result, "rowcount", 0) or 0), 0
+    except Exception as exc:
+        logger.warning(
+            "Album save: batched genre write FAILED",
+            tracks=len(ids), error=str(exc),
+        )
+        return 0, 1
+
+
 def _apply_album_track_genres(track_id: Any, genres_str: str) -> tuple[int, int]:
     """Write one track's genre chips to the **database only**.
 
@@ -2815,6 +2874,10 @@ async def album_detail(album_path: str) -> Any:
         # Tracks that KEPT their own track-level genres because they outrank
         # the album's list (see ``_track_keeps_its_own_genres``).
         genre_tracks_kept = 0
+        # Tracks that need the album's genre list as a fill. Collected and
+        # written in ONE statement after the loop — a per-track call committed
+        # once per track and made a 100-track save outlive the request.
+        _genre_fill_ids: list[Any] = []
         # File-tag work is COLLECTED here and run as one concurrent phase after
         # the loop — see ``_write_album_track_files_concurrently``.
         _file_jobs: list[tuple[Any, dict, dict, bool]] = []
@@ -3071,15 +3134,7 @@ async def album_detail(album_path: str) -> Any:
                     if _track_keeps_its_own_genres(track, _staged_for_track):
                         genre_tracks_kept += 1
                     else:
-                        _genre_rows, _genre_failed = _apply_album_track_genres(
-                            track_id, genres_str,
-                        )
-                        # Genres bypass ``payload``, so they must be counted here or
-                        # a genres-only save is reported as "No changes were made".
-                        if _genre_rows:
-                            genre_only_writes += 1
-                        if _genre_failed:
-                            genre_write_failures += 1
+                        _genre_fill_ids.append(track_id)
 
                 # Phase 2 — persist: collect the DB payload. The actual write is
                 # batched across the whole album after the loop, so we pay for one
@@ -3161,6 +3216,17 @@ async def album_detail(album_path: str) -> Any:
                                 reverted_live_count += 1
                         except Exception as revert_err:
                             logger.debug("Live-state revert failed", track_id=track_id, error=str(revert_err))
+
+            # ── Phase 2a: the album genre FILL, in one statement ─────────────
+            # This used to call ``_apply_album_track_genres`` per track, each
+            # with its own session + commit. On a 100-track compilation that is
+            # 100 commits inside the save request — the reported timeout.
+            if _genre_fill_ids:
+                _genre_rows, _genre_failed = _apply_album_track_genres_batch(
+                    _genre_fill_ids, genres_str,
+                )
+                genre_only_writes += _genre_rows
+                genre_write_failures += _genre_failed
 
             # ── Phase 2b: commit all per-track DB writes in one transaction ──
             # Every payload collected by the loop lands in ONE session + commit
@@ -4856,37 +4922,14 @@ def config_migrate_postgres() -> Any:
 
 @ui_bp.route("/logs")
 async def logs() -> Any:
-    # ── CONSOLIDATION (2026-10-14): the rebuilt UI has no logs PAGE ────────
+    # ── CONSOLIDATION (2026-10-14): there is no logs PAGE ──────────────────
     # Two viewers existed side by side — this page and the global modal opened
     # from the status bar — showing the same data with different controls. The
     # modal wins: it preserves the page the user was on, it carries the file
     # picker / filter / level toggles this page used to own, and it is reachable
     # from every screen. So this route hands old bookmarks to the dashboard
-    # WITH the flag that opens the modal (`?logs=1`, honoured by base.html)
-    # rather than to a page that no longer exists.
-    #
-    # Gate = the SAME helper the cutover uses, never a re-read of
-    # `features.use_test_site`. Live mode keeps its own page: its viewer is an
-    # inline script with no stylesheet and none of the modal work shipped with
-    # this change, so redirecting there would remove functionality outright.
-    from helpers.test_site_mode import config_enables_test_site
-
-    if config_enables_test_site():
-        return redirect(url_for("ui.dashboard", logs="1"))
-
-    # Live mode: unchanged behaviour, but the file list now comes from the
-    # shared allow-listed helper so the page and the modal's picker
-    # (GET /api/logs/list) cannot drift apart. The route enriches it with the
-    # absolute path its template renders into `data-path` — deliberately NOT
-    # part of the API payload, which the modal does not need.
-    from services.log_service import viewer_log_files
-
-    log_dir = resolve_log_dir()
-    log_files = viewer_log_files()
-    for entry in log_files:
-        entry["path"] = os.path.join(log_dir, entry["name"])
-
-    return await render_template("pages/logs.html", log_dir=log_dir, log_files=log_files)
+    # WITH the flag that opens the modal (`?logs=1`, honoured by base.html).
+    return redirect(url_for("ui.dashboard", logs="1"))
 
 
 @ui_bp.route("/help")

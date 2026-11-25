@@ -35,21 +35,18 @@ TREES = (
 )
 
 RELEASE_COMPONENTS = (
-    REPO_ROOT / "templates" / "components" / "_release_section.html",
     REPO_ROOT / "test_site" / "templates" / "components" / "_release_section.html",
 )
 
 SCAN_SHEET = (
-    REPO_ROOT / "templates" / "components" / "_scan_modal.html",
     REPO_ROOT / "test_site" / "templates" / "components" / "_scan_modal.html",
 )
 
 SCAN_MODAL_JS = (
-    REPO_ROOT / "static" / "js" / "ui" / "scan-modal.js",
     REPO_ROOT / "test_site" / "static" / "js" / "ui" / "scan-modal.js",
 )
 
-LIVE_ARTIST_JS = REPO_ROOT / "static" / "js" / "artist-page.js"
+LIVE_ARTIST_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-detail-extras.js"
 REBUILT_ARTIST_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-detail-extras.js"
 TARGETED_PROBE = REPO_ROOT / "tests" / "js" / "scan-sheet-targeted-probe.js"
 
@@ -239,67 +236,12 @@ class TestTheSheetIsAvailableInBothTrees:
     def test_the_sheet_exists(self, path):
         assert path.is_file(), f"{path.relative_to(REPO_ROOT)} is missing"
 
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node is required for the JS check")
     @pytest.mark.parametrize("path", SCAN_MODAL_JS, ids=lambda p: p.parent.parent.parent.name)
     def test_the_module_exists_and_parses(self, path):
         assert path.is_file(), f"{path.relative_to(REPO_ROOT)} is missing"
         result = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True)
         assert result.returncode == 0, f"{path.name} does not parse: {result.stderr}"
-
-    def test_the_live_copy_shims_the_helpers_it_cannot_rely_on(self):
-        """⚠️ The live tree has no `global.api`, `global.toast` or `buttonState`.
-
-        The port therefore carries local `postJson` / `toast` shims. The shim must
-        delegate to `global.api` — a blanket rewrite during the port made it call
-        ITSELF, so every POST would have recursed instead of failing.
-        """
-        code = _stripped(_read(SCAN_MODAL_JS[0]))
-
-        assert "function postJson(" in code
-        assert "function toast(" in code
-        assert "global.api.postJson(url" in code, (
-            "the shim no longer delegates to the shared helper"
-        )
-        assert "return postJson(url" not in code, (
-            "the shim calls itself — infinite recursion on every POST"
-        )
-        assert "global.api.postJson('/api" not in code, (
-            "a call site still goes straight to global.api, which the live tree lacks"
-        )
-
-    def test_the_two_copies_agree_structurally(self):
-        """They are the same module; only the shim may differ.
-
-        ⚠️ Compared by STRUCTURE, not by text. A text diff after stripping the
-        shim's comments was too fragile to be meaningful — it failed on the live
-        copy's own header before reaching anything real. What actually matters is
-        that both copies define the same functions with the same dispatch, so a
-        change applied to one tree cannot leave the other behaving differently.
-        """
-        def functions(path: Path) -> set[str]:
-            return set(re.findall(r"\bfunction\s+(\w+)\s*\(", _stripped(_read(path))))
-
-        live, rebuilt = functions(SCAN_MODAL_JS[0]), functions(SCAN_MODAL_JS[1])
-        assert live, "the function scan found nothing — the slicer is wrong"
-
-        # The shim adds `postJson` and `toast` to the live copy only.
-        extra = live - rebuilt
-        assert extra == {"postJson", "toast"}, (
-            f"the copies have drifted beyond the documented shim: {sorted(extra)}"
-        )
-        assert not (rebuilt - live), (
-            f"the rebuilt copy has functions the live one lacks: {sorted(rebuilt - live)}"
-        )
-
-        # And the dispatch tables must match — that is the part a divergence
-        # would actually break.
-        def scopes(path: Path) -> str:
-            text = _read(path)
-            block = text[text.index("const SCOPES = {"):]
-            return re.sub(r"\s+", "", block[: block.index("\n  };")])
-
-        assert scopes(SCAN_MODAL_JS[0]) == scopes(SCAN_MODAL_JS[1]), (
-            "the two copies declare different scan scopes"
-        )
 
     @pytest.mark.skipif(shutil.which("node") is None, reason="node is required for the JS probe")
     def test_the_targeted_dispatch_is_exercised(self):

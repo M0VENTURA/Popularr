@@ -61,16 +61,15 @@ def _strip(text: str) -> str:
 
 def _templates() -> list[tuple[str, Path]]:
     out: list[tuple[str, Path]] = []
-    for label, base in (("test_site", TEST_TEMPLATES), ("live", LIVE_TEMPLATES)):
-        if base.is_dir():
-            for path in sorted(base.rglob("*.html")):
-                out.append((label, path))
+    if TEST_TEMPLATES.is_dir():
+        for path in sorted(TEST_TEMPLATES.rglob("*.html")):
+            out.append(("test_site", path))
     return out
 
 
 def _search_paths() -> list[Path]:
-    """The loader search order the app builds: rebuilt tree first, live second."""
-    return [TEST_TEMPLATES, LIVE_TEMPLATES]
+    """The loader search order: the single served template tree."""
+    return [TEST_TEMPLATES]
 
 
 def _resolve(target: str) -> Path | None:

@@ -45,10 +45,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_STATIC = REPO_ROOT / "static" / "js"
 REBUILT_STATIC = REPO_ROOT / "test_site" / "static" / "js"
-LIVE_TEMPLATES = REPO_ROOT / "templates"
 REBUILT_TEMPLATES = REPO_ROOT / "test_site" / "templates"
+LIVE_STATIC = REPO_ROOT / "test_site" / "static" / "js"
+LIVE_TEMPLATES = REPO_ROOT / "test_site" / "templates"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is required to exercise the JS"
@@ -284,7 +284,7 @@ _MISSING_PAYLOAD = {
 # ===========================================================================
 
 class TestAlbumDetailJsLoadsMissingTracks:
-    MODULE = LIVE_STATIC / "album_detail.js"
+    MODULE = REBUILT_STATIC / "pages" / "album.js"
 
     def _load(self, payload=_MISSING_PAYLOAD):
         return _run(
@@ -454,7 +454,7 @@ class TestTheLoaderIsWiredToPageLoad:
         return path.read_text(encoding="utf-8", errors="replace")
 
     def test_live_tree_wires_it(self):
-        src = self._album_js(LIVE_STATIC / "album_detail.js")
+        src = self._album_js(REBUILT_STATIC / "pages" / "album.js")
         assert "window.loadAlbumMissingTracks = function" in src
         assert re.search(
             r"DOMContentLoaded[\s\S]{0,400}loadAlbumMissingTracks\(\)", src
@@ -506,7 +506,7 @@ class TestTheLoaderReusesTheExistingRowBuilder:
     """
 
     def test_live_tree_reuses_the_builders(self):
-        src = (LIVE_STATIC / "album_detail.js").read_text(encoding="utf-8")
+        src = (REBUILT_STATIC / "pages" / "album.js").read_text(encoding="utf-8")
         loader = src[src.index("window.loadAlbumMissingTracks"):]
         loader = loader[: loader.index("\n};")] if "\n};" in loader else loader
         # The loader renders through the SHARED helper (also used by the

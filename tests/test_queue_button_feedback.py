@@ -47,8 +47,8 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROBE = REPO_ROOT / "tests" / "js" / "queue-button-probe.js"
 
-LIVE_SEARCH = "static/js/unified_search.js"
-LIVE_MAIN = "static/js/main.js"
+LIVE_SEARCH = "test_site/static/js/ui/search-flyout.js"
+LIVE_MAIN = "test_site/static/js/main.js"
 REBUILT_SEARCH = "test_site/static/js/ui/search-flyout.js"
 REBUILT_MAIN = "test_site/static/js/main.js"
 

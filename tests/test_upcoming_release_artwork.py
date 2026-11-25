@@ -45,13 +45,13 @@ REBUILT_SERVICE = REPO_ROOT / "test_site" / "static" / "js" / "services" / "upco
 #: The live rule lives in the SHARED service, not in dashboard.js — the dashboard,
 #: the dedicated page and the downloads monitor all render this API payload, so
 #: one copy is what keeps them consistent.
-LIVE_SERVICE = REPO_ROOT / "static" / "js" / "upcoming_releases.js"
+LIVE_SERVICE = REPO_ROOT / "test_site" / "static" / "js" / "services" / "upcoming-releases.js"
 #: The live dashboard DELEGATES to the service. Asserted here so the rule cannot
 #: quietly grow a second implementation on the page that shows it most often.
 LIVE_DASHBOARD = REPO_ROOT / "static" / "js" / "dashboard.js"
 
 REBUILT_PROBE = PROBE_DIR / "upcoming-art-probe.js"
-LIVE_PROBE = PROBE_DIR / "upcoming-art-live-probe.js"
+LIVE_PROBE = PROBE_DIR / "upcoming-art-probe.js"
 
 NODE = shutil.which("node")
 

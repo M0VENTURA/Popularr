@@ -36,9 +36,9 @@ import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 TS_TEMPLATES = REPO_ROOT / "test_site/templates"
-LIVE_TEMPLATES = REPO_ROOT / "templates"
 REBUILT_STATIC = REPO_ROOT / "test_site/static"
-LIVE_STATIC = REPO_ROOT / "static"
+LIVE_TEMPLATES = TS_TEMPLATES
+LIVE_STATIC = REPO_ROOT / "test_site/static"
 
 PAGES = (
     "Pages/album_detail.html",
