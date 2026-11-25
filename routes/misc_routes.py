@@ -2244,9 +2244,28 @@ async def api_apply_star_ratings_resync() -> Any:
     artist = str(payload.get("artist") or "").strip() or None
     album = str(payload.get("album") or "").strip() or None
 
+    def _truthy(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.strip().casefold() not in ("", "0", "false", "no", "off")
+        return bool(value)
+
+    dry_run = _truthy(payload.get("dry_run"))
+    limit_albums: int | None = None
+    if payload.get("limit_albums") not in (None, ""):
+        try:
+            limit_albums = max(1, int(payload.get("limit_albums")))
+        except (TypeError, ValueError):
+            limit_albums = None
+
     try:
         result = await asyncio.to_thread(
-            start_star_resync, artist=artist, album=album,
+            start_star_resync,
+            artist=artist,
+            album=album,
+            dry_run=dry_run,
+            limit_albums=limit_albums,
         )
     except Exception as exc:
         logger.error("Star resync failed to start", error=str(exc))
@@ -2257,7 +2276,12 @@ async def api_apply_star_ratings_resync() -> Any:
     return jsonify({
         **result,
         "accepted": True,
-        "message": "Resync started — progress appears on the dashboard.",
+        "dry_run": dry_run,
+        "message": (
+            "Preview started — progress appears here and on the dashboard."
+            if dry_run
+            else "Resync started — progress appears on the dashboard."
+        ),
     }), 202
 
 

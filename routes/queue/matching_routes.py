@@ -119,6 +119,111 @@ async def api_queue_link_track(queue_id: int) -> Any:
         return _json_response({"success": False, "error": str(exc)})
 
 
+@queue_matching_bp.route("/api/queue/<int:queue_id>/local-files", methods=["GET"])
+def api_queue_local_files(queue_id: int) -> Any:
+    """List audio files already sitting in downloads/ (including torrents/).
+
+    Reported: the manual Soulseek search never offered the files the user had
+    ALREADY downloaded, so a failed match could only be fixed by re-downloading.
+    This is read-only; ``attach-local`` links the chosen file to the row.
+    """
+    import os
+    import re
+
+    from services.downloads.download_scan_service import discover_audio_files
+
+    query = (request.args.get("q") or "").strip().casefold()
+    tokens = [t for t in re.split(r"[^0-9a-z]+", query) if len(t) >= 2]
+    limit = request.args.get("limit", default=50, type=int) or 50
+
+    try:
+        files = discover_audio_files()
+    except Exception as exc:
+        logger.warning("Local download scan failed", error=str(exc))
+        return _json_response({"success": False, "error": str(exc), "files": []})
+
+    rows = []
+    for found in files:
+        haystack = found.rel_path.casefold()
+        if tokens and not all(token in haystack for token in tokens):
+            continue
+        try:
+            stat = os.stat(found.full_path)
+            size = stat.st_size
+            modified = stat.st_mtime
+        except OSError:
+            size = 0
+            modified = 0
+        rows.append({
+            "filename": found.filename,
+            "full_path": found.full_path,
+            "rel_path": found.rel_path,
+            "folder": found.folder,
+            "size": size,
+            "modified": modified,
+        })
+
+    rows.sort(key=lambda r: r.get("modified") or 0, reverse=True)
+    return _json_response({
+        "success": True,
+        "queue_id": queue_id,
+        "files": rows[: max(1, min(limit, 200))],
+        "total_matched": len(rows),
+    })
+
+
+@queue_matching_bp.route("/api/queue/<int:queue_id>/attach-local", methods=["POST"])
+async def api_queue_attach_local(queue_id: int) -> Any:
+    """Attach an existing downloads/torrents file to a queue row.
+
+    The path must resolve INSIDE the downloads tree; a manual match must never
+    reach into ``/music`` or an arbitrary filesystem location.
+    """
+    import os
+
+    from services.downloads.download_scan_service import (
+        resolve_downloads_dir,
+        resolve_torrents_dir,
+    )
+
+    payload = (await request.get_json(silent=True)) or {}
+    raw_path = str(payload.get("file_path") or "").strip()
+    if not raw_path:
+        return _json_response({"success": False, "error": "file_path is required"}), 400
+
+    path = os.path.realpath(raw_path)
+    roots = {
+        os.path.realpath(resolve_downloads_dir()),
+        os.path.realpath(resolve_torrents_dir()),
+    }
+    inside = any(
+        path == root or path.startswith(root + os.sep) for root in roots if root
+    )
+    if not inside:
+        return _json_response({
+            "success": False,
+            "error": "file_path must be inside the downloads or torrents folder",
+        }), 400
+    if not os.path.isfile(path):
+        return _json_response({"success": False, "error": "File not found"}), 404
+
+    item = get_queue_item(queue_id)
+    if item is None:
+        return _json_response({"success": False, "error": "Queue item not found"}), 404
+
+    updated = update_queue_item(
+        queue_id,
+        status="matched",
+        file_path=path,
+        failure_reason=None,
+    )
+    logger.info(
+        "Attached local download to queue row",
+        queue_id=queue_id, file_path=path,
+    )
+    return _json_response({"success": True, "item": updated, "file_path": path})
+
+
 # -----------------------------------------------------------------------------
 # Organize
 # -----------------------------------------------------------------------------

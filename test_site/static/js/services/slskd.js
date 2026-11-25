@@ -464,7 +464,7 @@
       return `
         <tr>
           <td data-label="File">
-            <div class="small text-truncate" style="max-width:500px;">
+            <div class="small slskd-result-path" title="${esc(result.filename || '')}">
               ${esc(result.filename || 'Unknown')}
             </div>
           </td>
@@ -720,6 +720,8 @@
 
     const results = document.getElementById('soulseekManualResults');
     if (results) results.innerHTML = '';
+    const localResults = document.getElementById('soulseekManualLocalResults');
+    if (localResults) localResults.innerHTML = '';
 
     if (global.modal) global.modal.show(modalEl);
     if (input) input.focus();
@@ -765,6 +767,111 @@
     }));
   }
 
+  /**
+   * List audio files ALREADY in downloads/ (including torrents/) for this queue
+   * row. Fixing a bad match used to require re-downloading a file the user had
+   * on disk; this is the missing half of "manual match".
+   */
+  async function showLocalCandidates() {
+    const container = document.getElementById('soulseekManualLocalResults');
+    const status = document.getElementById('soulseekManualStatus');
+    const input = document.getElementById('soulseekManualQuery');
+    if (!container) return;
+
+    const queueId = manualState.queueId;
+    if (!queueId) {
+      container.innerHTML =
+        '<div class="alert alert-info py-2 mb-0 small">Open this from a queue ' +
+        'row to attach one of its local files.</div>';
+      return;
+    }
+
+    const query = normalizeQuery(input ? input.value : '');
+    container.innerHTML =
+      '<div class="small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>' +
+      'Looking in downloads / torrents…</div>';
+
+    try {
+      const resp = await fetch(
+        `/api/queue/${queueId}/local-files?q=${encodeURIComponent(query)}`,
+        { cache: 'no-store' }
+      );
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.success === false) {
+        container.innerHTML = '<div class="alert alert-danger py-2 mb-0 small">'
+          + esc(data.error || ('HTTP ' + resp.status)) + '</div>';
+        return;
+      }
+
+      const files = Array.isArray(data.files) ? data.files : [];
+      if (!files.length) {
+        container.innerHTML = '<div class="alert alert-secondary py-2 mb-0 small">'
+          + 'No local audio files matched'
+          + (query ? ' "' + esc(query) + '"' : '') + '.</div>';
+        return;
+      }
+
+      const rows = files.map((file, index) => `
+        <tr>
+          <td>
+            <div class="small slskd-result-path" title="${esc(file.full_path || '')}">
+              ${esc(file.filename || 'Unknown')}
+              <div class="text-muted">${esc(file.rel_path || '')}</div>
+            </div>
+          </td>
+          <td class="text-center small">${esc(formatSize(file.size || 0))}</td>
+          <td class="text-center">
+            <button type="button" class="btn btn-sm btn-outline-success" data-local-index="${index}">
+              <i class="bi bi-link-45deg"></i> Use
+            </button>
+          </td>
+        </tr>`).join('');
+
+      container.innerHTML =
+        '<div class="small fw-semibold mb-1">Local files '
+        + '(' + (data.total_matched != null ? data.total_matched : files.length) + ')</div>'
+        + '<div class="table-responsive"><table class="table table-sm table-hover mb-0">'
+        + '<thead><tr><th>File</th><th class="text-center">Size</th>'
+        + '<th class="text-center">Action</th></tr></thead>'
+        + '<tbody>' + rows + '</tbody></table></div>';
+
+      container.querySelectorAll('[data-local-index]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const file = files[parseInt(btn.dataset.localIndex, 10)];
+          return attachLocalFile(file, btn, status);
+        });
+      });
+    } catch (error) {
+      container.innerHTML = '<div class="alert alert-danger py-2 mb-0 small">'
+        + esc(error.message || String(error)) + '</div>';
+    }
+  }
+
+  async function attachLocalFile(file, btn, status) {
+    if (!file || !manualState.queueId) return;
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await fetch(`/api/queue/${manualState.queueId}/attach-local`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_path: file.full_path }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.success === false) {
+        notifyError(data.error || ('HTTP ' + resp.status));
+        return;
+      }
+      notifySuccess('Attached "' + file.filename + '" — the row is now Matched.');
+      if (status) status.textContent = 'Matched to ' + file.filename;
+      const container = document.getElementById('soulseekManualLocalResults');
+      if (container) container.innerHTML = '';
+    } catch (error) {
+      notifyError(error.message || String(error));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   /** Enter submits, matching every other search box in the app. */
   function initManualSearch() {
     const modalEl = document.getElementById('soulseekManualSearchModal');
@@ -781,6 +888,9 @@
 
     const btn = document.getElementById('soulseekManualSearchBtn');
     if (btn) btn.addEventListener('click', () => runManualSearch());
+
+    const localBtn = document.getElementById('soulseekManualLocalBtn');
+    if (localBtn) localBtn.addEventListener('click', () => showLocalCandidates());
 
     // Drop the queue link when the modal closes, so the NEXT open (from a
     // different row, or from the search page where queueId is null) cannot

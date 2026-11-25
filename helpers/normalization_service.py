@@ -585,10 +585,16 @@ _VERSION_MARKER_RE = re.compile(
 # An unparenthesised trailing marker: "Song - Live", "Song – Live", "Song Live".
 # Anchored to the END so "Live and Let Die" is untouched, and the separator is
 # required so "Song Live" (a title) is not mistaken for a bare word.
+#
+# ⚠️ A DASH-FORM MARKER MAY CARRY A VENUE/DATE: a file titled
+# "Sugar - Live at Irving Plaza, NYC, NY - January 1999" against MusicBrainz's
+# "Sugar (live at Irving Plaza, NYC, NY – January 1999)". The parenthesised
+# regex already removed the MB side; without the trailing qualifier here the two
+# keys differed and the same album showed a permanent title correction.
 _TRAILING_VERSION_MARKER_RE = re.compile(
     r"(?:\s*[-–—]\s*|\s+)(?:" + "|".join(
         ("live", "acoustic", "unplugged", "remix", "remixed")
-    ) + r")\s*$",
+    ) + r")(?:\s+(?:at|in|from|on)\s+.+)?\s*$",
     re.IGNORECASE,
 )
 

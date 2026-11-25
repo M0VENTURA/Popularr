@@ -230,83 +230,77 @@
     setOut(dryRun ? 'Calculating preview…' : 'Starting re-rate…');
 
     try {
-      // ⚠️ APPLY IS A BACKGROUND JOB, PREVIEW IS INLINE.
+      // ⚠️ BOTH PREVIEW AND APPLY ARE BACKGROUND JOBS.
       //
-      // A full-library apply outlives the reverse proxy's ~100s origin timeout,
-      // so awaiting it here would end in the proxy's HTML error page and
-      // ``resp.json()`` throwing ``Unexpected token '<'``. Apply therefore POSTs
-      // to the fire-and-forget endpoint and polls for progress.
-      if (!dryRun) {
-        const resp = await fetch('/api/ratings/resync/apply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || data.ok === false) {
-          // 409 = already running; not an error worth alarming about.
-          setOut('<span class="text-' + (resp.status === 409 ? 'warning' : 'danger') + '">'
-            + esc(data.error || ('HTTP ' + resp.status)) + '</span>');
-          btns.forEach(b => { b.disabled = false; });
-          return;
-        }
-        setOut('<div class="alert alert-success py-2 mb-0">'
-          + 'Re-rate started in the background — it also appears on the dashboard.</div>');
-        if (btns[0]) btns[0].disabled = false;   // Preview may be re-run
-        pollStarResync(false);
-        return;
-      }
-
-      const resp = await fetch('/api/ratings/resync', {
+      // A full-library preview does the same work as apply (it just writes
+      // nothing), so it too outlives the reverse proxy's ~100s origin timeout.
+      // The old inline preview then received the proxy's HTML page and
+      // ``resp.json()`` threw ``Unexpected token '<'`` — the error reported
+      // under these buttons. Both now POST to the fire-and-forget endpoint and
+      // poll; the preview's per-track rows come back in the progress result.
+      const resp = await fetch('/api/ratings/resync/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dry_run: true })
+        body: JSON.stringify({ dry_run: !!dryRun })
       });
-      const data = await resp.json();
-      if (!resp.ok || data.error) {
-        setOut('<span class="text-danger">' + esc(data.error || ('HTTP ' + resp.status)) + '</span>');
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.ok === false) {
+        const detail = data.error || ('HTTP ' + resp.status);
+        const hint = data.error ? '' : ' — the server returned a non-JSON page';
+        setOut('<span class="text-' + (resp.status === 409 ? 'warning' : 'danger') + '">'
+          + esc(detail + hint) + '</span>');
+        btns.forEach(b => { b.disabled = false; });
         return;
       }
-
-      const changed = Array.isArray(data.changed_tracks) ? data.changed_tracks : [];
-      const rows = changed.slice(0, 200).map(t => {
-        const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
-        // WHY the tier moved. Without this the preview is a list of numbers and
-        // the ten overlapping 5★ rules cannot be audited against real data.
-        const reason = t.reason
-          ? '<div class="small text-muted">' + esc(t.reason) + '</div>'
-          : '';
-        return '<tr><td>' + esc(t.title || '') + reason + '</td>'
-          + '<td class="text-muted">' + esc(label) + '</td>'
-          + '<td class="text-end">' + Number(t.lastfm_listeners || 0).toLocaleString() + '</td>'
-          + '<td class="text-center text-nowrap">' + t.before + '★ → <strong>' + t.after + '★</strong></td></tr>';
-      }).join('');
-
-      setOut(
-        '<div class="alert alert-info py-2 mb-2">'
-        + '<strong>Preview only — nothing was written.</strong> '
-        + data.albums + ' albums, ' + data.tracks + ' tracks, '
-        + '<strong>' + data.changed + '</strong> rating(s) would change'
-        + ' in ' + data.seconds + 's.'
-        + (data.failed && data.failed.length
-          ? ' <span class="text-danger">' + data.failed.length + ' album(s) failed.</span>'
-          : '')
-        + '</div>'
-        + starHistogramHtml(data.star_histogram, data.five_star_albums)
-        + (rows
-          ? '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
-            + '<thead><tr><th>Track</th><th>Album</th><th class="text-end">Listeners</th><th class="text-center">Change</th></tr></thead>'
-            + '<tbody>' + rows + '</tbody></table></div>'
-            + (changed.length > 200
-              ? '<div class="text-muted mt-1">Showing first 200 of ' + changed.length + '.</div>'
-              : '')
-          : '<div class="text-muted">No rating changes.</div>')
-      );
+      setOut('<div class="alert alert-info py-2 mb-0">'
+        + (dryRun
+          ? 'Calculating preview in the background…'
+          : 'Re-rate started in the background — it also appears on the dashboard.')
+        + '</div>');
+      pollStarResync(false, !!dryRun);
     } catch (err) {
       setOut('<span class="text-danger">' + esc(String(err)) + '</span>');
-    } finally {
       btns.forEach(b => { b.disabled = false; });
     }
+  }
+
+  /**
+   * Render a completed star-resync PREVIEW from its result envelope.
+   * Used by the poller, so the table is never requested inline.
+   */
+  function renderStarPreview(data) {
+    const changed = Array.isArray(data.changed_tracks) ? data.changed_tracks : [];
+    const rows = changed.slice(0, 200).map(t => {
+      const label = (t.artist ? t.artist + ' — ' : '') + (t.album || '');
+      // WHY the tier moved. Without this the preview is a list of numbers and
+      // the ten overlapping 5★ rules cannot be audited against real data.
+      const reason = t.reason
+        ? '<div class="small text-muted">' + esc(t.reason) + '</div>'
+        : '';
+      return '<tr><td>' + esc(t.title || '') + reason + '</td>'
+        + '<td class="text-muted">' + esc(label) + '</td>'
+        + '<td class="text-end">' + Number(t.lastfm_listeners || 0).toLocaleString() + '</td>'
+        + '<td class="text-center text-nowrap">' + t.before + '★ → <strong>' + t.after + '★</strong></td></tr>';
+    }).join('');
+
+    return '<div class="alert alert-info py-2 mb-2">'
+      + '<strong>Preview only — nothing was written.</strong> '
+      + (data.albums || 0) + ' albums, ' + (data.tracks || 0) + ' tracks, '
+      + '<strong>' + (data.changed || 0) + '</strong> rating(s) would change'
+      + (data.seconds ? ' in ' + data.seconds + 's' : '') + '.'
+      + (data.failed && data.failed.length
+        ? ' <span class="text-danger">' + data.failed.length + ' album(s) failed.</span>'
+        : '')
+      + '</div>'
+      + starHistogramHtml(data.star_histogram, data.five_star_albums)
+      + (rows
+        ? '<div style="max-height:24rem;overflow:auto"><table class="table table-sm table-striped mb-0">'
+          + '<thead><tr><th>Track</th><th>Album</th><th class="text-end">Listeners</th><th class="text-center">Change</th></tr></thead>'
+          + '<tbody>' + rows + '</tbody></table></div>'
+          + (changed.length > 200
+            ? '<div class="text-muted mt-1">Showing first 200 of ' + changed.length + '.</div>'
+            : '')
+        : '<div class="text-muted">No rating changes.</div>');
   }
 
   /**
@@ -315,14 +309,16 @@
    * ``silent`` is used for the page-load check: a run that finished BEFORE this
    * page was opened must not announce itself as though it just happened.
    */
-  async function pollStarResync(silent) {
+  async function pollStarResync(silent, previewMode) {
     const out = document.getElementById('star_resync_output');
     const previewBtn = document.getElementById('star_resync_preview_btn');
     const applyBtn = document.getElementById('star_resync_apply_btn');
 
     try {
       const resp = await fetch('/api/ratings/resync/status', { cache: 'no-store' });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => null);
+      // A poll that got a proxy/login HTML page is not a job failure.
+      if (!data) return;
       if (!data || data.ok === false) return;
 
       const pct = Math.round(Number(data.percent_complete || 0));
@@ -354,6 +350,12 @@
         return;
       }
       if (out && result) {
+        // A preview's rows live in the progress result now, so render the same
+        // table the old inline response produced.
+        if (result.dry_run || previewMode) {
+          out.innerHTML = renderStarPreview(result);
+          return;
+        }
         const vel = result.velocity || {};
         out.innerHTML = '<div class="alert alert-success py-2 mb-0">'
           + '<strong>Resync complete.</strong> '

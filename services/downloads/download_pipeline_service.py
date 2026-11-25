@@ -1721,6 +1721,103 @@ def _attempt_candidate_downloads(
     return success, chosen, fail_reason
 
 
+def _is_release_request(item: dict[str, Any]) -> bool:
+    """True for a queue row that asks for a RELEASE, not a single track.
+
+    Reported: ``Fuel - Pendulum`` (an album title) entered the track pipeline and
+    produced one ``title_mismatch`` rejection after another, because the row was
+    searched as if "Pendulum" were a song. A release request must be expanded
+    from its tracklist, never matched as one file.
+    """
+    import_type = str(item.get("import_type") or "").strip().casefold()
+    if import_type in {"album", "release", "release_group", "releasegroup"}:
+        return True
+    title = str(item.get("title") or "").strip()
+    album = str(item.get("album") or "").strip()
+    if not title or not album or title.casefold() != album.casefold():
+        return False
+    # An album-titled row with neither a track number nor a duration is a
+    # release fallback, not a track that happens to share the album's name.
+    return not item.get("track_number") and not item.get("duration")
+
+
+def _process_release_request(item: dict[str, Any], queue_id: Any) -> dict[str, Any]:
+    """Expand a release row into per-track rows; never search it as a track."""
+    artist = str(item.get("artist") or "").strip()
+    album = str(item.get("album") or item.get("title") or "").strip()
+    release_id = str(
+        item.get("release_mbid") or item.get("release_id") or ""
+    ).strip()
+
+    if not release_id:
+        update_queue_item(
+            queue_id,
+            status="pending_release",
+            failure_reason=(
+                "release request has no MusicBrainz release id — needs a "
+                "release match, not a track search"
+            ),
+        )
+        logger.info(
+            "Album-typed queue row left pending_release (no release MBID)",
+            queue_id=queue_id, artist=artist, album=album,
+        )
+        return {
+            "success": False,
+            "status": "pending_release",
+            "skipped": True,
+        }
+
+    try:
+        result = start_release_download(
+            release_id,
+            album,
+            artist,
+            method="slskd",
+            create_folder_group=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Release request expansion failed",
+            queue_id=queue_id, artist=artist, album=album,
+            release_id=release_id, error=str(exc),
+        )
+        update_queue_item(
+            queue_id,
+            status="pending_release",
+            failure_reason=f"release expansion failed: {exc}",
+        )
+        return {"success": False, "status": "pending_release", "skipped": True}
+
+    created = int(result.get("queue_items_created") or 0)
+    if result.get("success") and created:
+        update_queue_item(
+            queue_id,
+            status="removed",
+            failure_reason=f"expanded into {created} track request(s)",
+        )
+        logger.info(
+            "Release request expanded into track rows",
+            queue_id=queue_id, artist=artist, album=album,
+            release_id=release_id, track_rows=created,
+        )
+        return {
+            "success": True,
+            "status": "release_expanded",
+            "queue_items_created": created,
+        }
+
+    update_queue_item(
+        queue_id,
+        status="pending_release",
+        failure_reason=(
+            "release expansion produced no tracks"
+            + (f": {result.get('error')}" if result.get("error") else "")
+        ),
+    )
+    return {"success": False, "status": "pending_release", "skipped": True}
+
+
 def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     queue_id = item.get("id")
     logger.debug("Processing queue item", queue_id=queue_id)
@@ -1736,6 +1833,14 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
             pass
         logger.info("Queue item has a local file_path — skipping Soulseek search", queue_id=queue_id, file_path=item.get("file_path"))
         return {"success": False, "status": "local_file_skip", "skipped": True}
+
+    # ⭐ RELEASE REQUESTS LEAVE THE TRACK PIPELINE HERE.
+    #
+    # An album-typed fallback row (``import_type='album'``) must be expanded
+    # from its tracklist by ``start_release_download``; searching it as a track
+    # produced the "title is the album name" mismatch storms.
+    if _is_release_request(item):
+        return _process_release_request(item, queue_id)
 
     try:
         from services.queue_cleaner import clean_mangled_queue_item

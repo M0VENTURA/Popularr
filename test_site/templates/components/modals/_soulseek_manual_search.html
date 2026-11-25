@@ -80,6 +80,15 @@
           </button>
         </div>
         <div id="soulseekManualStatus" class="small text-muted mb-2">Enter a query and search.</div>
+        {#- Files ALREADY in downloads/ (and torrents/) — a failed match often has
+            the right audio on disk, and re-downloading it was the only path. -#}
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+          <button type="button" class="btn btn-outline-info btn-sm" id="soulseekManualLocalBtn">
+            <i class="bi bi-folder2-open"></i> Local downloads
+          </button>
+          <span class="small text-muted">Files already in the downloads / torrents folders</span>
+        </div>
+        <div id="soulseekManualLocalResults" class="mb-3"></div>
         <div id="soulseekManualResults"></div>
       </div>
     </div>

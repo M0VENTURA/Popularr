@@ -818,6 +818,8 @@ def start_star_resync(
     *,
     artist: str | None = None,
     album: str | None = None,
+    dry_run: bool = False,
+    limit_albums: int | None = None,
 ) -> dict[str, Any]:
     """Start the library-wide re-rate on a BACKGROUND thread. Returns at once.
 
@@ -843,7 +845,7 @@ def start_star_resync(
         return {"ok": True, "started": False, "already_running": True}
 
     cfg = get_star_resync_config()
-    if not cfg.get("enabled"):
+    if not cfg.get("enabled") and not dry_run:
         _release_apply()
         return {
             "ok": False,
@@ -882,7 +884,11 @@ def start_star_resync(
                 )
 
             result = resync_star_ratings(
-                artist=artist, album=album, progress=_on_progress,
+                artist=artist,
+                album=album,
+                progress=_on_progress,
+                dry_run=dry_run,
+                limit_albums=limit_albums,
             )
 
             if not result.get("ok"):
@@ -898,6 +904,7 @@ def start_star_resync(
                         "changed": result.get("changed", 0),
                         "seconds": result.get("seconds", 0),
                         "velocity": result.get("velocity", {}),
+                        "dry_run": bool(dry_run),
                     },
                 )
                 return
@@ -906,8 +913,9 @@ def start_star_resync(
                 running=False, percent=100.0, phase=PHASE_DONE,
                 processed=result.get("albums", 0), total=result.get("albums", 0),
                 detail=(
-                    f"{result.get('changed', 0)} rating(s) changed across "
-                    f"{result.get('tracks', 0)} track(s)"
+                    f"{result.get('changed', 0)} rating(s) "
+                    + ("would change" if dry_run else "changed")
+                    + f" across {result.get('tracks', 0)} track(s)"
                 ),
                 status="complete",
                 result={
@@ -917,6 +925,13 @@ def start_star_resync(
                     "seconds": result.get("seconds", 0),
                     "velocity": result.get("velocity", {}),
                     "playlists": result.get("playlists", {}),
+                    "dry_run": bool(dry_run),
+                    # A preview needs the rows; cap the payload so the progress
+                    # file stays small. The UI shows the first 200 anyway.
+                    "changed_tracks": (result.get("changed_tracks") or [])[:500],
+                    "star_histogram": result.get("star_histogram") or {},
+                    "five_star_albums": result.get("five_star_albums") or [],
+                    "failed": result.get("failed") or [],
                 },
             )
         except Exception as exc:

@@ -235,3 +235,15 @@
         justify-content: center;
     }
 }
+
+/* Manual Soulseek search results: show the WHOLE peer path.
+   The old cell used `.text-truncate` + a 500px max width, so a long
+   Music\Artist\Album\NN - Title.flac was cut at the point that matters —
+   the filename. Wrap it instead (the table already scrolls horizontally). */
+.slskd-result-path {
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    min-width: 18rem;
+    line-height: 1.25;
+}

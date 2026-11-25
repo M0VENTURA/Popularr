@@ -132,6 +132,54 @@ class TestStartAndPoll:
         assert ran["n"] == 1, "a second apply was armed while one was claimed"
         svc._release_apply()
 
+    def test_a_preview_is_backgrounded_and_keeps_its_rows(self, monkeypatch) -> None:
+        """Preview uses the SAME background job and carries its changed rows.
+
+        The inline preview returned the reverse proxy's HTML page on a large
+        library (the reported ``Unexpected token '<'``); the rows now travel in
+        the progress result so the poller can render them.
+        """
+        captured: dict = {}
+
+        def _fake_resync(**kwargs):
+            assert kwargs.get("dry_run") is True
+            return {
+                "ok": True,
+                "albums": 1,
+                "tracks": 2,
+                "changed": 2,
+                "changed_tracks": [{"title": "X", "before": 3, "after": 4}],
+                "star_histogram": {"before": {}, "after": {}, "total": 0},
+                "five_star_albums": [],
+                "failed": [],
+                "seconds": 0.1,
+            }
+
+        monkeypatch.setattr(svc, "resync_star_ratings", _fake_resync)
+        monkeypatch.setattr(
+            "helpers.config_helpers.get_star_resync_config",
+            lambda config=None: {"enabled": 1, "albums_per_batch": 5},
+        )
+        monkeypatch.setattr(svc, "_write_progress", lambda **kw: captured.update(kw))
+
+        class _RunNow:
+            def __init__(self, *a, **k):
+                self.target = k.get("target")
+
+            def start(self):
+                self.target()
+
+        monkeypatch.setattr("threading.Thread", _RunNow)
+        svc._release_apply()
+        result = svc.start_star_resync(dry_run=True)
+        svc._release_apply()
+
+        assert result["started"] is True
+        assert captured["result"]["dry_run"] is True
+        assert captured["result"]["changed_tracks"] == [
+            {"title": "X", "before": 3, "after": 4}
+        ]
+
     def test_a_stale_progress_row_is_not_running(self) -> None:
         """A crashed job must not block every future attempt with 409."""
         from datetime import datetime, timedelta
