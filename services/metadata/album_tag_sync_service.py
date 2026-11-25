@@ -110,6 +110,12 @@ def _read_file_values(file_path: str) -> dict[str, str]:
                 "musicbrainz_releasegroupid": "musicbrainzreleasegroupid",
                 "musicbrainz_releasetrackid": "musicbrainzreleasetrackid",
                 "musicbrainz_workid": "musicbrainzworkid",
+                # ⚠️ The people credits live in TXXX frames whose desc has no
+                # separator, so the normaliser matches them. Without these the
+                # synchronous pass could not SEE an existing lyricist/writer and
+                # therefore re-proposed/re-wrote it on every scan.
+                "lyricist": "lyricist",
+                "writer": "writer",
                 # The original-year pair. Without these the sync could not see
                 # whether a file already carries them (fill-if-missing would
                 # rewrite them every scan) nor compare them against DATE.
@@ -139,7 +145,10 @@ def _read_file_values(file_path: str) -> dict[str, str]:
                 "musicbrainz_albumartistid": "musicbrainz_albumartistid",
                 "musicbrainz_releasegroupid": "musicbrainzreleasegroupid",
                 "musicbrainz_releasetrackid": "musicbrainz_releasetrackid",
-                "musicbrainz_workid": "musicbrainz_workid",                # Vorbis twins of the MP3 original-year pair above.
+                "musicbrainz_workid": "musicbrainz_workid",
+                "lyricist": "lyricist",
+                "writer": "writer",
+                # Vorbis twins of the MP3 original-year pair above.
                 "originalyear": "originalyear",
                 "originaldate": "originaldate",            }
             for key, vkey in _VORBIS_KEY.items():
@@ -426,6 +435,22 @@ def _db_tag_candidates(
         _put("musicbrainz_artistid", track.get("musicbrainz_artistid"))
         _put("musicbrainz_releasetrackid", track.get("musicbrainz_releasetrackid"))
         _put("musicbrainz_workid", track.get("musicbrainz_workid"))
+
+    # ── PEOPLE CREDITS ────────────────────────────────────────────────────
+    # COMPOSER is handled above (role-filtered). LYRICIST is its own column and
+    # its own tag frame, and the review proposes it — but nothing wrote it to
+    # the file, so a saved lyricist never reached disk.
+    try:
+        from services.scanning.metadata_extractor import (
+            dedupe_credit_names as _dedupe_names,
+            split_credit_names as _split_names,
+        )
+
+        _lyricists = _dedupe_names(_split_names(track.get("lyricist") or ""))
+        if _lyricists:
+            _put("lyricist", ", ".join(_lyricists))
+    except Exception:
+        pass
 
     return out
 

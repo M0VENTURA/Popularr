@@ -1189,6 +1189,8 @@ class MusicBrainzService:
         )
 
         writers: list[str] = []
+        composers: list[str] = []
+        lyricists: list[str] = []
         work_mbid = ""
         cover_work_mbid = ""
         remix_of_recording_mbid = ""
@@ -1197,6 +1199,30 @@ class MusicBrainzService:
         try:
             remix_of_recording_mbid = remix_of_recording_id(recording)
             remixers = remixers_of_recording(recording)
+
+            def _collect_credit(relation: dict[str, Any]) -> None:
+                # ⚠️ ROLE-AWARE. This used to append every composer/writer/
+                # lyricist name to ``writers`` only, so the scan could never
+                # populate the two columns that carry the distinction. The
+                # album review then offered "Lyricist: empty → Brian Fair"
+                # forever, because the scan had no value to apply.
+                role = str(relation.get("type") or "").casefold()
+                if role not in {"composer", "writer", "lyricist"}:
+                    return
+                target = relation.get("artist") or {}
+                name = (
+                    str(target.get("name") or "").strip()
+                    if isinstance(target, dict)
+                    else ""
+                ) or str(relation.get("target-credit") or "").strip()
+                if not name:
+                    return
+                if role == "composer":
+                    composers.append(name)
+                elif role == "lyricist":
+                    lyricists.append(name)
+                writers.append(name)
+
             for relation in recording.get("relations") or []:
                 if not isinstance(relation, dict):
                     continue
@@ -1225,13 +1251,16 @@ class MusicBrainzService:
                 for work_relation in work.get("relations") or []:
                     if not isinstance(work_relation, dict):
                         continue
-                    if str(work_relation.get("type") or "").casefold() not in {"composer", "writer", "lyricist"}:
-                        continue
-                    target = work_relation.get("artist") or {}
-                    if isinstance(target, dict) and target.get("name"):
-                        writers.append(str(target["name"]))
+                    _collect_credit(work_relation)
         except Exception:
             pass
+
+        genres = [
+            str(item.get("name") or "").strip()
+            for item in recording.get("genres") or []
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        genres = list(dict.fromkeys(genres))
 
         genres = [
             str(item.get("name") or "").strip()
@@ -1264,6 +1293,8 @@ class MusicBrainzService:
             "vocalists": _vocalists_from_recording(recording),
             "confidence": confidence,
             "writer": ", ".join(dict.fromkeys(writers)),
+            "composer": ", ".join(dict.fromkeys(composers)),
+            "lyricist": ", ".join(dict.fromkeys(lyricists)),
             "work_mbid": work_mbid,
             "is_cover_relation": bool(cover_work_mbid),
             "cover_work_mbid": cover_work_mbid,

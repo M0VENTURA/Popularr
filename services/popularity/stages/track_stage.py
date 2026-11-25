@@ -1514,6 +1514,17 @@ def _resolve_track_mb_metadata(
                 payload["work_mbid"] = mb_data["work_mbid"]
                 payload["musicbrainz_workid"] = mb_data["work_mbid"]
 
+            # ── RELEASE-TRACK ID ─────────────────────────────────────────────
+            # The album batch resolved THIS row's position on the release, so
+            # its track id is known. It is a different entity from the recording
+            # id and belonged in the DB all along; without it the review's
+            # "Release Track ID: old → new" had no writer behind it.
+            _release_track_mbid = _as_str(
+                (mb_data or {}).get("release_track_mbid")
+            ).strip()
+            if _release_track_mbid:
+                payload["musicbrainz_releasetrackid"] = _release_track_mbid
+
             # ⭐ The "remix of" relation is read from the MusicBrainz recording
             # and lands here. ``is_remix`` is the authoritative flag — a title
             # that merely says "remix" is a hint, but a recording whose MB
@@ -1550,9 +1561,29 @@ def _resolve_track_mb_metadata(
                     # request — a resolved/curated row must not fetch composers
                     # on every scan.
                     try:
-                        _mb_writers = _coerce_writer_list(
-                            mb_service.get_composers_for_recording(recording_mbid) or []
+                        # ROLE-AWARE where the client can do it: the flat
+                        # composer list cannot say which name is the lyricist,
+                        # and lyricist is its own column AND its own tag.
+                        _roles_lookup = getattr(
+                            mb_service, "get_credit_roles_for_recording", None
                         )
+                        if callable(_roles_lookup):
+                            _roles = _roles_lookup(recording_mbid) or {}
+                            _mb_writers = _coerce_writer_list(_roles.get("writer"))
+                            if not mb_data.get("composer"):
+                                mb_data = dict(mb_data or {})
+                                mb_data["composer"] = ", ".join(
+                                    _roles.get("composer") or []
+                                )
+                            if not mb_data.get("lyricist"):
+                                mb_data = dict(mb_data or {})
+                                mb_data["lyricist"] = ", ".join(
+                                    _roles.get("lyricist") or []
+                                )
+                        else:
+                            _mb_writers = _coerce_writer_list(
+                                mb_service.get_composers_for_recording(recording_mbid) or []
+                            )
                     except Exception as exc:
                         logger.debug(
                             "Composer fetch failed", track_id=track_id, error=str(exc)
@@ -1579,6 +1610,21 @@ def _resolve_track_mb_metadata(
                         payload["writer"] = json.dumps(
                             _sanitized_existing_writer, ensure_ascii=False
                         )
+
+                # ── COMPOSER / LYRICIST ──────────────────────────────────────
+                # Both are real columns with their own tag frames, and the album
+                # review has always offered them ("Lyricist: empty → Brian
+                # Fair"). The scan never wrote either, so with metadata applying
+                # ON every album kept an endless review item the scan was
+                # supposed to have already applied. Filled from the same batch
+                # entry / role-aware lookup as ``writer``; an existing local
+                # value is never blanked.
+                for _role_field in ("composer", "lyricist"):
+                    if _field_ignored_for_track(track, _role_field):
+                        continue
+                    _proposed = _as_str((mb_data or {}).get(_role_field)).strip()
+                    if _proposed and _apply_metadata:
+                        payload[_role_field] = _proposed
 
             if mb_data.get("title"):
                 payload["musicbrainz_title"] = mb_data["title"]
@@ -3955,6 +4001,10 @@ def process_track(
     _TAG_FILE_COLUMNS = (
         "title", "artist", "album", "album_artist", "originalyear", "originaldate",
         "track_number", "disc_number", "isrc", "writer", "lyrics",
+        # ⚠️ COMPOSER / LYRICIST were missing, so a scan that changed ONLY one of
+        # them flagged nothing and the file pass skipped the track — the value
+        # reached the database and never the file.
+        "composer", "lyricist",
         "recording_mbid", "mbid", "musicbrainz_albumid", "musicbrainz_album_mbid",
         "musicbrainz_releasegroupid", "musicbrainz_artistid",
         "musicbrainz_releasetrackid", "musicbrainz_workid",

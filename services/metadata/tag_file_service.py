@@ -739,6 +739,18 @@ def write_id3_tags(file_path: str, tags: Dict[str, Any]) -> bool:
                     _clear_txxx_variants(tag_obj, "lyricist")
                 if value:
                     tag_obj.add(TXXX(encoding=3, desc="WRITER", text=[str(value)]))
+            elif field == "lyricist":
+                # ⚠️ Dedicated branch. This used to fall through to the extended
+                # allow-list, where the name was written as
+                # ``TXXX:LYRICIST`` — while ``writer`` DELETES the lyricist
+                # frames to avoid a duplicate. The two branches therefore fought:
+                # a payload carrying both lost the lyricist whenever the writer
+                # key came second. One explicit desc, cleared first, always.
+                _clear_txxx_variants(tag_obj, "lyricist")
+                if value:
+                    tag_obj.add(
+                        TXXX(encoding=3, desc="LYRICIST", text=[str(value)])
+                    )
             elif field == "cover_art_data":
                 if value:
                     data = _as_image_bytes(value, file_path)

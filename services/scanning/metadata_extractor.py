@@ -377,7 +377,11 @@ def extract_track_metadata(
         "musicbrainz_album_mbid": album_mbid,
         "musicbrainz_trackid": recording_mbid,
         "musicbrainz_releasegroupid": get_tag_value("musicbrainz_releasegroupid", "musicbrainz_releasegroup_id", "release_group_mbid") or "",
-        "musicbrainz_releasetrackid": get_tag_value("musicbrainz_trackid", "musicbrainz_releasetrackid", "musicbrainz_release_track_id", "release_track_mbid") or "",
+        # ⚠️ NOT ``musicbrainz_trackid`` FIRST. That tag holds the RECORDING id,
+        # and reading it here meant a file without a real release-track frame
+        # claimed its recording id as one — the mirrored "two ids" rows in the
+        # audit, and every scan then "corrected" the value to a different entity.
+        "musicbrainz_releasetrackid": get_tag_value("musicbrainz_releasetrackid", "musicbrainz_release_track_id", "release_track_mbid") or "",
         "musicbrainz_albumstatus": get_tag_value("releasestatus", "musicbrainz_albumstatus", "musicbrainz_release_status", "release_status") or "",
         "musicbrainz_albumtype": get_tag_value("releasetype", "musicbrainz_albumtype", "musicbrainz_release_type", "release_type") or "",
         "musicbrainz_releasecountry": get_tag_value("releasecountry", "musicbrainz_releasecountry", "musicbrainz_albumcountry", "release_country") or "",

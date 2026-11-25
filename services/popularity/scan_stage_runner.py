@@ -1051,6 +1051,7 @@ def _build_album_recording_batch(
         identities.append({
             "recording_mbid": recording_mbid,
             "release_track_title": str(entry.get("release_track_title") or "").strip(),
+            "release_track_mbid": str(entry.get("release_track_mbid") or "").strip(),
             "artist": artist,
             "title": title,
             "disc": _disc,
@@ -1095,6 +1096,13 @@ def _build_album_recording_batch(
             )
             continue
         entry["recording_mbid"] = identity["recording_mbid"]
+        if identity.get("release_track_mbid"):
+            # MUSICBRAINZ_RELEASETRACKID is this recording's position ON THE
+            # RELEASE — a different entity from the recording id. Without it the
+            # scan could never write the tag, and the album review offered
+            # "Release Track ID: old → new" on every lookup with no scan value
+            # behind it.
+            entry["release_track_mbid"] = identity["release_track_mbid"]
         if identity["release_track_title"]:
             # The RELEASE's own title for this position is what carries the
             # version marker when the local file lost it, and it is what makes

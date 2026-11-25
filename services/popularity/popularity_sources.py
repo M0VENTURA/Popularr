@@ -69,6 +69,7 @@ class AlbumRecordingMatch(TypedDict, total=False):
     listenbrainz_users: int
     recording_mbid: str | None
     release_track_title: str
+    release_track_mbid: str
     local_disc_number: int
     local_track_number: int
     length_verified: bool
@@ -523,6 +524,10 @@ def _index_release_tracklist(
             row = {"title": title, "mbid": mbid, "credit": _release_credit_text(trk),
                    "length_ms": trk.get("length") or rec.get("length"),
                    "disc": disc, "position": pos,
+                   # The RELEASE-TRACK id (this recording's position on the
+                   # release) is a different entity from the recording id and is
+                   # what MUSICBRAINZ_RELEASETRACKID must carry.
+                   "track_mbid": str(trk.get("id") or "").strip(),
                    "recording_title": _recording_title(rec)}
             entry = titles_to_mbids.setdefault(key, {
                 "title": title, "mbids": [], "rows": [], "position": pos,
@@ -911,6 +916,7 @@ def get_listenbrainz_album_tracklist_with_release(
         return {"listenbrainz_listens": total, "listenbrainz_users": users,
                 "recording_mbid": row.get("mbid") or None,
                 "release_track_title": identity_title,
+                "release_track_mbid": str(row.get("track_mbid") or "").strip(),
                 "local_disc_number": max(1, _parse_number(track.get("disc_number"), 1)),
                 "local_track_number": _parse_number(track.get("track_number")),
                 "length_verified": _length_agreement(track.get("duration"), row.get("length_ms")) is True,
