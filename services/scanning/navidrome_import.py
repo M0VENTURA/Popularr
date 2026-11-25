@@ -1292,6 +1292,7 @@ def scan_artist_to_db(
                 )
             _metadata_conflict_count += len(_dirty_conflicts)
 
+            _bulk_ok = False
             if _album_payloads:
                 try:
                     # ⚠️ The return value is CHECKED — see the note in
@@ -1339,6 +1340,43 @@ def scan_artist_to_db(
                         artist=artist_name,
                         album=album_name,
                         error=str(exc),
+                    )
+
+            # ⭐ ONE FOLDER, ONE RELEASE. Mixed MUSICBRAINZ_ALBUMID values inside
+            # one album split it in Navidrome (Korn — Untouchables: Canadian
+            # release on most tracks, a Japanese bonus edition on one, and one
+            # row whose release id was the group UUID). Repair after the batch
+            # committed: pick the edition that matches the local tracklist and
+            # fan it to every row + file. Two release GROUPS are left alone —
+            # that is two same-named albums, not one split album.
+            if _bulk_ok:
+                try:
+                    from services.metadata.album_release_unify_service import (
+                        unify_album_release_identity,
+                    )
+
+                    _groups = {
+                        str(p.get("musicbrainz_releasegroupid") or "").strip().casefold()
+                        for p in _album_payloads
+                    }
+                    _groups.discard("")
+                    _release_ids = {
+                        str(p.get("musicbrainz_albumid") or "").strip().casefold()
+                        for p in _album_payloads
+                    }
+                    _release_ids.discard("")
+                    if _groups and (
+                        len(_release_ids) > 1 or bool(_release_ids & _groups)
+                    ):
+                        unify_album_release_identity(
+                            album_artist_value or artist_name,
+                            album_name,
+                            release_group_mbid=next(iter(_groups)),
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "[NAVIDROME_SCAN] Release identity unify skipped",
+                        artist=artist_name, album=album_name, error=str(exc),
                     )
 
             if len(album_mbids_seen) > 1:

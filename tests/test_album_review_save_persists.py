@@ -404,17 +404,28 @@ class TestClearingAlbumIdentifiers:
             "that column or the field refills"
         )
 
-    async def test_a_release_id_is_not_saved_as_the_release_group(self, client, captured):
-        """The Vitro file stored the SAME UUID in both frames; a save repairs it."""
+    async def test_a_release_id_equal_to_the_group_is_not_saved_as_a_release(
+        self, client, captured
+    ):
+        """The Vitro/Korn files stored the same UUID in both frames.
+
+        The GROUP is the valid half — keep it and treat the duplicate release
+        value as absent; the release unifier picks a real edition (the album
+        page's save never persists the group id as a release id).
+        """
+        same = "c1fd5078-c940-3bc1-8102-fe83a56c4ef0"
         await _post(
             client,
-            album_mbid="c1fd5078-c940-3bc1-8102-fe83a56c4ef0",
-            album_release_group_mbid="c1fd5078-c940-3bc1-8102-fe83a56c4ef0",
+            album_mbid=same,
+            album_release_group_mbid=same,
         )
 
         for payload in captured.db_payloads:
-            assert payload["musicbrainz_releasegroupid"] is None, (
-                "a Release id must never be persisted as a Release-Group id"
+            assert payload["musicbrainz_releasegroupid"] == same, (
+                "the release GROUP is the valid half and must be kept"
+            )
+            assert "musicbrainz_albumid" not in payload, (
+                "a group id must never be persisted as a release id"
             )
 
     async def test_non_empty_identifiers_are_still_written(self, client, captured):

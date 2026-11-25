@@ -2704,6 +2704,25 @@ async def album_detail(album_path: str) -> Any:
         if _album_rg_field:
             album_rg_mbid = str(form.get(_album_rg_field) or "").strip()
 
+        # ⚠️ A RELEASE ID EQUAL TO THE RELEASE-GROUP ID IS NOT A RELEASE.
+        # A malformed file can have the group UUID in both frames (reported on
+        # Korn — Untouchables and Various Artists — Vitro). Persisting it keeps
+        # the identity invalid, so treat the box as absent; the unifier below
+        # chooses a real release (preferring the edition that matches the local
+        # tracklist). The GROUP value is kept — it is the valid half.
+        _album_mbid_is_group = bool(
+            album_mbid
+            and album_rg_mbid
+            and album_mbid.casefold() == album_rg_mbid.casefold()
+        )
+        if _album_mbid_is_group:
+            logger.warning(
+                "Album save: release id equals the release-group id — repairing",
+                artist=artist_name, album=album_name, mbid=album_mbid,
+            )
+            album_mbid = ""
+            _album_mbid_field = None
+
         # ── Staged per-track MusicBrainz review ──────────────────────────────
         # The album page's "Lookup MBID" preview stages every per-track change
         # (title, track/disc number, recording MBID, writer, genres, cover
@@ -3368,6 +3387,26 @@ async def album_detail(album_path: str) -> Any:
                         rows_updated=_album_wide.get("rows_updated"),
                         files_updated=_album_wide.get("files_updated"),
                     )
+                    # A malformed row (its release id was the GROUP id) or a
+                    # folder assembled from mixed editions is repaired here,
+                    # using the local tracklist to pick the edition.
+                    try:
+                        from services.metadata.album_release_unify_service import (
+                            unify_album_release_identity,
+                        )
+
+                        unify_album_release_identity(
+                            new_artist or artist_name,
+                            new_title or album_name,
+                            release_group_mbid=album_rg_mbid or _prev_rg or None,
+                            preferred_release_mbid=album_mbid or None,
+                        )
+                    except Exception as _unify_exc:
+                        logger.debug(
+                            "Album save: release identity unify failed",
+                            artist=artist_name, album=album_name,
+                            error=str(_unify_exc),
+                        )
                 except Exception as _wide_err:
                     # Never fatal — the page's own rows are already saved.
                     logger.warning(
