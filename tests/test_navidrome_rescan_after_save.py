@@ -603,3 +603,54 @@ class TestSyncRemoteBeforeImport:
         assert not any("scan finished" in m for m in logs), (
             "claimed 'scan finished' although the sync was not verified"
         )
+
+    def test_a_clean_state_still_scans_when_the_last_scan_predates_the_write(
+        self, logs, monkeypatch,
+    ):
+        """The reported "merges in Navidrome, reverts ~30 minutes later".
+
+        The album save retires ``metadata_dirty_for_navidrome`` as soon as its
+        files are on disk, so the import used to take the "no dirty rows" path
+        and trust an idle Navidrome — whose last scan PREDATED the save. It then
+        imported the pre-save tags and the file-tag sync split the album again.
+        """
+        from services.scanning.pipelines import navidrome_pipeline as pipe
+        import services.scanning.reconciliation as rec
+        import services.scanning.navidrome_rescan_service as rescan
+        import services.scanning.scan_state as scan_state
+
+        class _IdleClient:
+            def __init__(self):
+                self.scans = 0
+
+            def get_scan_status(self):
+                return {
+                    "success": True,
+                    "scanning": False,
+                    "lastScan": "2026-01-01T00:00:00Z",
+                }
+
+            def trigger_and_wait_for_scan(self):
+                self.scans += 1
+                return True
+
+        monkeypatch.setattr(rec, "has_dirty_navidrome_metadata", lambda: False)
+        # Local write: 2026-01-02; the checkpoint import is NEWER (so this is not
+        # the "unimported write" branch) — only lastScan is behind.
+        monkeypatch.setattr(rec, "latest_local_tag_write_epoch", lambda: 1767312000.0)
+        monkeypatch.setattr(rescan, "is_rescan_required", lambda: False)
+        monkeypatch.setattr(rescan, "consume_rescan_required", lambda: None)
+        monkeypatch.setattr(
+            scan_state, "load_scan_checkpoint",
+            lambda path: {"last_successful_import_ts": 1767398400},
+        )
+
+        client = _IdleClient()
+        assert pipe.sync_remote_navidrome_before_import(
+            client, checkpoint_file="x", use_dirty_state=True,
+        ) is True
+        assert client.scans == 1, (
+            "an idle Navidrome whose last scan predates the newest local write "
+            "must be scanned before it can be read"
+        )
+        assert any("has not scanned" in m for m in logs)

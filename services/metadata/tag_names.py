@@ -193,7 +193,14 @@ KNOWN_TAG_SPELLINGS: dict[str, tuple[str, ...]] = {
     "MUSICBRAINZ_ALBUMID": ("MUSICBRAINZ ALBUM ID", "MUSICBRAINZ_ALBUM_ID"),
     "MUSICBRAINZ_ARTISTID": ("MUSICBRAINZ ARTIST ID", "MUSICBRAINZ_ARTIST_ID"),
     "MUSICBRAINZ_ALBUMARTISTID": ("MUSICBRAINZ ALBUM ARTIST ID", "MUSICBRAINZ_ALBUM_ARTIST_ID"),
-    "MUSICBRAINZ_TRACKID": ("MUSICBRAINZ TRACK ID", "MUSICBRAINZ_TRACK_ID"),
+    "MUSICBRAINZ_TRACKID": (
+        "MUSICBRAINZ TRACK ID", "MUSICBRAINZ_TRACK_ID",
+        # Picard/beets and some players call the same entity the RECORDING id.
+        # Declared so a write removes it; otherwise a file carried two different
+        # recording MBIDs under two descriptions (reported on Untouchables).
+        "MUSICBRAINZ_RECORDINGID", "MUSICBRAINZ_RECORDING_ID",
+        "MUSICBRAINZ RECORDING ID",
+    ),
     "MUSICBRAINZ_RELEASETRACKID": (
         "MUSICBRAINZ RELEASE TRACK ID", "MUSICBRAINZ_RELEASE_TRACK_ID",
     ),
@@ -306,6 +313,18 @@ def clear_id3_variants(tag_obj: Any, field_or_canonical: Any) -> str:
     except Exception:
         return canonical
     for key in frame_keys:
+        # ⚠️ A recording id can ALSO live in an ID3 UFID frame, which ffprobe
+        # exposes under the SAME ``musicbrainz_trackid`` name as our TXXX frame.
+        # Two different ids then look like one tag with two values (reported on
+        # Untouchables). The TXXX frame is this app's canonical store, so the
+        # stale MusicBrainz UFID is removed whenever the id is written.
+        if canonical == "MUSICBRAINZ_TRACKID" and key.upper().startswith("UFID:"):
+            if "musicbrainz" in key.casefold():
+                try:
+                    tag_obj.delall(key)
+                except Exception:
+                    pass
+            continue
         if not key.startswith("TXXX:"):
             continue
         if normalise_tag_name(key[5:]) in keys:

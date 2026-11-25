@@ -1178,6 +1178,35 @@ def update_album_ids(
 
     musicbrainz_id = str(payload.get("musicbrainz_release_id") or "").strip()
     release_group_id = str(payload.get("musicbrainz_release_group_id") or "").strip()
+
+    # ⚠️ A release id equal to the release-group id is the malformed shape seen
+    # on Vitro / Untouchables. Resolve a real release or refuse; never fan the
+    # group id into the release column (and from there onto every file).
+    if (
+        musicbrainz_id
+        and release_group_id
+        and musicbrainz_id.casefold() == release_group_id.casefold()
+    ):
+        try:
+            from services.enrichment.musicbrainz_service import resolve_release_id
+
+            _resolved = str(resolve_release_id(musicbrainz_id) or "").strip()
+        except Exception:
+            _resolved = ""
+        if not _resolved or _resolved.casefold() == musicbrainz_id.casefold():
+            return {
+                "success": False,
+                "error": (
+                    "musicbrainz_release_id is a release GROUP; choose one of "
+                    "its releases"
+                ),
+            }, 409
+        logger.warning(
+            "Album release id was a release-group id; resolved",
+            artist=artist, album=album,
+            release_group_id=musicbrainz_id, release_id=_resolved,
+        )
+        musicbrainz_id = _resolved
     discogs_id = str(payload.get("discogs_release_id") or "").strip()
 
     if not (musicbrainz_id or release_group_id or discogs_id):

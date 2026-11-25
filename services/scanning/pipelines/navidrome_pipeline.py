@@ -187,7 +187,27 @@ def sync_remote_navidrome_before_import(
                     return True
             if not dirty and has_successful_import:
                 status = nav_client.get_scan_status()
-                if status.get("success") and not status.get("scanning"):
+                last_scan = _epoch(status.get("lastScan"))
+                # ⚠️ "No dirty rows" is NOT the same as "Navidrome has read the
+                # latest files". The album save retires the dirty flag as soon
+                # as its files are on disk, and the rescan flag is consumed when
+                # the scan is requested — so this branch could return True while
+                # Navidrome's last completed scan still PREDATES the write. The
+                # import then read the pre-save tags, wrote the old release id
+                # back to the DB, and the next file-tag sync split the album
+                # again ("merges in Navidrome, reverts ~30 minutes later").
+                stale_vs_local_write = bool(
+                    latest_local_write is not None
+                    and (
+                        last_scan is None
+                        or last_scan < latest_local_write
+                    )
+                )
+                if (
+                    status.get("success")
+                    and not status.get("scanning")
+                    and not stale_vs_local_write
+                ):
                     logger.info(
                         "Navidrome import freshness already established — no new scan needed"
                     )
@@ -196,15 +216,29 @@ def sync_remote_navidrome_before_import(
                         "(no metadata changes pending)"
                     )
                     return True
-                log_unified(
-                    "⚠️ Navidrome Import deferred — Navidrome is still scanning or "
-                    "its state cannot be verified"
-                )
-                logger.warning(
-                    "Navidrome import deferred — freshness cannot be verified",
-                    error=status.get("error"),
-                )
-                return False
+                if stale_vs_local_write and not status.get("scanning"):
+                    # Idle but behind our newest write: scan instead of reading
+                    # stale metadata. Falls through to the verified scan below.
+                    logger.warning(
+                        "Navidrome last scan predates the newest local tag write — "
+                        "forcing a scan before import",
+                        last_scan=status.get("lastScan"),
+                        latest_local_write=latest_local_write,
+                    )
+                    log_unified(
+                        "Navidrome Import - Navidrome has not scanned the latest "
+                        "local tag writes; scanning before import"
+                    )
+                else:
+                    log_unified(
+                        "⚠️ Navidrome Import deferred — Navidrome is still scanning or "
+                        "its state cannot be verified"
+                    )
+                    logger.warning(
+                        "Navidrome import deferred — freshness cannot be verified",
+                        error=status.get("error"),
+                    )
+                    return False
             consume_rescan_required()
         except Exception as exc:
             logger.warning(

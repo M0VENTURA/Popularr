@@ -1541,8 +1541,14 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
 
     if metadata.get("recording_mbid"):
         tag_updates["musicbrainz_trackid"] = metadata.get("recording_mbid")
-    if metadata.get("release_mbid"):
-        tag_updates["musicbrainz_albumid"] = metadata.get("release_mbid")
+    # Never write the release-GROUP id into the release frame. A queue row whose
+    # two ids are the same value is the malformed identity, not a release.
+    _release_mbid = str(metadata.get("release_mbid") or "").strip()
+    _group_mbid = str(metadata.get("musicbrainz_releasegroupid") or "").strip()
+    if _release_mbid and not (
+        _group_mbid and _release_mbid.casefold() == _group_mbid.casefold()
+    ):
+        tag_updates["musicbrainz_albumid"] = _release_mbid
 
     # Track-level MusicBrainz enrichment carried on the queue row's metadata
     # JSONB (``add_release_tracks_to_queue_detailed`` persists it): ISRC →

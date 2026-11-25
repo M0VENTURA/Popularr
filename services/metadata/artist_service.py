@@ -308,6 +308,36 @@ def apply_album_mbid(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     album_mbid = str(payload.get("mbid") or "").strip()
     release_group_mbid = str(payload.get("release_group_mbid") or "").strip()
 
+    # ⚠️ Never fan a RELEASE-GROUP id into the RELEASE column. This endpoint is
+    # called from pages whose "MBID" box may hold either entity. When both frames
+    # agree, the value is a group; resolve one of its releases, and refuse if
+    # that cannot be done rather than writing the invalid identity.
+    if (
+        album_mbid
+        and release_group_mbid
+        and album_mbid.casefold() == release_group_mbid.casefold()
+    ):
+        try:
+            from services.enrichment.musicbrainz_service import resolve_release_id
+
+            _resolved = str(resolve_release_id(album_mbid) or "").strip()
+        except Exception:
+            _resolved = ""
+        if not _resolved or _resolved.casefold() == album_mbid.casefold():
+            return {
+                "success": False,
+                "error": (
+                    "That MBID is a release GROUP; choose one of its releases "
+                    "on the album page before applying."
+                ),
+            }, 409
+        logger.warning(
+            "Album MBID was a release-group id; resolved to a release",
+            artist=artist_name, album=album_name,
+            release_group_mbid=album_mbid, release_mbid=_resolved,
+        )
+        album_mbid = _resolved
+
     if not artist_name or not album_name or not album_mbid:
         return {"success": False, "error": "artist, album, and mbid are required"}, 400
 

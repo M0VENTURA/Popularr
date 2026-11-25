@@ -1194,6 +1194,30 @@ def scan_artist_to_db(
                 and _cached_fingerprint == _incoming_fingerprint
             )
 
+            # ⭐ THE RELEASE ID LIVES ON THE ALBUM OBJECT, NOT ON ITS SONGS.
+            # The per-song fingerprint therefore cannot see a re-grouped album:
+            # Navidrome merges the corrected files (its album `musicBrainzId`
+            # becomes the new release), every song still looks identical, the
+            # album was skipped, the DB kept the OLD release id, and the next
+            # file-tag sync wrote that old id back over the corrected files —
+            # the reported "Navidrome showed it merged, ~30 minutes later split
+            # again". A changed album identity must always re-import.
+            _incoming_album_mbid = str(album.get("musicBrainzId") or "").strip().casefold()
+            _db_album_mbids = {
+                str(
+                    row.get("musicbrainz_album_mbid")
+                    or row.get("musicbrainz_albumid")
+                    or ""
+                ).strip().casefold()
+                for row in existing_album_rows.get(album_name, [])
+            }
+            _db_album_mbids.discard("")
+            _album_identity_changed = bool(
+                _incoming_album_mbid
+                and _db_album_mbids
+                and _incoming_album_mbid not in _db_album_mbids
+            )
+
             if should_skip_cached_album(
                 artist_name=artist_name,
                 album_name=album_name,
@@ -1204,6 +1228,7 @@ def scan_artist_to_db(
                 verbose=verbose,
                 metadata_fingerprint_equal=_fingerprint_equal,
                 album_metadata_dirty=existing_album_dirty.get(album_name, False),
+                album_identity_changed=_album_identity_changed,
             ):
                 save_album_state(
                     album=album,

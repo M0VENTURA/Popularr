@@ -100,6 +100,12 @@ class TestSkipDecision:
     def test_ids_equal_dirty_local_correction_process(self):
         assert self._skip(album_metadata_dirty=True) is False
 
+    def test_a_changed_album_identity_is_never_skipped(self):
+        """Navidrome's album `musicBrainzId` is not on the songs, so an MBID-only
+        merge looks unchanged to the per-song fingerprint. Skipping kept the old
+        id in the DB and the next tag sync split the album again."""
+        assert self._skip(album_identity_changed=True) is False
+
     def test_unknown_fingerprint_process(self):
         assert self._skip(metadata_fingerprint_equal=None) is False
 

@@ -408,7 +408,20 @@ def _db_tag_candidates(
 
     if perfect:
         _put("musicbrainz_trackid", track.get("recording_mbid") or track.get("mbid"))
-        _put("musicbrainz_albumid", track.get("musicbrainz_albumid") or track.get("musicbrainz_album_mbid"))
+        # Never write the release-GROUP id into the release frame (malformed
+        # "albumid = releasegroupid" input). Leaving the file's existing frame
+        # untouched is better than re-writing an invalid identity; the album
+        # release unifier resolves the real release.
+        _release_id = str(
+            track.get("musicbrainz_albumid")
+            or track.get("musicbrainz_album_mbid")
+            or ""
+        ).strip()
+        _group_id = str(track.get("musicbrainz_releasegroupid") or "").strip()
+        if _release_id and not (
+            _group_id and _release_id.casefold() == _group_id.casefold()
+        ):
+            _put("musicbrainz_albumid", _release_id)
         _put("musicbrainz_releasegroupid", track.get("musicbrainz_releasegroupid"))
         _put("musicbrainz_artistid", track.get("musicbrainz_artistid"))
         _put("musicbrainz_releasetrackid", track.get("musicbrainz_releasetrackid"))
@@ -443,12 +456,30 @@ def _dominant_album_id(tracks: list[dict[str, Any]] | None) -> str:
     which is at least stable. A single-id album is unaffected.
     """
     counts: dict[str, int] = {}
+    dirty_ids: list[str] = []
     for t in tracks or []:
         mid = str(
             t.get("musicbrainz_albumid") or t.get("musicbrainz_album_mbid") or ""
         ).strip()
+        # ⚠️ A release-group id stored in the release frame is NOT a candidate.
+        # It is the malformed "albumid = releasegroupid" shape reported on
+        # Untouchables / Vitro. Counting it let the dominant-id fan-out write the
+        # GROUP id back onto every file, undoing a correct merge.
+        group = str(t.get("musicbrainz_releasegroupid") or "").strip()
+        if mid and group and mid.casefold() == group.casefold():
+            continue
         if mid:
             counts[mid] = counts.get(mid, 0) + 1
+            # A locally-corrected row is the user's explicit identity. It must
+            # outrank the majority, or the next scan reverts the correction
+            # before the import has cleared the dirty flag.
+            if t.get("metadata_dirty_for_navidrome"):
+                dirty_ids.append(mid)
+    if dirty_ids:
+        dirty_counts: dict[str, int] = {}
+        for mid in dirty_ids:
+            dirty_counts[mid] = dirty_counts.get(mid, 0) + 1
+        return max(dirty_counts.items(), key=lambda kv: kv[1])[0]
     if not counts:
         return ""
     if len(counts) == 1:

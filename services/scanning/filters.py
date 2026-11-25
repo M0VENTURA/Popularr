@@ -60,6 +60,7 @@ def should_skip_cached_album(
     verbose: bool,
     metadata_fingerprint_equal: bool | None = None,
     album_metadata_dirty: bool = False,
+    album_identity_changed: bool = False,
 ) -> bool:
     """Return True when the DB cache is provably current for an album.
 
@@ -68,10 +69,15 @@ def should_skip_cached_album(
     change. The caller therefore supplies a metadata fingerprint comparison;
     an unknown fingerprint means "do not skip". A dirty local correction also
     forbids skipping: the import still has to confirm the corrected values.
+
+    ``album_identity_changed`` covers the one field the per-song fingerprint
+    cannot see: Navidrome carries the release id on the ALBUM object, not its
+    songs. When that id differs from what the DB holds, the album was re-grouped
+    in Navidrome and the import must run, even if every song's metadata matches.
     """
     if force or album_needs_reimport or not tracks:
         return False
-    if album_metadata_dirty:
+    if album_metadata_dirty or album_identity_changed:
         return False
     if len(cached_ids_for_album) == len(tracks):
         # Equal counts — the ID comparison below decides whether the track
