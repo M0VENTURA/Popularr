@@ -850,7 +850,8 @@
 
   async function updateQueueProcessorAlert() {
     const host = document.getElementById('queueProcessorAlert');
-    if (!host) return;
+    const serviceHost = document.getElementById('searchServiceAlert');
+    if (!host && !serviceHost) return;
 
     let data;
     try {
@@ -859,9 +860,11 @@
       return;
     }
     renderQueueProcessorAlert(host, data);
+    renderSearchServiceAlert(serviceHost, data);
   }
 
   function renderQueueProcessorAlert(host, data) {
+    if (!host) return;
     const status = String((data && data.status) || '').toLowerCase();
     if (status !== 'stopped') {
       // Running / restarting / unknown: the dashboard stays quiet.
@@ -903,6 +906,70 @@
         </div>
         <div class="small mt-1">${esc((data && data.message) || 'No queue cycle has run recently.')}</div>
         <div class="text-muted small mt-1">${notes.map(esc).join(' ')}</div>
+      </div>`;
+  }
+
+  /**
+   * Soulseek search-service outage banner.
+   *
+   * The queue's search breaker pauses EVERY search while Soulseek/slskd cannot
+   * be reached, and that verdict is written to shared runtime state by whichever
+   * process drives the queue. The dashboard only ever drew the PROCESSOR alert,
+   * so a dead search service looked like a healthy queue that simply never
+   * downloaded anything — the reported hour of "search service unavailable"
+   * lines with nothing on screen.
+   *
+   * Shown only while the breaker's window is OPEN (`known && !available`).
+   * An expired window means a probe is due, which is not an outage. The alert
+   * id includes the window's end time, so acknowledging one outage does not
+   * hide the next one.
+   */
+  function renderSearchServiceAlert(host, data) {
+    if (!host) return;
+    const service = (data && data.search_service) || {};
+    if (!(service.known && service.available === false)) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    const alertId = `search-service|${service.reason || 'unavailable'}|${service.paused_until_iso || ''}`;
+    if (isAlertDismissed(alertId)) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    const retry = Math.max(0, Number(service.retry_in_seconds) || 0);
+    const retryText = retry > 0
+      ? `next connection attempt in ${Math.floor(retry / 60)}m ${retry % 60}s`
+      : 'retrying shortly';
+    const detail = [];
+    if (service.reason) detail.push(`Reason: ${service.reason}.`);
+    detail.push(`Searching is paused, so queued downloads will not start until it reconnects — ${retryText}.`);
+    if (service.updated_at) {
+      const since = new Date(service.updated_at);
+      if (!isNaN(since.getTime())) {
+        detail.push(`Outage detected ${since.toLocaleString()}.`);
+      }
+    }
+
+    host.classList.remove('d-none');
+    host.innerHTML = `
+      <div class="alert alert-warning py-2 px-3 mb-3" style="font-size:.85rem;"
+           data-alert-id="${escapeAttr(alertId)}">
+        <button type="button" class="btn-close js-dismiss-alert float-end ms-2"
+                aria-label="Dismiss"></button>
+        <div class="fw-semibold">
+          <i class="bi bi-broadcast-pin me-1"></i>Soulseek search service is unreachable
+        </div>
+        <div class="small mt-1">${detail.map(esc).join(' ')}</div>
+        <div class="mt-2">
+          <a class="btn btn-sm btn-outline-secondary py-0 px-2"
+             href="/downloads">
+            Open Downloads
+          </a>
+        </div>
       </div>`;
   }
 
@@ -1037,6 +1104,7 @@
     dismissDashboardAlert,
     updateQueueProcessorAlert,
     renderQueueProcessorAlert,
+    renderSearchServiceAlert,
     restartQueueProcessorFromDashboard,
   };
 

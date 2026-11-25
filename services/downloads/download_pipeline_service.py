@@ -369,6 +369,14 @@ def _note_search_success() -> None:
     _search_unavailable_until = 0.0
     _search_backoff_level = 0
     _infra_failure_streak = 0
+    # Publish the recovery so the dashboard's outage banner clears from the
+    # WORKER's verdict, not from a browser-side guess.
+    try:
+        from services.downloads.search_service_state import mark_search_available
+
+        mark_search_available()
+    except Exception:
+        pass
 
 
 def _trip_search_breaker(reason: str) -> None:
@@ -385,6 +393,17 @@ def _trip_search_breaker(reason: str) -> None:
     tier = _SEARCH_BACKOFF_SECONDS[min(_search_backoff_level, len(_SEARCH_BACKOFF_SECONDS) - 1)]
     _search_unavailable_until = now + tier
     _search_backoff_level = min(_search_backoff_level + 1, len(_SEARCH_BACKOFF_SECONDS) - 1)
+    # ⚠️ PERSIST IT. This setter runs in whichever process drives the queue
+    # (usually the standalone worker), while the dashboard is served by the web
+    # process. Without this file the banner could never see the outage.
+    try:
+        from services.downloads.search_service_state import mark_search_unavailable
+
+        mark_search_unavailable(
+            reason, pause_seconds=tier, tier=_search_backoff_level,
+        )
+    except Exception:
+        pass
     logger.warning(
         "Search service marked unavailable — pausing all searches",
         reason=reason,
@@ -457,6 +476,12 @@ def reset_empty_search_streak() -> None:
     _search_unavailable_until = 0.0
     _search_backoff_level = 0
     _infra_failure_streak = 0
+    try:
+        from services.downloads.search_service_state import mark_search_available
+
+        mark_search_available()
+    except Exception:
+        pass
 
 
 def _search_backoff_hours() -> tuple[int, ...]:

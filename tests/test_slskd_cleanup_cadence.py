@@ -27,7 +27,7 @@ from services.downloads.slskd_service import SlskdService
 
 
 @pytest.fixture(autouse=True)
-def _reset_cadence():
+def _reset_cadence(monkeypatch):
     """Reset the SHARED counter around every test.
 
     The cadence counter is a CLASS attribute (deliberately — both search entry
@@ -35,7 +35,12 @@ def _reset_cadence():
     would reset every call and the cleanup would run every search).  That means
     it leaks between tests, so it must be reset explicitly.  Same for the
     ownership registry.
+
+    The finalize grace (see ``test_slskd_search_delete_race``) is disabled here:
+    these tests are about the CADENCE, and the deletion path is asserted in the
+    race test with the real grace.
     """
+    monkeypatch.setattr(SlskdService, "SEARCH_FINALIZE_GRACE_SECONDS", 0.0)
     SlskdService.reset_cleanup_cadence()
     SlskdService.reset_owned_searches()
     yield
@@ -72,7 +77,8 @@ class _RecordingHttp:
         if endpoint.split("?")[0] == "searches":
             self.list_searches_calls += 1
             return [dict(s) for s in self.stale]
-        return []
+        # A single search: cancel_search polls this before deleting.
+        return {"state": "Completed"}
 
     def delete(self, endpoint, *args, **kwargs):
         self.deleted.append(endpoint.split("/")[-1].split("?")[0])

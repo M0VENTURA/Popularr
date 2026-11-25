@@ -455,14 +455,48 @@ class SlskdService:
         with cls._OWNED_SEARCH_LOCK:
             cls._OWNED_SEARCH_IDS.discard(str(search_id))
 
+    #: How long a search must have been TERMINAL before we delete its row.
+    #:
+    #: ⚠️ THIS IS THE slskd "Failed to finalize search" FIX.
+    #:
+    #: slskd's ``SearchService.StartAsync`` runs a background continuation that
+    #: calls ``SearchService.Update(search)`` when the search finishes. Deleting
+    #: the row while that write is in flight makes EF's optimistic concurrency
+    #: check fail — "expected to affect 1 row(s), but actually affected 0" — and
+    #: slskd logs ``Failed to finalize search``. The search is left non-terminal
+    #: in slskd's database, which is exactly the ghost state our own stuck-search
+    #: cleanup then chases.
+    #:
+    #: Waiting a few seconds after we OBSERVE the terminal state leaves that
+    #: write time to land. Deletion is cheap; this delay costs nothing the queue
+    #: cares about.
+    SEARCH_FINALIZE_GRACE_SECONDS = 5.0
+
+    #: ``search_id -> monotonic time we first saw it terminal`` (2026-11-26).
+    _TERMINAL_FIRST_SEEN: dict[str, float] = {}
+
+    @classmethod
+    def _note_terminal_search(cls, search_id: str) -> bool:
+        """Record a terminal sighting; True when it is old enough to delete."""
+        now = time.monotonic()
+        with cls._OWNED_SEARCH_LOCK:
+            first = cls._TERMINAL_FIRST_SEEN.setdefault(str(search_id), now)
+        return (now - first) >= cls.SEARCH_FINALIZE_GRACE_SECONDS
+
+    @classmethod
+    def _forget_terminal_search(cls, search_id: str) -> None:
+        with cls._OWNED_SEARCH_LOCK:
+            cls._TERMINAL_FIRST_SEEN.pop(str(search_id), None)
+
     @classmethod
     def reset_owned_searches(cls) -> None:
         """Clear the ownership registry (used by tests and manual maintenance)."""
         with cls._OWNED_SEARCH_LOCK:
             cls._OWNED_SEARCH_IDS.clear()
+            cls._TERMINAL_FIRST_SEEN.clear()
 
     @classmethod
-    def _owned_search_ids_snapshot(cls) -> set[str]:
+    def _owned_search_ids_snapshot(cls) -> set[str]:  # type: ignore[no-redef]
         with cls._OWNED_SEARCH_LOCK:
             return set(cls._OWNED_SEARCH_IDS)
 
@@ -1272,6 +1306,7 @@ class SlskdService:
         """
         deadline = time.monotonic() + max(0.1, float(budget_seconds))
         owned = type(self)._owned_search_ids_snapshot()
+        existing: list[dict[str, Any]] = []
         try:
             existing = self.list_searches(timeout=4)
             for s in existing or []:
@@ -1299,19 +1334,45 @@ class SlskdService:
                 if not should_cancel:
                     continue
 
-                if state in SEARCH_ACTIVE_STATES or state in SEARCH_TERMINAL_STATES:
-                    stop_ok = self._stop_search(sid, timeout=max(0.5, min(2, deadline - time.monotonic())))
-                    if not stop_ok:
-                        logger.warning("Stale search stop returned unexpected status", search_id=sid, state=state)
-
                 if time.monotonic() >= deadline:
                     logger.warning("Stale search cleanup budget exhausted")
                     break
-                if self.cancel_search(sid, timeout=max(0.5, min(2, deadline - time.monotonic()))):
-                    if is_owned and self.is_terminal_search_state(state):
+
+                if is_owned and self.is_terminal_search_state(state):
+                    # Terminal: deletion is safe once the finalize grace has
+                    # elapsed (``cancel_search`` enforces it; the first pass
+                    # only records the sighting).
+                    if self.cancel_search(
+                        sid, timeout=max(0.5, min(2, deadline - time.monotonic()))
+                    ):
                         logger.info("Cleared owned stale search", search_id=sid, state=state)
+                else:
+                    # ACTIVE (stuck owned, or orphaned): STOP it only. Deleting
+                    # a search that is still finalising is exactly what slskd
+                    # reports as a DbUpdateConcurrencyException; the deletion
+                    # is retried on a later pass once the state is terminal.
+                    self._stop_search(
+                        sid, timeout=max(0.5, min(2, deadline - time.monotonic()))
+                    )
+                    logger.info(
+                        "Stopped stale search — delete deferred until terminal",
+                        search_id=sid, state=state, owned=is_owned,
+                    )
         except Exception as cleanup_err:
             logger.warning("Could not clear stale searches", error=str(cleanup_err))
+        finally:
+            # Do not grow the grace map for ever: drop ids slskd no longer has.
+            try:
+                present = {
+                    str(s.get("id") or s.get("searchId") or s.get("Id") or "")
+                    for s in (existing or [])
+                }
+                with type(self)._OWNED_SEARCH_LOCK:
+                    for _sid in list(type(self)._TERMINAL_FIRST_SEEN):
+                        if _sid not in present:
+                            type(self)._TERMINAL_FIRST_SEEN.pop(_sid, None)
+            except Exception:
+                pass
 
     def _stop_search(self, search_id: str, timeout: float | None = None) -> bool:
         """Stop an ACTIVE search — prefers the HTTP client's documented
@@ -1340,18 +1401,42 @@ class SlskdService:
             return False
 
     def cancel_search(self, search_id: str, timeout: float | None = None) -> bool:
-        """Stop an active search and remove it (best effort on each half).
+        """Stop a search, then delete it ONLY once it is safely terminal.
 
-        The active half uses the explicit stop (PUT) so the search does not
-        keep streaming responses into slskd; removal treats a 404 as success
-        (already deleted).  A 409/500 "concurrency" reply on delete is NOT
-        treated as success — it is logged; the search's cleanup is retried at
-        the next clean cycle, not silently swallowed.
+        ⚠️ DEFERRED DELETE — this is the fix for slskd's
+        ``Failed to finalize search`` / ``DbUpdateConcurrencyException``.
+
+        slskd finalises a search in a background continuation
+        (``SearchService.StartAsync`` → ``SearchService.Update``). Deleting the
+        row while that write is in flight makes EF report "expected 1 row,
+        affected 0", slskd logs a concurrency exception, and the search is left
+        non-terminal in slskd's own database — the ghost our stuck-search
+        cleanup then chases.
+
+        So: stop it, wait (briefly) for a terminal state, then observe it for
+        ``SEARCH_FINALIZE_GRACE_SECONDS`` before deleting. If the state is still
+        active — or cannot be read — nothing is deleted and ownership is KEPT,
+        so the next ``clear_stale_searches`` pass retries.
         """
-        self.unmark_search_owned(search_id)
         try:
             self._stop_search(search_id, timeout=timeout)
-            return self._delete_search(search_id, timeout=timeout)
+            if not self._wait_for_terminal(search_id, timeout=2.0):
+                logger.debug(
+                    "Search not terminal yet — delete deferred",
+                    search_id=search_id,
+                )
+                return False
+            if not self._note_terminal_search(search_id):
+                logger.debug(
+                    "Search terminal but inside the finalize grace — delete deferred",
+                    search_id=search_id,
+                )
+                return False
+            deleted = self._delete_search(search_id, timeout=timeout)
+            if deleted:
+                self.unmark_search_owned(search_id)
+                self._forget_terminal_search(search_id)
+            return deleted
         except Exception as exc:
             logger.warning(
                 "slskd cancel search failed",
@@ -1360,6 +1445,36 @@ class SlskdService:
                 error_type=type(exc).__name__,
             )
             return False
+
+    def _search_state(self, search_id: str, timeout: float | None = None) -> str:
+        """Current state string, "" when unreadable, "Deleted" on a 404."""
+        try:
+            data = self.http.get_json(
+                f"searches/{quote(search_id, safe='')}",
+                timeout=timeout,
+                default={},
+            )
+        except Exception as exc:
+            return "Deleted" if _is_not_found_error(exc) else ""
+        if not isinstance(data, dict):
+            return ""
+        return str(data.get("state") or "")
+
+    def _wait_for_terminal(self, search_id: str, timeout: float = 2.0) -> bool:
+        """Poll until the search is terminal or gone; False when it stays active."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            state = self._search_state(search_id, timeout=1)
+            if state == "Deleted":
+                return True
+            if state and self.is_terminal_search_state(state):
+                return True
+            if not state:
+                # Unknown (transient error): do not delete on a guess.
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.25)
 
     def cancel_download(self, username: str, transfer_id: str, remove: bool = True, timeout: float | None = None) -> bool:
         try:

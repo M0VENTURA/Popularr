@@ -349,6 +349,24 @@ def queue_processor_status() -> tuple[dict[str, Any], int]:
             "restart_count": 0,
         }
 
+    # ── Search service (Soulseek) availability ────────────────────────────
+    # Read from the shared runtime-state file, NOT from this process's breaker:
+    # the queue is usually driven by the standalone worker, and its in-memory
+    # breaker is invisible here. See ``services.downloads.search_service_state``.
+    try:
+        from services.downloads.search_service_state import (
+            read_search_service_state,
+        )
+
+        search_service = read_search_service_state()
+    except Exception as exc:
+        logger.debug("Search service state unavailable: %s", exc)
+        search_service = {
+            "known": False, "available": True, "reason": "",
+            "tier": 0, "paused_until_iso": "", "retry_in_seconds": 0,
+            "updated_at": "",
+        }
+
     return _ok(
         running=running,
         processor_running=running,
@@ -362,6 +380,7 @@ def queue_processor_status() -> tuple[dict[str, Any], int]:
         detail=detail,
         message=message,
         auto_restart=auto_restart,
+        search_service=search_service,
     )
 
 

@@ -29,6 +29,15 @@
     #}
     <div id="queueProcessorAlert" class="d-none"></div>
 
+    {#
+      Soulseek search-service availability. Written by dashboard.js from the
+      SHARED breaker state (`/api/queue-processor/status` → `search_service`),
+      so an outage detected by the standalone queue worker — a different process
+      from this page — is still visible here. Hidden while the service is
+      reachable or while a recorded outage's backoff window has expired.
+    #}
+    <div id="searchServiceAlert" class="d-none"></div>
+
     {# A completed background popularity CSV stays available here. #}
     <div id="popularityReportReady" class="d-none"></div>
 

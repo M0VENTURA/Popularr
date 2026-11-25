@@ -228,7 +228,8 @@ class TestClearStaleSearches:
             def get_json(self, endpoint, *args, **kwargs):
                 if str(endpoint).split("?")[0] == "searches":
                     return [dict(s) for s in self._searches]
-                return {}
+                # A single search: cancel_search polls this before deleting.
+                return {"state": "Completed"}
 
             def delete(self, endpoint, *args, **kwargs):
                 seg = endpoint.split("/")[-1]
@@ -260,9 +261,23 @@ class TestClearStaleSearches:
         ])
         svc = SlskdService(http)
         svc.clear_stale_searches(budget_seconds=8)
-        assert "delete:terminal" in http.cancelled
-        assert "stop:stuck" in http.cancelled or "delete:stuck" in http.cancelled
+        # ⚠️ DELETION IS DEFERRED (2026-11-26): slskd finalizes a search in a
+        # background continuation, and deleting the row while that write is in
+        # flight is the reported "Failed to finalize search"
+        # (DbUpdateConcurrencyException). The first pass stops and observes.
+        assert "delete:terminal" not in http.cancelled
+        assert "stop:terminal" in http.cancelled
+        assert "stop:stuck" in http.cancelled
         assert not any("fresh" in c for c in http.cancelled), "a fresh owned search must not be cancelled"
+
+        # Once the terminal sighting is older than the grace, the delete runs.
+        SlskdService._TERMINAL_FIRST_SEEN["terminal"] = (
+            time.monotonic()
+            - SlskdService.SEARCH_FINALIZE_GRACE_SECONDS
+            - 1
+        )
+        svc.clear_stale_searches(budget_seconds=8)
+        assert "delete:terminal" in http.cancelled
 
     def test_a_foreign_terminal_search_is_left_alone(self):
         """Searches the user started in the slskd web UI are not ours — a
