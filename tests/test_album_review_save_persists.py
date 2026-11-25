@@ -315,19 +315,79 @@ class TestClearingAlbumIdentifiers:
             assert tags.get("musicbrainz_releasegroupid") == ""
             assert tags.get("musicbrainz_artistid") == ""
 
-    async def test_a_distinct_album_artist_mbid_is_preserved(self, client, captured):
-        """Clearing the single Artist ID box must not wipe a different
-        album-artist id that the box never showed."""
-        captured.tracks[0]["musicbrainz_artistid"] = "track-artist"
-        captured.tracks[0]["musicbrainz_albumartistid"] = "album-artist"
+    async def test_a_compilation_keeps_the_performers_own_mbid(self, client, captured):
+        """The box is the ALBUM ARTIST id; clearing it must not erase a
+        different performer's identity on a Various Artists release."""
+        captured.tracks[0].update({
+            "artist": "Vitro",
+            "album_artist": "Various Artists",
+            "musicbrainz_artistid": "vitro-id",
+            "musicbrainz_albumartistid": "va-id",
+        })
 
-        await _post(client, artist_mbid="")
+        await _post(client, artist_mbid="", album_artist="Various Artists")
 
         payload = captured.db_payloads[0]
-        assert payload["musicbrainz_artistid"] is None
-        assert "musicbrainz_albumartistid" not in payload, (
-            "the distinct album-artist id was erased by clearing the other column"
+        assert payload["musicbrainz_albumartistid"] is None
+        assert "musicbrainz_artistid" not in payload, (
+            "the performer's own MBID was erased by clearing the album-artist box"
         )
+
+    async def test_the_album_artist_id_is_not_fanned_onto_every_track(
+        self, client, captured
+    ):
+        """REPORTED — Vitro's ``musicbrainz_artistid`` was the Various Artists id.
+
+        Saving the album-level box must write the ALBUM ARTIST column; a
+        compilation's performers keep their own ids.
+        """
+        captured.tracks[0].update({
+            "artist": "Vitro",
+            "album_artist": "Various Artists",
+            "musicbrainz_artistid": "vitro-id",
+            "musicbrainz_albumartistid": "va-id",
+        })
+
+        await _post(client, artist_mbid="va-id", album_artist="Various Artists")
+
+        payload = captured.db_payloads[0]
+        assert payload["musicbrainz_albumartistid"] == "va-id"
+        assert "musicbrainz_artistid" not in payload
+        for _path, tags in captured.file_writes:
+            assert tags.get("musicbrainz_artistid") != "va-id", (
+                "the album artist's MBID reached the performer's file tag"
+            )
+            assert tags.get("musicbrainz_albumartistid") == "va-id"
+
+    async def test_a_corrupted_track_artist_id_is_cleared(self, client, captured):
+        """A compilation row whose track id IS the album artist id is wrong."""
+        captured.tracks[0].update({
+            "artist": "Vitro",
+            "album_artist": "Various Artists",
+            "musicbrainz_artistid": "va-id",
+            "musicbrainz_albumartistid": "va-id",
+        })
+
+        await _post(client, artist_mbid="va-id", album_artist="Various Artists")
+
+        payload = captured.db_payloads[0]
+        assert payload["musicbrainz_albumartistid"] == "va-id"
+        assert payload["musicbrainz_artistid"] is None, (
+            "the album artist's id must not remain the performer's identity"
+        )
+
+    async def test_a_single_artist_album_writes_both_columns(self, client, captured):
+        """CONTROL — when the credits agree, both columns legitimately agree."""
+        captured.tracks[0].update({
+            "musicbrainz_artistid": "artist-1",
+            "musicbrainz_albumartistid": "artist-1",
+        })
+
+        await _post(client, artist_mbid="artist-1")
+
+        payload = captured.db_payloads[0]
+        assert payload["musicbrainz_albumartistid"] == "artist-1"
+        assert payload["musicbrainz_artistid"] == "artist-1"
 
     async def test_the_album_artist_column_is_cleared_when_it_was_shown(
         self, client, captured
@@ -344,6 +404,19 @@ class TestClearingAlbumIdentifiers:
             "that column or the field refills"
         )
 
+    async def test_a_release_id_is_not_saved_as_the_release_group(self, client, captured):
+        """The Vitro file stored the SAME UUID in both frames; a save repairs it."""
+        await _post(
+            client,
+            album_mbid="c1fd5078-c940-3bc1-8102-fe83a56c4ef0",
+            album_release_group_mbid="c1fd5078-c940-3bc1-8102-fe83a56c4ef0",
+        )
+
+        for payload in captured.db_payloads:
+            assert payload["musicbrainz_releasegroupid"] is None, (
+                "a Release id must never be persisted as a Release-Group id"
+            )
+
     async def test_non_empty_identifiers_are_still_written(self, client, captured):
         await _post(
             client,
@@ -356,6 +429,19 @@ class TestClearingAlbumIdentifiers:
             assert payload.get("musicbrainz_releasegroupid") == "rg-1"
             assert payload.get("musicbrainz_artistid") == "artist-1"
             assert payload.get("discogs_album_id") == "1234"
+
+
+class TestThePageBoxIsTheAlbumArtistId:
+    def test_the_render_reads_the_album_artist_column_first(self):
+        """The box is album-level; showing the first track's id made a
+        compilation display one performer as the album's artist."""
+        import inspect
+
+        source = inspect.getsource(ui)
+        marker = "album_artist_mbid = first_value("
+        start = source.index(marker)
+        window = source[start:start + 200]
+        assert '"musicbrainz_albumartistid", "artist_mbid", "musicbrainz_artistid"' in window
 
 
 class TestSingleDiscClearsDiscNumbers:

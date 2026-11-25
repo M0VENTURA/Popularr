@@ -2683,8 +2683,13 @@ async def album_detail(album_path: str) -> Any:
         # it without wiping a genuinely DIFFERENT album-artist id on a
         # compilation.
         _artist_mbid_displayed = ""
+        # The page's single box is the ALBUM ARTIST id (the template binds it
+        # to ``album_artist_mbid``), so read the album-artist column first.
+        # Ordering it the other way made the box display the FIRST TRACK's
+        # artist id and the save then fanned that track id onto every row —
+        # the reported Various Artists / Vitro corruption.
         for _t in tracks:
-            for _col in ("musicbrainz_artistid", "musicbrainz_albumartistid"):
+            for _col in ("musicbrainz_albumartistid", "musicbrainz_artistid"):
                 _value = str(_t.get(_col) or "").strip()
                 if _value:
                     _artist_mbid_displayed = _value
@@ -3059,23 +3064,67 @@ async def album_detail(album_path: str) -> Any:
                     # both or the page would keep showing the other.
                     payload["musicbrainz_albumid"] = album_mbid or None
                 if _album_rg_field:
-                    payload["musicbrainz_releasegroupid"] = album_rg_mbid or None
+                    _rg_value = album_rg_mbid or None
+                    # ⚠️ A Release id is NOT a Release-Group id. A malformed
+                    # file can carry the same UUID in both frames (the Vitro
+                    # case); saving that back keeps the identity invalid and
+                    # Navidrome cannot group it.
+                    if (
+                        _rg_value
+                        and album_mbid
+                        and _rg_value.casefold() == album_mbid.casefold()
+                    ):
+                        _rg_value = None
+                    payload["musicbrainz_releasegroupid"] = _rg_value
                 if _artist_mbid_present:
-                    payload["musicbrainz_artistid"] = artist_mbid or None
-                    if not artist_mbid:
-                        # The page's single "Artist ID" box is populated from
-                        # EITHER artist column. Clear the album-artist column
-                        # too when it is empty or held the value the page
-                        # displayed — otherwise the box would refill from it.
-                        # A genuinely different album-artist id is preserved.
-                        _current_album_artist_mbid = str(
-                            track.get("musicbrainz_albumartistid") or ""
-                        ).strip()
-                        if (
-                            not _current_album_artist_mbid
-                            or _current_album_artist_mbid == _artist_mbid_displayed
-                        ):
-                            payload["musicbrainz_albumartistid"] = None
+                    # ⭐ THIS BOX IS THE ALBUM ARTIST ID.
+                    #
+                    # The template binds ``artist_mbid`` to
+                    # ``album_artist_mbid``. The old save copied it onto
+                    # ``musicbrainz_artistid`` for EVERY track, so saving a
+                    # compilation stamped the album artist's id (Various
+                    # Artists) onto each performer — the reported "artist id is
+                    # the album artist id" corruption, and Navidrome then links
+                    # the song to the wrong artist.
+                    payload["musicbrainz_albumartistid"] = artist_mbid or None
+
+                    _track_artist_key = str(track.get("artist") or "").strip().casefold()
+                    _album_artist_key = str(
+                        new_artist
+                        or track.get("album_artist")
+                        or track.get("artist")
+                        or ""
+                    ).strip().casefold()
+                    _current_track_mbid = str(
+                        track.get("musicbrainz_artistid") or ""
+                    ).strip()
+                    _displayed_key = str(_artist_mbid_displayed or "").strip().casefold()
+                    _is_va = _album_artist_key in {
+                        "various artists", "variousartist", "va",
+                    }
+
+                    if artist_mbid:
+                        if _track_artist_key == _album_artist_key:
+                            # Single-artist album: the track credit IS the
+                            # album artist, so both columns legitimately agree.
+                            payload["musicbrainz_artistid"] = artist_mbid
+                        elif _is_va and _current_track_mbid.casefold() == artist_mbid.casefold():
+                            # ⚠️ BEFORE the displayed-value mirror: a compilation
+                            # row whose "track artist id" IS the album artist's
+                            # id is the corruption being repaired, not a value
+                            # to keep in step.
+                            payload["musicbrainz_artistid"] = None
+                        elif _current_track_mbid.casefold() == _displayed_key:
+                            # The row's track id was the value this same box
+                            # displayed; keep them in step.
+                            payload["musicbrainz_artistid"] = artist_mbid
+                    else:
+                        # Clearing the album-artist box must not wipe a
+                        # DIFFERENT performer's identity on a compilation.
+                        if _track_artist_key == _album_artist_key:
+                            payload["musicbrainz_artistid"] = None
+                        elif _current_track_mbid.casefold() == _displayed_key:
+                            payload["musicbrainz_artistid"] = None
                 if _discogs_present:
                     payload["discogs_album_id"] = discogs_id or None
 
@@ -4011,7 +4060,7 @@ async def album_detail(album_path: str) -> Any:
         logger.debug("Failed to aggregate album genre sources", error=str(exc))
 
     album_artist_mbid = first_value(
-        "artist_mbid", "musicbrainz_artistid", "musicbrainz_albumartistid",
+        "musicbrainz_albumartistid", "artist_mbid", "musicbrainz_artistid",
     ) or ""
 
     def collect_hero_genres() -> list[str]:

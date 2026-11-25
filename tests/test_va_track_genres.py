@@ -221,7 +221,7 @@ class TestWhatIsWritten:
         ) == []
         assert gas.aggregate_genres(
             {"musicbrainz": ["rock"]}, max_genres=2, nav_genres=None
-        ) == ["rock"]
+        ) == ["Rock"]
 
     def test_a_lone_tag_survives_only_when_the_only_voice(self):
         """⚠️ CHANGED 2026-11-20 — the corroboration rule, stated precisely.
@@ -273,7 +273,15 @@ def _patch_writer(monkeypatch, *, aggregate):
 
     class _Session:
         def execute(self, statement, params=None):
-            recorded.append(dict(params or {}))
+            # The writer batches the album as executemany (a LIST of param
+            # dicts), so record each row rather than treating the list as one
+            # mapping — ``dict([{...}])`` reads its keys and produced a bogus
+            # ``{"genres": "track_id"}`` row.
+            if isinstance(params, list):
+                for one in params:
+                    recorded.append(dict(one))
+            else:
+                recorded.append(dict(params or {}))
             _SQL.append(str(statement))
             return _Result()
 

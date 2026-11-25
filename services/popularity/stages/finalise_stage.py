@@ -3492,6 +3492,8 @@ def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
                            year, release_year, artist, album_artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
+                      AND COALESCE(exclude_from_stats, FALSE) = FALSE
+                      AND tracks.final_score IS NOT NULL
                       AND (
                           artist ILIKE '% feat %' OR artist ILIKE '% feat.%'
                           OR artist ILIKE '%feat.%' OR artist ILIKE '%featuring%'
@@ -3570,6 +3572,7 @@ def _sync_essential_playlist(
                            COALESCE(is_compilation, 0) AS is_compilation,
                            COALESCE(popularity, final_score, 0) AS popularity_score,
                            COALESCE(final_score, popularity, 0) AS final_score,
+                           final_score AS raw_final_score,
                            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
                            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
                            -- ⭐ The high-confidence-single exemption below needs
@@ -3580,6 +3583,8 @@ def _sync_essential_playlist(
                            year, release_year, artist, album_artist, genres
                     FROM tracks
                     WHERE COALESCE(stars, star_rating) >= 4
+                      AND COALESCE(exclude_from_stats, FALSE) = FALSE
+                      AND tracks.final_score IS NOT NULL
                       AND (
                           LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))) = LOWER(TRIM(:artist))
                           OR LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))) LIKE :artist_prefix ESCAPE '\\'
@@ -3649,10 +3654,20 @@ def _sync_essential_playlist(
 
     rows = _filter_christmas_rows(rows, playlist_name)
 
-    # Hard membership floor: an Essential Collection is 4★/5★ only. The SQL
-    # already filters, but featured rows and any future merge path must not be
-    # able to reintroduce a 3★ track.
-    rows = [row for row in rows if int(row.get("stars") or 0) >= 4]
+    # Hard membership floor: an Essential Collection is 4★/5★ only, and a row
+    # the user excluded from statistics (or one the scan never scored) is not a
+    # candidate. The SQL already filters, but featured rows and any future merge
+    # path must not be able to reintroduce one — the audit found excluded and
+    # scoreless memberships in Essentials.
+    rows = [
+        row for row in rows
+        if int(row.get("stars") or 0) >= 4
+        and not bool(row.get("exclude_from_stats"))
+        and (
+            "raw_final_score" not in row
+            or row.get("raw_final_score") is not None
+        )
+    ]
 
     # ⭐ STEP 2 — DROP LIVE / REMIX / ACOUSTIC / DEMO TAKES, unless the take is a
     # HIGH-CONFIDENCE SINGLE.
@@ -3990,6 +4005,7 @@ def _fetch_essential_vocalist_rows() -> list[dict[str, Any]]:
                            COALESCE(is_compilation, 0) AS is_compilation,
                            COALESCE(popularity, final_score, 0) AS popularity_score,
                            COALESCE(final_score, popularity, 0) AS final_score,
+                           final_score AS raw_final_score,
                            COALESCE(lastfm_listeners, 0) AS lastfm_listeners,
                            COALESCE(listenbrainz_listens, 0) AS listenbrainz_listens,
                            year, release_year, artist, album_artist, genres,
@@ -5169,6 +5185,12 @@ def _track_is_playlist_eligible(row: dict[str, Any]) -> bool:
         return False
     if bool(row.get("exclude_from_stats")):
         return False
+    # A row whose final score was never persisted has not been ranked. The
+    # audit found a handful of blank-score memberships in Top Tracks; they are
+    # stale/unscanned candidates, not ranked tracks. Rows built by older
+    # callers/tests without this key stay eligible (no evidence either way).
+    if "raw_final_score" in row and row.get("raw_final_score") is None:
+        return False
     try:
         from services.catalog.album_classification_service import (
             is_live_or_alternate_track_title,
@@ -5261,6 +5283,7 @@ _GENRE_ROWS_SQL = """
            COALESCE(stars, star_rating) AS stars,
            COALESCE(popularity, final_score, 0) AS popularity_score,
            COALESCE(final_score, popularity, 0) AS final_score,
+           final_score AS raw_final_score,
            COALESCE(is_live, 0) AS is_live,
            COALESCE(exclude_from_stats, FALSE) AS exclude_from_stats,
            COALESCE(is_compilation, 0) AS is_compilation,
@@ -7905,7 +7928,9 @@ _CURATED_ROWS_SQL = """
            COALESCE(stars, star_rating, 0) AS stars,
            COALESCE(popularity, final_score, 0) AS popularity_score,
            COALESCE(final_score, popularity, 0) AS final_score,
+           final_score AS raw_final_score,
            COALESCE(is_live, 0) AS is_live,
+           COALESCE(exclude_from_stats, FALSE) AS exclude_from_stats,
            COALESCE(is_compilation, 0) AS is_compilation,
            COALESCE(is_single, FALSE) AS is_single,
            COALESCE(is_cover, 0) AS is_cover,
@@ -7922,6 +7947,14 @@ _CURATED_ROWS_SQL = """
            mood, genres, lastfm_tags, musicbrainz_genres, essentia_genres
     FROM tracks
     WHERE COALESCE(stars, star_rating, 0) >= :min_stars
+      -- ⭐ ONE BASE ELIGIBILITY FOR EVERY CURATED LIST. Decades (and covers)
+      -- used to skip the filters the genre builder applies, so live takes and
+      -- excluded tracks reached them — the audit found them in the decade
+      -- playlists. A null final_score is an unscanned row: it has not earned a
+      -- slot and cannot be ranked, so it is not a candidate yet.
+      AND COALESCE(is_live, 0) = 0
+      AND COALESCE(exclude_from_stats, FALSE) = FALSE
+      AND tracks.final_score IS NOT NULL
 """
 
 
@@ -8970,6 +9003,16 @@ def _create_covers_playlist(
         rows = _fetch_curated_playlist_rows(min_stars=_covers_min_stars(cfg))
     if rows is None:
         return False
+    # ⚠️ APPLY THE CONFIGURED FLOOR HERE, not only in the fetch. The batch pass
+    # shares ONE 3★ pool with the other curated builders, so passing rows in
+    # skipped the covers floor entirely — the audit found 148 cover memberships
+    # below four stars. ``0`` still disables the floor on purpose.
+    _min_stars = _covers_min_stars(cfg)
+    if _min_stars > 0:
+        rows = [
+            row for row in rows
+            if int(row.get("stars") or 0) >= _min_stars
+        ]
     pool = _cover_rows_are_credible(
         [r for r in rows if int(r.get("is_cover") or 0) == 1]
     )

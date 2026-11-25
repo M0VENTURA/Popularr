@@ -719,8 +719,9 @@
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="album_release_group_mbid" name="album_release_group_mbid" value="{{ album_data.musicbrainz_releasegroupid or '' }}">
               </div>
               <div class="col-12 col-md-6">
-                <label for="artist_mbid" class="form-label small">MusicBrainz Artist ID</label>
+                <label for="artist_mbid" class="form-label small">MusicBrainz Album Artist ID</label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="artist_mbid" name="artist_mbid" value="{{ album_artist_mbid or '' }}">
+                <div class="form-text">Album-level credit. A compilation keeps each performer's own MB Artist ID (edit it per track).</div>
               </div>
               <div class="col-12 col-md-6">
                 <label for="album_discogs_id" class="form-label small">Discogs Release ID</label>

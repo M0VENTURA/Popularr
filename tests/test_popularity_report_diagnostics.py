@@ -68,3 +68,86 @@ def test_genre_lists_are_written_as_one_delimited_cell():
     assert svc._genre_cell('["Rock", "Pop"]') == "Rock; Pop"
     assert svc._genre_cell("Rock, Pop") == "Rock; Pop"
     assert svc._genre_cell(None) == ""
+
+
+class TestTheMusicBrainzIdDiagnostic:
+    def test_an_album_with_multiple_release_ids_is_flagged(self):
+        assert svc._mb_id_diagnostic(
+            {"musicbrainz_albumid": "a"},
+            album_has_multiple_releases=True,
+        ) == "album_has_multiple_releases"
+
+    def test_a_release_id_in_the_group_column_is_flagged(self):
+        assert svc._mb_id_diagnostic({
+            "musicbrainz_albumid": "c1fd5078-c940-3bc1-8102-fe83a56c4ef0",
+            "musicbrainz_releasegroupid": "c1fd5078-c940-3bc1-8102-fe83a56c4ef0",
+        }) == "release_equals_group"
+
+    def test_a_compilation_track_using_the_album_artist_id_is_flagged(self):
+        assert svc._mb_id_diagnostic({
+            "album_artist": "Various Artists",
+            "musicbrainz_albumartistid": "89ad4ac3-39f7-470e-963a-56509c546377",
+            "musicbrainz_artistid": "89ad4ac3-39f7-470e-963a-56509c546377",
+        }) == "artist_is_album_artist"
+
+    def test_a_lead_artist_matching_the_album_artist_is_fine(self):
+        assert svc._mb_id_diagnostic({
+            "album_artist": "Korn",
+            "musicbrainz_albumartistid": "a1",
+            "musicbrainz_artistid": "a1",
+        }) == ""
+
+    def test_a_healthy_compilation_is_fine(self):
+        assert svc._mb_id_diagnostic({
+            "album_artist": "Various Artists",
+            "musicbrainz_albumartistid": "va-id",
+            "musicbrainz_artistid": "vitro-id",
+            "musicbrainz_albumid": "release-1",
+            "musicbrainz_releasegroupid": "group-1",
+        }) == ""
+
+
+class TestTheScoreDiagnostic:
+    """The audit's highest-value score/popularity disagreements."""
+
+    def test_a_famous_track_with_a_low_score_is_flagged(self):
+        assert svc._score_diagnostic({
+            "final_score": 9.19,
+            "lastfm_listeners": 835_000,
+            "listenbrainz_listens": 2_000,
+            "is_live": 0,
+            "exclude_from_stats": False,
+        }) == "popular_but_low_score"
+
+    def test_a_high_score_with_no_evidence_is_flagged(self):
+        assert svc._score_diagnostic({
+            "final_score": 95.0,
+            "lastfm_listeners": 0,
+            "listenbrainz_listens": 0,
+            "is_live": 0,
+            "exclude_from_stats": False,
+        }) == "high_score_low_evidence"
+
+    def test_live_and_excluded_rows_are_not_flagged(self):
+        row = {
+            "final_score": 0,
+            "lastfm_listeners": 500_000,
+            "listenbrainz_listens": 0,
+            "is_live": 1,
+            "exclude_from_stats": False,
+        }
+        assert svc._score_diagnostic(row) == ""
+        assert svc._score_diagnostic({**row, "is_live": 0, "exclude_from_stats": True}) == ""
+
+    def test_an_ordinary_row_is_blank(self):
+        assert svc._score_diagnostic({
+            "final_score": 55.0,
+            "lastfm_listeners": 50_000,
+            "listenbrainz_listens": 500,
+            "is_live": 0,
+            "exclude_from_stats": False,
+        }) == ""
+
+    def test_the_column_is_reported(self):
+        assert "score_diagnostic" in svc.POPULARITY_REPORT_COLUMNS
+

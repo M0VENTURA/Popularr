@@ -142,6 +142,22 @@ _FILTER_TAGS: frozenset[str] = frozenset({
     "remaster", "remastered", "instrumental", "cover",
     "comedy", "orchestral", "symphonic", "soundtrack",
     "christmas", "holiday",
+    # Mastering / edition words. These are VERSION attributes, not musical
+    # genres: intercepting them keeps them out of the voting pool, and
+    # ``_VERSION_ONLY_FINAL_TAGS`` keeps them out of Final Genres entirely.
+    "demo", "mono", "stereo", "deluxe", "deluxe edition",
+    "radio edit", "edit", "album version", "single version",
+    "explicit", "clean",
+})
+
+#: Filter tags that describe the FILE/EDITION rather than the music. They stay
+#: intercepted (so they can never win a genre vote) but are never appended to
+#: the final list — the audit found "Remaster" stored as a Final Genre. Cover is
+#: deliberately NOT here: it drives the cover playlists and is a relationship.
+_VERSION_ONLY_FINAL_TAGS: frozenset[str] = frozenset({
+    "remaster", "remastered", "demo", "mono", "stereo", "deluxe",
+    "deluxe edition", "radio edit", "edit", "album version",
+    "single version", "explicit", "clean", "instrumental",
 })
 
 #: Canonical display mapping for intercepted filter tags so variants like
@@ -162,6 +178,17 @@ _CANONICAL_FILTER_DISPLAY: dict[str, str] = {
     "soundtrack": "Soundtrack",
     "christmas": "Christmas",
     "holiday": HOLIDAY_CANONICAL_TOKEN,
+    "demo": "Demo",
+    "mono": "Mono",
+    "stereo": "Stereo",
+    "deluxe": "Deluxe Edition",
+    "deluxe edition": "Deluxe Edition",
+    "radio edit": "Radio Edit",
+    "edit": "Edit",
+    "album version": "Album Version",
+    "single version": "Single Version",
+    "explicit": "Explicit",
+    "clean": "Clean",
 }
 
 #: Subset of ``_FILTER_TAGS`` that describe ONE TRACK's performance
@@ -878,6 +905,17 @@ def _append_extra_genres(
     if "remaster" in title_lower or "remaster" in context_lower:
         filters.add("Remaster")
 
+    # ⭐ EDITION/MASTERING WORDS ARE NEVER FINAL GENRES. "Remaster" (and Mono,
+    # Stereo, Deluxe Edition, Radio Edit…) describes the file, not the music;
+    # the audit found it stored in ``genres`` and read by the playlist surface.
+    # They stay intercepted above (so they cannot win a vote) and are dropped
+    # here — AFTER the heuristics, so a title-derived Remaster is dropped too.
+    # Cover/Live/Acoustic deliberately remain markers.
+    filters = {
+        f_tag for f_tag in filters
+        if str(f_tag or "").strip().casefold() not in _VERSION_ONLY_FINAL_TAGS
+    }
+
     # Append all safely intercepted filter tags in deterministic order.
     #
     # ⭐ ORDER IS DETERMINISTIC (sorted) AND A TRACK-AFFILIATION MARKER IS KEPT
@@ -896,6 +934,24 @@ def _append_extra_genres(
             continue
         genres.append(f_tag)
         existing_lower.add(f_tag.lower())
+
+    # ⭐ CANONICAL CASING. Provider tags arrive as "alternative rock" and
+    # "melodic death metal"; the vocabulary's display name is the one the rest
+    # of the UI writes. The audit flagged the mixed casing as a path bypassing
+    # formatting, so every final value is matched case-insensitively here.
+    try:
+        from services.enrichment.genre_vocabulary import get_vocabulary
+
+        _by_display = {
+            entry.display.casefold(): entry.display
+            for entry in get_vocabulary().genres.values()
+        }
+        genres = [
+            _by_display.get(str(genre).strip().casefold(), genre)
+            for genre in genres
+        ]
+    except Exception as exc:  # pragma: no cover - display polish only
+        logger.debug("Genre display canonicalisation unavailable", error=str(exc))
 
     return genres
 

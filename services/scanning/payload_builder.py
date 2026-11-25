@@ -35,6 +35,11 @@ logger = structlog.get_logger(__name__)
 LOCAL_TZ = os.environ.get("TIMEZONE") or os.environ.get("TZ") or "UTC"
 JSON_EMPTY_LIST = json.dumps([])
 
+#: MusicBrainz's "Various Artists" artist id. A compilation's TRACK artist id
+#: must never be this — that is the album artist's identity.
+VARIOUS_ARTISTS_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
+_VARIOUS_ARTIST_NAMES = frozenset({"various artists", "variousartist", "va"})
+
 NAVIDROME_SCORE_DEFAULTS: dict[str, Any] = {
     "score": 0.0,
     "spotify_score": 0,
@@ -330,6 +335,10 @@ def build_track_payload(
 
     # Album release MBID → prefer the file's own tag, else the album object
     # Navidrome returned (`musicBrainzId` on AlbumID3 = mf.MbzAlbumID).
+    # ⚠️ A per-track release id is an explicit local correction (the user chose
+    # that edition), so it must not be silently replaced by the album object's
+    # id. Mixed ids WITHIN one album are reconciled at the album level by the
+    # save's album-wide fan-out, not here — one track cannot see its siblings.
     _album_mbid = str(
         extracted.get("musicbrainz_albumid") or album_mbid or ""
     ).strip()
@@ -350,6 +359,43 @@ def build_track_payload(
     )
     if _artist_mbid_alt:
         payload["musicbrainz_artist_id"] = _artist_mbid_alt
+
+    # ── MusicBrainz ID integrity ─────────────────────────────────────────
+    # ⚠️ A RELEASE AND ITS RELEASE GROUP ARE DIFFERENT ENTITIES. A malformed
+    # file can carry the same UUID in MUSICBRAINZ_ALBUMID and
+    # MUSICBRAINZ_RELEASEGROUPID (reported on a Various Artists track). Keeping
+    # it makes every consumer treat the release as its own group, and the
+    # album page then saves the invalid identity straight back.
+    _rg_mbid = normalize_single_mbid(
+        str(payload.get("musicbrainz_releasegroupid") or "")
+    )
+    if _rg_mbid and _album_mbid and _rg_mbid.casefold() == _album_mbid.casefold():
+        payload["musicbrainz_releasegroupid"] = None
+
+    # ⚠️ THE TRACK ARTIST ID IS NOT THE ALBUM ARTIST ID. On a compilation
+    # Navidrome/older tagging wrote the Various Artists id into every row's
+    # MUSICBRAINZ_ARTISTID, so the song links to the album artist instead of
+    # the performer (reported: Vitro tagged with the Various Artists MBID).
+    _album_artist_mbid = normalize_single_mbid(
+        str(extracted.get("musicbrainz_albumartistid") or "")
+    )
+    _album_artist_key = str(album_artist_value or "").strip().casefold()
+    _track_artist_key = str(track_artist or "").strip().casefold()
+    _album_is_va = (
+        _album_artist_key in _VARIOUS_ARTIST_NAMES
+        or _album_artist_mbid == VARIOUS_ARTISTS_MBID
+    )
+    if (
+        _album_is_va
+        and _track_artist_key not in _VARIOUS_ARTIST_NAMES
+        and _artist_mbid
+        and (
+            _artist_mbid == VARIOUS_ARTISTS_MBID
+            or _artist_mbid == _album_artist_mbid
+        )
+    ):
+        payload["musicbrainz_artistid"] = None
+        payload["musicbrainz_artist_id"] = None
 
     # ── Album-object tags ────────────────────────────────────────────────
     # recordLabels / releaseTypes / original dates live on AlbumID3, never

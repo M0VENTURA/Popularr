@@ -75,8 +75,8 @@ def build(monkeypatch):
 
 
 class TestItRanksByReachNotByStars:
-    def test_a_huge_three_star_cover_beats_a_small_five_star_one(self, build):
-        """⚠️ THE REPORTED CASE. "Personal Jesus" has 489k listeners but is 3★.
+    def test_a_huge_four_star_cover_beats_a_small_five_star_one(self, build):
+        """⚠️ THE REPORTED CASE. "Personal Jesus" has 489k listeners but is 4★.
 
         The old key sorted STARS first, so every 5★ cover outranked it — 115 of
         the 139 slots went to 5★ tracks purely because they were the top-rated
@@ -84,7 +84,7 @@ class TestItRanksByReachNotByStars:
         """
         ids = build([
             _row("big", "Personal Jesus (Depeche Mode Cover)", "Marilyn Manson",
-                 lastfm=489_095, stars=3),
+                 lastfm=489_095, stars=4),
             _row("small", "Terrible Lie (Nine Inch Nails Cover)", "Static-X",
                  lastfm=119, stars=5),
         ])
@@ -147,7 +147,7 @@ class TestVersionPreference:
             _row("edited", "Faith (edited) (George Michael Cover)", "Limp Bizkit",
                  lastfm=621_154, stars=5, album="Three Dollar Bill, Yall$"),
             _row("original", "Faith (George Michael Cover)", "Limp Bizkit",
-                 lastfm=621_289, stars=3, album="Greatest Hitz"),
+                 lastfm=621_289, stars=4, album="Greatest Hitz"),
         ])
         assert ids == ["original"], (
             f"the unedited version must be preferred: {ids}"

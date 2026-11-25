@@ -268,7 +268,12 @@ def _capture_writes(monkeypatch):
 
     class _Session:
         def execute(self, statement, params=None):
-            _WRITES.append(dict(params or {}))
+            # executemany passes a LIST of param dicts; record each row.
+            if isinstance(params, list):
+                for one in params:
+                    _WRITES.append(dict(one))
+            else:
+                _WRITES.append(dict(params or {}))
             return _Result()
 
         def commit(self):

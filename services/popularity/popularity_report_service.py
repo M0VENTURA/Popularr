@@ -52,6 +52,13 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     # apart.
     "album_artist",
     "album",
+    # The four entity ids every "why did Navidrome split this album?" question
+    # needs, plus a one-word integrity flag. See ``_mb_id_diagnostic``.
+    "musicbrainz_albumid",
+    "musicbrainz_releasegroupid",
+    "musicbrainz_artistid",
+    "musicbrainz_albumartistid",
+    "mb_id_diagnostic",
     "disc_number",
     "track_number",
     "year",
@@ -66,6 +73,10 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
     "genres",
     "raw_score",
     "final_score",
+    # A one-word flag for the two score/popularity shapes the audit asked to
+    # trace: a famous track with no score, and a score built on no evidence.
+    # Blank for ordinary rows.
+    "score_diagnostic",
     "popularity",
     "stars",
     "duration",
@@ -120,7 +131,10 @@ POPULARITY_REPORT_COLUMNS: tuple[str, ...] = (
 #: values are monotonic in each other (the remap is order-preserving), so the
 #: album file reads out in the same relative order as the artist file.
 _POPULARITY_REPORT_SELECT = """
-    SELECT title, artist, album_artist, album, disc_number, track_number, year,
+    SELECT title, artist, album_artist, album,
+           musicbrainz_albumid, musicbrainz_releasegroupid,
+           musicbrainz_artistid, musicbrainz_albumartistid,
+           disc_number, track_number, year,
            listenbrainz_genres, musicbrainz_genres, lastfm_tags,
            discogs_genres, genres,
            raw_score, final_score, popularity, stars, duration,
@@ -328,6 +342,72 @@ def _source_list_cell(value: Any) -> str:
     return str(value)
 
 
+_VA_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
+_VA_NAMES = frozenset({"various artists", "variousartist", "va"})
+
+
+def _mb_id_diagnostic(row: Any, *, album_has_multiple_releases: bool = False) -> str:
+    """Flag structurally invalid MusicBrainz IDs on one row.
+
+    * ``album_has_multiple_releases`` — the same artist + album carries more
+      than one MUSICBRAINZ_ALBUMID. Navidrome derives albums from release ids,
+      so this is the Faun "one folder, two editions" split.
+    * ``release_equals_group`` — a Release and a Release Group are different
+      entities; the same UUID in both frames is malformed (the Vitro case).
+    * ``artist_is_album_artist`` — on a Various Artists album, the per-track
+      artist id must be the PERFORMER (Vitro), never the album artist id.
+    """
+    release = str(row.get("musicbrainz_albumid") or "").strip()
+    group = str(row.get("musicbrainz_releasegroupid") or "").strip()
+    artist = str(row.get("musicbrainz_artistid") or "").strip()
+    album_artist = str(row.get("musicbrainz_albumartistid") or "").strip()
+    problems: list[str] = []
+    if album_has_multiple_releases:
+        problems.append("album_has_multiple_releases")
+    if release and group and release.casefold() == group.casefold():
+        problems.append("release_equals_group")
+    if artist and (
+        artist == _VA_MBID
+        or (
+            album_artist
+            and artist.casefold() == album_artist.casefold()
+            and (
+                str(row.get("album_artist") or "").strip().casefold() in _VA_NAMES
+                or album_artist == _VA_MBID
+            )
+        )
+    ):
+        problems.append("artist_is_album_artist")
+    return "; ".join(problems)
+
+
+def _score_diagnostic(row: Any) -> str:
+    """Flag the two highest-value score/popularity disagreements.
+
+    * ``popular_but_low_score`` — a widely listened studio track scored below
+      30. That shape is the signature of a bad release/recording match, a
+      missing playcount treated as zero, or a frozen incomplete scan.
+    * ``high_score_low_evidence`` — a score of 90+ with almost no listeners on
+      either provider: fallback inflation rather than measured popularity.
+
+    Advisory only: the report carries it so the rows can be found, and the
+    scoring itself is never changed from here.
+    """
+    try:
+        if bool(row.get("is_live")) or bool(row.get("exclude_from_stats")):
+            return ""
+        score = float(row.get("final_score") or 0)
+        lastfm = float(row.get("lastfm_listeners") or 0)
+        listenbrainz = float(row.get("listenbrainz_listens") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if lastfm >= 100_000 and score < 30:
+        return "popular_but_low_score"
+    if score >= 90 and lastfm < 1_000 and listenbrainz < 100:
+        return "high_score_low_evidence"
+    return ""
+
+
 def build_popularity_report(*, artist: str | None = None, album: str | None = None) -> str:
     """CSV text for one artist (or one album), or the whole collection.
 
@@ -367,6 +447,25 @@ def build_popularity_report(*, artist: str | None = None, album: str | None = No
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer)
     writer.writerow(POPULARITY_REPORT_COLUMNS)
+
+    # ⭐ ONE FOLDER, TWO EDITIONS. Mixing MUSICBRAINZ_ALBUMID values inside one
+    # artist+album is what splits the album in Navidrome (reported on Faun's
+    # Buch der Balladen: the standard and Limited releases, same group).
+    # Computed from the rows already in hand — no second query, no window SQL
+    # the report's column parser would trip over.
+    _album_release_ids: dict[tuple[str, str], set[str]] = {}
+    for _row in rows:
+        _key = (
+            str(_row.get("album_artist") or _row.get("artist") or "").strip().casefold(),
+            str(_row.get("album") or "").strip().casefold(),
+        )
+        _release = str(_row.get("musicbrainz_albumid") or "").strip()
+        if _release:
+            _album_release_ids.setdefault(_key, set()).add(_release.casefold())
+    _split_albums = {
+        key for key, releases in _album_release_ids.items() if len(releases) > 1
+    }
+
     for position, row in enumerate(rows, start=1):
         last_scanned = _newest_timestamp(
             row.get("lastfm_last_updated"),
@@ -376,6 +475,18 @@ def build_popularity_report(*, artist: str | None = None, album: str | None = No
         for column in POPULARITY_REPORT_COLUMNS[1:]:
             if column == "last_scanned":
                 values.append(last_scanned)
+            elif column == "score_diagnostic":
+                values.append(_score_diagnostic(row))
+            elif column == "mb_id_diagnostic":
+                _row_key = (
+                    str(row.get("album_artist") or row.get("artist") or "").strip().casefold(),
+                    str(row.get("album") or "").strip().casefold(),
+                )
+                values.append(
+                    _mb_id_diagnostic(
+                        row, album_has_multiple_releases=_row_key in _split_albums,
+                    )
+                )
             elif column == "playlists_included_in":
                 values.append(playlists_by_track.get(str(row.get("id") or ""), ""))
             elif column in _GENRE_COLUMNS:
