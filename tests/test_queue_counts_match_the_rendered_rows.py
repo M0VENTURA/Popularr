@@ -355,10 +355,10 @@ class TestEachRenderedPillMapsToACard:
         from pathlib import Path
 
         source = (
-            Path(__file__).resolve().parents[1] / "static" / "js" / "downloads.js"
+            Path(__file__).resolve().parents[1] / "test_site" / "static" / "js" / "pages/download-queue.js"
         ).read_text(encoding="utf-8")
-        start = source.index("async function renderQueuePage")
-        end = source.index("function renderQueueList", start)
+        start = source.index("async function loadQueueStatus")
+        end = source.index("function renderQueueSection", start)
         return source[start:end]
 
     def test_every_card_pill_is_fed_from_a_section_count(self):
@@ -370,9 +370,9 @@ class TestEachRenderedPillMapsToACard:
             "statQueuedNum", "statDownloadingNum", "statCompletedNum", "statFailedNum",
         ):
             line = next(
-                (ln for ln in body.splitlines() if f"setNum('{pill}'" in ln), None
+                (ln for ln in body.splitlines() if f"setCount('{pill}'" in ln), None
             )
-            assert line is not None, f"{pill} is not filled by renderQueuePage"
+            assert line is not None, f"{pill} is not filled by the queue renderer"
             assert "section" in line.lower() or "downloadingCount" in line, (
                 f"{pill} is filled from {line.strip()!r} — a card pill must read "
                 "the server's section counts so its number matches its rows"
@@ -382,16 +382,19 @@ class TestEachRenderedPillMapsToACard:
         """⭐ Pin the ONE exception, so it is a decision rather than an oversight.
 
         ``imported`` rows are finished work that no queue card lists. The pill is
-        therefore a lifetime "moved to library" STATISTIC. It must stay
-        documented as such and must NOT become displayable — if it did, the pill
-        would count rows no card can render, which is the defect being fixed.
+        therefore a lifetime "moved to library" STATISTIC. It must NOT read the
+        section partition — if it did, the pill would count rows no card can
+        render.
         """
         from services.queue.queue_constraints import QUEUE_DISPLAY_STATUSES
 
         body = self._render_body()
-        assert "STATISTIC" in body, (
-            "the Imported pill is the one non-card count; it must be documented "
-            "as a statistic in the code or it reads as unlisted queue work"
+        line = next(
+            (ln for ln in body.splitlines() if "statImportedNum" in ln), ""
+        )
+        assert "countStatuses(statusCounts, 'imported')" in line, (
+            "the Imported pill must be the lifetime status statistic, not a "
+            "section count"
         )
         assert "imported" not in QUEUE_DISPLAY_STATUSES, (
             "making 'imported' displayable would make the Imported pill count "

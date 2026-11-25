@@ -95,7 +95,7 @@ def test_the_dedicated_page_never_narrowed_the_window() -> None:
 
     If this ever changes, the two surfaces can diverge again silently.
     """
-    src = (ROOT / "templates" / "pages" / "downloads" / "upcoming.html").read_text(
+    src = (ROOT / "test_site" / "static" / "js" / "pages" / "upcoming.js").read_text(
         encoding="utf-8"
     )
     fetch = src.index("fetchReleases({")

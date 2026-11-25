@@ -279,11 +279,11 @@ class TestRenameFilesRoute:
 
 class TestAlbumBulkRenameWiring:
     TEMPLATES = [
-        "templates/pages/album_detail.html",
+        "test_site/templates/Pages/album_detail.html",
         "test_site/templates/Pages/album_detail.html",
     ]
     SCRIPTS = [
-        "static/js/album_detail.js",
+        "test_site/static/js/pages/album.js",
         "test_site/static/js/pages/album.js",
     ]
     ROOT = Path(__file__).resolve().parent.parent

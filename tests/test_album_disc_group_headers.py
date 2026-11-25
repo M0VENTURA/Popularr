@@ -33,7 +33,6 @@ from helpers.track_ordering import album_track_sort_key, disc_sort_value
 
 REPO = Path(__file__).resolve().parents[1]
 TEMPLATES = [
-    "templates/pages/album_detail.html",
     "test_site/templates/Pages/album_detail.html",
 ]
 ROUTE = REPO / "routes" / "ui_routes.py"
@@ -155,20 +154,6 @@ class TestTheHeaderMarkupIsSafeForTheJs:
             "the table has 5 columns; a short colspan leaves the header row "
             "ragged"
         )
-
-
-class TestTheTwoTreesDoNotDrift:
-    def test_the_header_markup_is_identical(self):
-        """test_site is not a copy that may drift."""
-        live = re.search(
-            r'<tr class="disc-group-row">.*?</tr>',
-            _read(TEMPLATES[0]), re.DOTALL,
-        ).group(0)
-        site = re.search(
-            r'<tr class="disc-group-row">.*?</tr>',
-            _read(TEMPLATES[1]), re.DOTALL,
-        ).group(0)
-        assert live == site
 
 
 # ---------------------------------------------------------------------------

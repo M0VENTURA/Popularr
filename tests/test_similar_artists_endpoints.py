@@ -33,10 +33,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: Every file that carried the two broken URLs — BOTH trees, because the live
 #: templates had the same defect (that is what the reported console shows).
 FILES = {
-    "test_site album.js": REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js",
-    "test_site track.js": REPO_ROOT / "test_site" / "static" / "js" / "pages" / "track.js",
-    "live album page": REPO_ROOT / "templates" / "pages" / "album_detail.html",
-    "live track page": REPO_ROOT / "templates" / "pages" / "track_detail.html",
+    "album page": REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js",
+    "track page": REPO_ROOT / "test_site" / "static" / "js" / "pages" / "track.js",
 }
 
 

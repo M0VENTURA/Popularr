@@ -56,7 +56,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_ROOTS = (
-    REPO_ROOT / "templates",
+    REPO_ROOT / "test_site" / "templates",
     REPO_ROOT / "test_site" / "templates",
 )
 

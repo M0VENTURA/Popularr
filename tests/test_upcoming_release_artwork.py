@@ -48,7 +48,7 @@ REBUILT_SERVICE = REPO_ROOT / "test_site" / "static" / "js" / "services" / "upco
 LIVE_SERVICE = REPO_ROOT / "test_site" / "static" / "js" / "services" / "upcoming-releases.js"
 #: The live dashboard DELEGATES to the service. Asserted here so the rule cannot
 #: quietly grow a second implementation on the page that shows it most often.
-LIVE_DASHBOARD = REPO_ROOT / "static" / "js" / "dashboard.js"
+LIVE_DASHBOARD = REPO_ROOT / "test_site" / "static" / "js" / "pages/dashboard.js"
 
 REBUILT_PROBE = PROBE_DIR / "upcoming-art-probe.js"
 LIVE_PROBE = PROBE_DIR / "upcoming-art-probe.js"
@@ -362,8 +362,8 @@ class TestTheThumbnailIsSizedWhereverItRenders:
 
     def test_the_live_thumbnail_is_declared_globally(self) -> None:
         base, popularr = self._reads(
-            REPO_ROOT / "templates" / "base.html",
-            REPO_ROOT / "static" / "css" / "popularr.css",
+            REPO_ROOT / "test_site" / "templates" / "base.html",
+            REPO_ROOT / "test_site" / "static" / "css" / "popularr.css",
         )
         assert "css/popularr.css" in base, (
             "base.html no longer loads the global stylesheet — every assertion "
@@ -398,7 +398,7 @@ class TestTheThumbnailIsSizedWhereverItRenders:
         could see it.
         """
         for sheet, cls in (
-            (REPO_ROOT / "static" / "css" / "dashboard.css", ".upcoming-thumb"),
+            (REPO_ROOT / "test_site" / "static" / "css" / "dashboard.css", ".upcoming-thumb"),
             (REPO_ROOT / "test_site" / "static" / "css" / "dashboard.css", ".ur-thumb"),
         ):
             global_sheet = sheet.parent / "popularr.css"

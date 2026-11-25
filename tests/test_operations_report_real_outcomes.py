@@ -225,7 +225,7 @@ class TestLegacyGenreApplyEndpoint:
     def test_it_does_not_report_success_for_zero_rows(self):
         body = _func_body(self.REL, "api_apply_genres")
         assert "if not affected:" in body, (
-            "static/js/genre-utils.js branches on data.error, not data.success, "
+            "test_site/static/js/genre-utils.js branches on data.error, not data.success, "
             "so a hard-coded success made an artist with no tracks look applied"
         )
         assert '"error"' in body

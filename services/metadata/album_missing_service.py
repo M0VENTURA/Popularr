@@ -18,6 +18,7 @@ from services.enrichment.musicbrainz_service import (
     # The ONE track-number rule, shared with both queue matchers: a position
     # is a tie-breaker, never proof.
     _track_number_pairing_allowed,
+    _titles_agree_for_pairing,
 )
 from api_clients.musicbrainz_http import escape_lucene_special_chars
 from helpers.normalization_service import (
@@ -30,6 +31,31 @@ from helpers.normalization_service import (
 from helpers.track_ordering import album_track_sort_key, leading_int
 
 logger = structlog.get_logger(__name__)
+
+
+def _file_duration_seconds(file_path: str) -> float | None:
+    """The audio file's own length, in seconds, or None.
+
+    ⚠️ The DATABASE duration is NULL for a track that has never finished a
+    scan, and the pairing rule treats an unknown length as permissive. That let
+    a different recording sitting at the release's track number hide a genuinely
+    missing track (reported: "Track 19 is missing but not showing under
+    Missing"). Reading the file costs one header parse and only happens when the
+    stored length is empty AND the titles already disagree.
+    """
+    path = str(file_path or "").strip()
+    if not path:
+        return None
+    try:
+        from helpers.metadata_reader import read_mp3_metadata
+        from helpers.normalization_service import queue_duration_seconds
+
+        meta = read_mp3_metadata(path) or {}
+        if meta.get("duration_ms"):
+            return queue_duration_seconds(meta.get("duration_ms"))
+    except Exception:
+        pass
+    return None
 
 
 def _title_match_key(title: str) -> str:
@@ -426,8 +452,13 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
         if tn:
             # The DURATION travels with the position so the pairing rule can
             # tell "same recording, differently titled" from "a different song
-            # sitting at the same number".
-            lib_by_position[(disc, tn)] = (title or "", r.get("duration"))
+            # sitting at the same number". The PATH travels too: when the DB
+            # has no duration the file's own header can still settle it.
+            lib_by_position[(disc, tn)] = (
+                title or "",
+                r.get("duration"),
+                r.get("file_path"),
+            )
 
     # The highest position the library actually has per disc. A missing MB track
     # AFTER it is a trailing/bonus cut; one BEFORE it is a gap in the album.
@@ -547,7 +578,13 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             # wording still pairs, a different recording with a different
             # length does not, and an unknown length stays permissive so an
             # untagged file is not lost.
-            _lib_title, _lib_duration = lib_by_position[(mb_disc, mb_num)]
+            _lib_title, _lib_duration, _lib_path = lib_by_position[(mb_disc, mb_num)]
+            if (
+                _lib_duration is None
+                and _lib_path
+                and not _titles_agree_for_pairing(_lib_title, mb_title)
+            ):
+                _lib_duration = _file_duration_seconds(str(_lib_path))
             position_occupied = _track_number_pairing_allowed(
                 _lib_title, mb_title, _lib_duration, mt.get("duration"),
             )

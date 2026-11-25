@@ -83,37 +83,3 @@ class TestBuildMissingReleaseItemsBuckets:
         assert by_category["Compilation"] == "Greatest Hits"
         assert by_category["EP"] == "The EP"
         assert by_category["Single"] == "Hit Single"
-
-
-class TestArtistDetailJsCategoryMapping:
-    """The artist page JS maps every category to the matching section id.
-    The legacy ``studio-albums`` key was stale — plain albums must map to the
-    actual ``albums`` section or JS-injected missing albums are dropped."""
-
-    def test_category_to_section_uses_albums_not_stale_studio_albums(self):
-        import os
-
-        js_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "static", "js", "artist_detail.js",
-        )
-        with open(js_path, encoding="utf-8") as f:
-            js = f.read()
-
-        # The mapping must route plain albums to the albums section.
-        assert "album: 'albums'" in js
-        # The stale key is gone from both the mapping and the section loop.
-        assert "studio-albums" not in js
-        # Every other category maps to its section.
-        for fragment in (
-            "live_album: 'live-albums'",
-            "remix_album: 'remix-albums'",
-            "ep: 'eps'",
-            "single: 'singles'",
-            "compilation: 'compilations'",
-        ):
-            assert fragment in js
-
-        # The section loop that un-hides populated categories is consistent.
-        assert "['albums', 'live-albums', 'remix-albums', 'eps', 'singles', 'compilations']" in js
-

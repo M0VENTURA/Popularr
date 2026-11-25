@@ -48,27 +48,27 @@ MONITOR_PAGES = (
 )
 
 QUEUE_STATUS = (
-    LIVE / "templates" / "components" / "search" / "_queue_status.html",
+    LIVE / "test_site" / "templates" / "components" / "search" / "_queue_status.html",
     TS / "templates" / "components" / "search" / "_queue_status.html",
 )
 
 DOWNLOADS_CSS = (
-    LIVE / "static" / "css" / "downloads.css",
+    LIVE / "test_site" / "static" / "css" / "downloads.css",
     TS / "static" / "css" / "downloads.css",
 )
 
 POPULARR_CSS = (
-    LIVE / "static" / "css" / "popularr.css",
+    LIVE / "test_site" / "static" / "css" / "popularr.css",
     TS / "static" / "css" / "popularr.css",
 )
 
 MONITOR_JS = (
-    LIVE / "static" / "js" / "monitor.js",
+    LIVE / "test_site" / "static" / "js" / "pages/monitor.js",
     TS / "static" / "js" / "pages" / "monitor.js",
 )
 
 QUEUE_JS = (
-    LIVE / "static" / "js" / "downloads.js",
+    LIVE / "test_site" / "static" / "js" / "pages/download-queue.js",
     TS / "static" / "js" / "pages" / "download-queue.js",
 )
 
@@ -246,7 +246,7 @@ class TestTheMonitorTitleIsNotDoubleEscaped:
 
     def test_the_partial_escapes_what_it_renders(self):
         """CONTROL on the premise: the header renders the title unescaped-once."""
-        header = _read(LIVE / "templates" / "components" / "_downloads_header.html")
+        header = _read(LIVE / "test_site" / "templates" / "components" / "_downloads_header.html")
 
         assert "{{ title|default" in header, (
             "if the partial stopped using `{{ }}` the double-escape premise "
@@ -263,7 +263,7 @@ class TestTheMonitorTitleIsNotDoubleEscaped:
         from jinja2 import FileSystemLoader
 
         env = build_env("/downloads/monitor")
-        env.loader = FileSystemLoader(str(LIVE / "templates"))
+        env.loader = FileSystemLoader(str(LIVE / "test_site" / "templates"))
         html = env.get_template("components/_downloads_header.html").render(
             title="Downloads & Monitor"
         )
@@ -358,7 +358,7 @@ class TestTheCompactGroupsAreExemptFromTheTouchFloor:
 
     def test_the_icon_only_buttons_are_small_variant(self):
         """CONTROL: the header's green [!] and the Refresh control are `btn-sm`."""
-        header = _read(LIVE / "templates" / "components" / "_downloads_header.html")
+        header = _read(LIVE / "test_site" / "templates" / "components" / "_downloads_header.html")
         assert "btn btn-sm btn-outline-success" in header, (
             "the help button stopped being btn-sm, so the group exemption is not "
             "what fixes it"

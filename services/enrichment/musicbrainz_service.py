@@ -2922,6 +2922,11 @@ def _track_number_pairing_allowed(
         return True
     lengths = _lengths_agree_for_pairing(library_duration, mb_duration)
     if lengths is None:
+        # ⚠️ A POSITION IS A TIE-BREAKER, NOT PROOF — but with neither a
+        # disagreeing length nor a blank title there is nothing to contradict
+        # it. Callers that CAN read the file (the Missing-tracks calculation)
+        # pass the on-disk duration so a wrong recording at the number is not
+        # mistaken for the release's track.
         return True
     return bool(lengths)
 

@@ -455,7 +455,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: trees — ``test_site/Pages/config.html`` is served first when the cutover
 #: is active, so a change to the live tree alone would be invisible.
 _TREES = [
-    ("templates/pages/config.html", "static/js/config.js"),
+    ("test_site/templates/Pages/config.html", "test_site/static/js/pages/config.js"),
     ("test_site/templates/Pages/config.html", "test_site/static/js/pages/config.js"),
 ]
 

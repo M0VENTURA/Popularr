@@ -337,7 +337,7 @@ class TestTheArtistPageUsesIt:
     @pytest.mark.parametrize(
         "template",
         [
-            "templates/pages/artist_detail_v2.html",
+            "test_site/templates/Pages/artist_detail_v2.html",
             "test_site/templates/Pages/artist_detail_v2.html",
         ],
     )

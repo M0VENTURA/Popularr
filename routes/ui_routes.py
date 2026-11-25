@@ -2209,6 +2209,28 @@ def _run_album_file_sync_phases(payload: dict[str, Any]) -> dict[str, Any]:
                 "Post-save Navidrome rescan request failed", error=str(_rescan_exc)
             )
 
+    # ⭐ The save is DONE, so the album page must stop saying "pending".
+    #
+    # ``metadata_dirty_for_navidrome`` means "a local correction an import has
+    # not confirmed yet". It is set before the DB write so a stale import can
+    # never reverse the save, but the page rendered it as "pending" forever:
+    # nothing cleared it short of a full Navidrome import. Once the files hold
+    # the saved values and a rescan has been requested, there is no local work
+    # left; the import's freshness gate still forces/obeys a scan after the
+    # write before reading Navidrome (``latest_local_tag_write_epoch``), so
+    # clearing the flag here does not reopen the stale-import hole.
+    if rescanned and file_failures == 0 and jobs:
+        try:
+            from services.scanning.reconciliation import (
+                confirm_local_writes,
+            )
+
+            confirm_local_writes([job[0] for job in jobs])
+        except Exception as _confirm_exc:
+            logger.debug(
+                "Post-save pending-clear failed", error=str(_confirm_exc)
+            )
+
     return {
         "file_failures": file_failures,
         "cover_embedded": cover_embedded,
@@ -3261,6 +3283,20 @@ async def album_detail(album_path: str) -> Any:
                         apply_album_wide_ids,
                     )
 
+                    # ⚠️ Scope the fan-out to THIS release family. Two albums can
+                    # share an artist and name (a 2018 EP and a track on a later
+                    # compilation); an unscoped write gave both the same release
+                    # id, and the next scan wrote the wrong one back to the
+                    # files — the reported "keeps reverting to the old release".
+                    _prev_rg = next(
+                        (
+                            str(t.get("musicbrainz_releasegroupid") or "").strip()
+                            for t in tracks
+                            if str(t.get("musicbrainz_releasegroupid") or "").strip()
+                        ),
+                        "",
+                    )
+
                     _album_wide = apply_album_wide_ids(
                         artist=(new_artist or artist_name),
                         album=(new_title or album_name),
@@ -3271,6 +3307,7 @@ async def album_detail(album_path: str) -> Any:
                         clear_album_mbid=(
                             _album_mbid_field is not None and not album_mbid
                         ),
+                        previous_release_group_mbid=_prev_rg or None,
                     )
                     if _album_wide.get("rows_updated", 0) > updated_count:
                         # Rows outside this page's scope were corrected too; count

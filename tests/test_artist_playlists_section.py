@@ -40,7 +40,6 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # on — so a change to one tree only is invisible to half the users.
 TREES = (
     ("test_site/templates", "Pages/artist_detail_v2.html"),
-    ("templates", "pages/artist_detail_v2.html"),
 )
 
 TEMPLATE_PATHS = tuple(f"{root}/{name}" for root, name in TREES)

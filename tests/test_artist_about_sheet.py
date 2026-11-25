@@ -32,12 +32,11 @@ import pytest
 from tests._test_site_render import REPO_ROOT, build_env
 
 TREES = (
-    ("templates", "pages/artist_detail_v2.html"),
     ("test_site/templates", "Pages/artist_detail_v2.html"),
 )
 
 SHEETS = (
-    REPO_ROOT / "templates" / "components" / "modals" / "_artist_about_modal.html",
+    REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_about_modal.html",
     REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_about_modal.html",
 )
 
@@ -187,7 +186,7 @@ class TestTheModalsBundleIsIncluded:
         the whole PAGE down rather than the modal — which is why the live
         template never included this partial. Both trees now guard it.
         """
-        for rel in ("templates/components/modals/_artist_modals.html",
+        for rel in ("test_site/templates/components/modals/_artist_modals.html",
                     "test_site/templates/components/modals/_artist_modals.html"):
             source = (REPO_ROOT / rel).read_text(encoding="utf-8")
             assert "qbit_config is defined" in source, (

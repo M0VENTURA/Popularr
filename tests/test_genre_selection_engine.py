@@ -1230,11 +1230,11 @@ class TestConfig:
 # ---------------------------------------------------------------------------
 
 CONFIG_PAGES = (
-    REPO_ROOT / "templates" / "pages" / "config.html",
+    REPO_ROOT / "test_site" / "templates" / "pages" / "config.html",
     REPO_ROOT / "test_site" / "templates" / "Pages" / "config.html",
 )
 CONFIG_JS = (
-    REPO_ROOT / "static" / "js" / "config.js",
+    REPO_ROOT / "test_site" / "static" / "js" / "pages/config.js",
     REPO_ROOT / "test_site" / "static" / "js" / "pages" / "config.js",
 )
 

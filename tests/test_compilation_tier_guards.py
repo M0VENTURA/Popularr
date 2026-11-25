@@ -531,7 +531,7 @@ class TestTheConfigPlumbing:
 
         root = Path(__file__).resolve().parents[1]
         for relative in ("test_site/templates/Pages/config.html",
-                         "templates/pages/config.html"):
+                         "test_site/templates/Pages/config.html"):
             source = (root / relative).read_text(encoding="utf-8")
             for key in (
                 "compilation_online_top_tier_min_score",
@@ -547,7 +547,7 @@ class TestTheConfigPlumbing:
 
         root = Path(__file__).resolve().parents[1]
         for relative in ("test_site/static/js/pages/config.js",
-                         "static/js/config.js"):
+                         "test_site/static/js/pages/config.js"):
             source = (root / relative).read_text(encoding="utf-8")
             for key in (
                 "top_tier_min_score",
@@ -564,7 +564,7 @@ class TestTheConfigPlumbing:
 
         root = Path(__file__).resolve().parents[1]
         for relative in ("test_site/static/js/pages/config.js",
-                         "static/js/config.js"):
+                         "test_site/static/js/pages/config.js"):
             source = (root / relative).read_text(encoding="utf-8")
             assert "isFinite(v) ? v : 55" in source, (
                 f"{relative} must read top_tier_min_score with a finite check"

@@ -43,7 +43,7 @@ class TestTheJobIsVisible:
         )
 
     def test_it_has_a_display_name(self) -> None:
-        src = (REPO_ROOT / "static/js/activity-feed.js").read_text(encoding="utf-8")
+        src = (REPO_ROOT / "test_site/static/js/services/activity-feed.js").read_text(encoding="utf-8")
         assert f"{svc.SCAN_TYPE}:" in src, (
             "without a display name the dashboard shows the raw scan_type"
         )
@@ -225,7 +225,7 @@ class TestVelocityIsNotBrokenByBatching:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("js_rel", (
-    "static/js/config.js",
+    "test_site/static/js/pages/config.js",
     "test_site/static/js/pages/config.js",
 ))
 class TestTheCardPolls:

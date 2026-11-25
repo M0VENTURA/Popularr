@@ -54,7 +54,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 ROUTE = REPO_ROOT / "routes" / "musicbrainz_routes.py"
-LIVE_MAIN_JS = REPO_ROOT / "static" / "js" / "main.js"
+LIVE_MAIN_JS = REPO_ROOT / "test_site" / "static" / "js" / "main.js"
 TEST_SITE_MAIN_JS = REPO_ROOT / "test_site" / "static" / "js" / "main.js"
 
 MAIN_JS = [LIVE_MAIN_JS, TEST_SITE_MAIN_JS]

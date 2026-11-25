@@ -929,7 +929,7 @@ class TestTheRecommendationSourcesAreInterleaved:
 # ---------------------------------------------------------------------------
 
 class TestTheOrderingConfigIsExposed:
-    LIVE = ("templates/pages/config.html", "static/js/config.js")
+    LIVE = ("test_site/templates/Pages/config.html", "test_site/static/js/pages/config.js")
     REBUILT = ("test_site/templates/Pages/config.html",
                "test_site/static/js/pages/config.js")
 

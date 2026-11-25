@@ -343,7 +343,7 @@ class TestTheConfigPageExposesTheBlock:
             "essential_vocalists_max_tracks",
         )
         for template_name, js_name in (
-            ("templates/pages/config.html", "static/js/config.js"),
+            ("test_site/templates/Pages/config.html", "test_site/static/js/pages/config.js"),
             (
                 "test_site/templates/Pages/config.html",
                 "test_site/static/js/pages/config.js",

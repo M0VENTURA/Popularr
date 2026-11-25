@@ -34,7 +34,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TS = REPO_ROOT / "test_site"
 
-POPULARR_CSS_LIVE = REPO_ROOT / "static" / "css" / "popularr.css"
+POPULARR_CSS_LIVE = REPO_ROOT / "test_site" / "static" / "css" / "popularr.css"
 POPULARR_CSS = TS / "static" / "css" / "popularr.css"
 DASHBOARD_CSS = TS / "static" / "css" / "dashboard.css"
 DASHBOARD_HTML = TS / "templates" / "Pages" / "dashboard.html"

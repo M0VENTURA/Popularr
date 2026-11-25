@@ -285,7 +285,7 @@ class TestTheScanReviewObeysTheSameRule:
 
 
 ALBUM_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
-LIVE_ALBUM_JS = REPO_ROOT / "static" / "js" / "album_detail.js"
+LIVE_ALBUM_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages/album.js"
 
 
 def _align_filter_window(source: str) -> str:

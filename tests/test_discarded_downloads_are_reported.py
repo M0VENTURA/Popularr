@@ -442,7 +442,7 @@ class TestTheApiIsServed:
         permanently empty — indistinguishable from "nothing was discarded",
         which is the failure the section exists to prevent. Both trees.
         """
-        for rel in ("static/js/discarded-downloads.js",
+        for rel in ("test_site/static/js/pages/discarded-downloads.js",
                     "test_site/static/js/pages/discarded-downloads.js"):
             source = (REPO_ROOT / rel).read_text(encoding="utf-8")
             assert "'/api/queue/rejections'" in source, rel
@@ -452,9 +452,9 @@ class TestBothTreesRenderTheSection:
     #: (page template, component, script)
     TREES = (
         (
-            "templates/pages/downloads/queue.html",
-            "templates/components/_discarded_downloads.html",
-            "js/discarded-downloads.js",
+            "test_site/templates/Pages/downloads/queue.html",
+            "test_site/templates/components/_discarded_downloads.html",
+            "js/pages/discarded-downloads.js",
         ),
         (
             "test_site/templates/Pages/downloads/queue.html",

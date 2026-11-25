@@ -377,15 +377,15 @@ class TestApplyDuringScanConfig:
 class TestConfigPageContract:
     """The Config page is the source of truth — the toggle must be on it."""
 
-    @pytest.mark.parametrize("tree", ["templates/pages", "test_site/templates/Pages"])
-    def test_toggle_is_rendered_in_both_trees(self, tree):
+    @pytest.mark.parametrize("tree", ["test_site/templates/Pages"])
+    def test_toggle_is_rendered_in_the_served_tree(self, tree):
         from pathlib import Path
 
         path = Path(tree) / "config.html"
         text = path.read_text(encoding="utf-8")
         assert "metadata_update_apply_during_scan" in text, f"missing in {tree}"
 
-    @pytest.mark.parametrize("tree_js", ["static/js/config.js",
+    @pytest.mark.parametrize("tree_js", ["test_site/static/js/pages/config.js",
                                          "test_site/static/js/pages/config.js"])
     def test_collector_reads_the_toggle_in_both_trees(self, tree_js):
         from pathlib import Path

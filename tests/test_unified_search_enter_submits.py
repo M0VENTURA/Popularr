@@ -29,12 +29,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 BASE_TEMPLATES = [
-    "templates/base.html",
+    "test_site/templates/base.html",
     "test_site/templates/base.html",
 ]
 
 SEARCH_MODULES = [
-    "static/js/unified_search.js",
+    "test_site/static/js/ui/search-flyout.js",
     "test_site/static/js/ui/search-flyout.js",
 ]
 

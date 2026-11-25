@@ -352,8 +352,8 @@ class TestTheConfigSurfaceExists:
     ⚠️ Both trees — the live one and ``test_site``.
     """
 
-    _HTML = ["templates/pages/config.html", "test_site/templates/Pages/config.html"]
-    _JS = ["static/js/config.js", "test_site/static/js/pages/config.js"]
+    _HTML = ["test_site/templates/Pages/config.html", "test_site/templates/Pages/config.html"]
+    _JS = ["test_site/static/js/pages/config.js", "test_site/static/js/pages/config.js"]
     _INPUT_IDS = (
         "api_gemini_enabled",
         "api_gemini_api_key",

@@ -56,7 +56,7 @@ class TestTheAlbumWideFanOut:
         monkeypatch.setattr(
             album_service,
             "update_album_ids",
-            lambda payload: (
+            lambda payload, **k: (
                 captured.append(payload)
                 or ({"success": True, "rows_updated": 3, "files_updated": 3}, 200)
             ),
@@ -76,7 +76,7 @@ class TestTheAlbumWideFanOut:
         monkeypatch.setattr(
             album_service,
             "update_album_ids",
-            lambda payload: ({"success": True, "rows_updated": 1, "files_updated": 1}, 200),
+            lambda payload, **k: ({"success": True, "rows_updated": 1, "files_updated": 1}, 200),
         )
         out = apply_album_wide_ids(artist="A", album="B", release_group_mbid="rg")
         assert out == {"rows_updated": 1, "files_updated": 1}
@@ -85,7 +85,7 @@ class TestTheAlbumWideFanOut:
         """None means "not part of this save" — never "clear it"."""
         called: list[dict] = []
         monkeypatch.setattr(
-            album_service, "update_album_ids", lambda p: (called.append(p), ({}, 200))[1]
+            album_service, "update_album_ids", lambda p, **k: (called.append(p), ({}, 200))[1]
         )
         assert apply_album_wide_ids(artist="A", album="B") == {
             "rows_updated": 0, "files_updated": 0
@@ -94,7 +94,7 @@ class TestTheAlbumWideFanOut:
 
     def test_an_empty_artist_or_album_is_a_noop(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            album_service, "update_album_ids", lambda p: ({"rows_updated": 9}, 200)
+            album_service, "update_album_ids", lambda p, **k: ({"rows_updated": 9}, 200)
         )
         assert apply_album_wide_ids(artist="", album="B", album_mbid="x")[
             "rows_updated"

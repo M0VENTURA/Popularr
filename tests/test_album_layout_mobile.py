@@ -28,14 +28,13 @@ from jinja2 import FileSystemLoader
 from tests._test_site_render import REPO_ROOT, build_env, install_real_filters
 
 TREES = (
-    ("templates", "pages/album_detail.html", "live"),
     ("test_site/templates", "Pages/album_detail.html", "rebuilt"),
 )
 
 PAGES = tuple(REPO_ROOT / root / name for root, name, _ in TREES)
 
 POPULARR_CSS = (
-    REPO_ROOT / "static" / "css" / "popularr.css",
+    REPO_ROOT / "test_site" / "static" / "css" / "popularr.css",
     REPO_ROOT / "test_site" / "static" / "css" / "popularr.css",
 )
 

@@ -51,7 +51,7 @@ from routes import download_search_routes as routes_mod
 from services.downloads.slskd_service import SearchResponse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOWNLOADS_JS = REPO_ROOT / "static" / "js" / "downloads.js"
+DOWNLOADS_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages/download-queue.js"
 
 
 def _code_only(source: str) -> str:

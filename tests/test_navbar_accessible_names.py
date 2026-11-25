@@ -27,7 +27,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 BASES = [
     REPO_ROOT / "test_site" / "templates" / "base.html",
-    REPO_ROOT / "templates" / "base.html",
+    REPO_ROOT / "test_site" / "templates" / "base.html",
 ]
 
 

@@ -46,8 +46,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: (label, renderer script, script root that page can load from)
 TREES = (
-    ("live", "static/js/downloads.js", "static/js"),
-    ("rebuilt", "test_site/static/js/pages/download-queue.js", "test_site/static/js"),
+    ("served", "test_site/static/js/pages/download-queue.js", "test_site/static/js"),
 )
 
 # onclick="fn(" — also matches the template-literal form `onclick="fn(...)"` and
@@ -178,12 +177,12 @@ def test_the_scanner_can_actually_find_a_missing_handler() -> None:
     could not: it scanned a hand-picked file list and reported a handler as
     missing that the tree DID define.
     """
-    renderer = REPO_ROOT / "static/js/downloads.js"
+    renderer = REPO_ROOT / "test_site/static/js/pages/download-queue.js"
     if not renderer.is_file():
         pytest.skip("renderer not present")
 
     referenced = _referenced_handlers(renderer)
-    defined = _defined_names(REPO_ROOT / "static/js")
+    defined = _defined_names(REPO_ROOT / "test_site/static/js")
 
     # Every referenced handler must be defined (the real assertion)...
     assert not (referenced - defined)

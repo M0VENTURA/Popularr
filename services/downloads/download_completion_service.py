@@ -1814,6 +1814,10 @@ def _apply_stored_metadata(
                 release_mbid=release_mbid,
                 artist=meta.get("artist"),
                 title=meta.get("title"),
+                album=meta.get("album"),
+                replace_track_id=(
+                    str(item.get("replace_track_id") or "").strip() or None
+                ),
             )
             if _track_id:
                 _db_payload["id"] = _track_id
@@ -1887,41 +1891,90 @@ def _resolve_track_id_for_import(
     release_mbid: str | None,
     artist: str | None,
     title: str | None,
+    album: str | None = None,
+    replace_track_id: str | None = None,
 ) -> str | None:
+    """The tracks row this imported file should update (or None for a new row).
+
+    ⚠️ A RECORDING MBID IS NOT ALBUM IDENTITY. ``recording_mbid`` is identical
+    on every album that contains the same recording, so the old fallback
+    resolved the SOURCE album's row for a library COPY and wrote the target
+    album's metadata onto it — the reported "new tracks copied from existing
+    files are just updating the metadata of the original files". A fallback row
+    is therefore adopted only when it is this file's own row: the path matches,
+    the row has no path yet (a placeholder), the file it points at is gone, or
+    the queue row explicitly replaces that track.
+    """
+
+    def _norm(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        return os.path.normcase(os.path.normpath(raw))
+
+    wanted_path = _norm(file_path)
+    replace_id = str(replace_track_id or "").strip()
+    wanted_album = str(album or "").strip().casefold()
+
+    def _adoptable(row: Any) -> bool:
+        if row is None:
+            return False
+        candidate_id = str(row[0] or "").strip()
+        candidate_path = _norm(row[1])
+        candidate_album = str(row[2] or "").strip().casefold()
+        if candidate_id and candidate_id == replace_id:
+            return True
+        if not candidate_path:
+            return True  # placeholder: it exists to be adopted by this import
+        if wanted_path and candidate_path == wanted_path:
+            return True
+        # Same album, different filename: the row is this track and the import
+        # is MOVING/renaming its file. Updating it is correct.
+        if wanted_album and candidate_album == wanted_album:
+            return True
+        # A row pointing at a file that no longer exists is stale metadata for
+        # the track we are importing, not another album's live copy.
+        return not os.path.exists(str(row[1]))
+
     try:
         with db_session() as session:
             if file_path:
                 row = session.execute(
-                    text("SELECT id FROM tracks WHERE file_path = :p LIMIT 1"),
+                    text("SELECT id, file_path, album FROM tracks WHERE file_path = :p LIMIT 1"),
                     {"p": file_path},
                 ).fetchone()
                 if row:
                     return str(row[0])
             if recording_mbid:
                 row = session.execute(
-                    text("SELECT id FROM tracks WHERE recording_mbid = :m LIMIT 1"),
+                    text(
+                        "SELECT id, file_path, album FROM tracks "
+                        "WHERE recording_mbid = :m LIMIT 1"
+                    ),
                     {"m": recording_mbid},
                 ).fetchone()
-                if row:
+                if _adoptable(row):
                     return str(row[0])
             if artist and title:
                 # Match EITHER credit column: on a Various Artists compilation
                 # the performer is in ``artist`` while ``album_artist`` is
                 # "Various Artists". A COALESCE(album_artist, artist) lookup
                 # missed the existing row and created a duplicate on import.
-                row = session.execute(
-                    text("""
-                        SELECT id FROM tracks
-                        WHERE (
-                                LOWER(COALESCE(NULLIF(artist, ''), album_artist)) = LOWER(:a)
-                             OR LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:a)
-                        )
-                          AND LOWER(title) = LOWER(:t)
-                        LIMIT 1
-                    """),
-                    {"a": artist, "t": title},
-                ).fetchone()
-                if row:
+                sql = """
+                    SELECT id, file_path, album FROM tracks
+                    WHERE (
+                            LOWER(COALESCE(NULLIF(artist, ''), album_artist)) = LOWER(:a)
+                         OR LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:a)
+                    )
+                      AND LOWER(title) = LOWER(:t)
+                """
+                params: dict[str, Any] = {"a": artist, "t": title}
+                if str(album or "").strip():
+                    sql += " AND LOWER(COALESCE(album, '')) = LOWER(:album)"
+                    params["album"] = album
+                sql += " LIMIT 1"
+                row = session.execute(text(sql), params).fetchone()
+                if _adoptable(row):
                     return str(row[0])
     except Exception:
         pass

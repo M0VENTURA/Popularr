@@ -39,7 +39,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 TEST_SITE_ALBUM = REPO / "test_site" / "static" / "js" / "pages" / "album.js"
-LIVE_ALBUM = REPO / "static" / "js" / "album_detail.js"
+LIVE_ALBUM = REPO / "test_site" / "static" / "js" / "pages/album.js"
 
 
 def _build_harness(path: Path, script_body: str) -> str:
@@ -295,16 +295,8 @@ class TestAnUnresolvedReleaseStillPopulatesMissingTracks:
         )
 
 
-class TestLiveAndTestSiteAgreeOnTheLookupPath:
-    """Both trees must refresh findings from their MBID-apply path.
-
-    A source-level parity guard: live is the reference behaviour, and the
-    defect here was test_site quietly diverging from it.
-    """
-
-    def test_live_applies_the_mbid_and_refreshes_findings(self):
-        src = LIVE_ALBUM.read_text(encoding="utf-8")
-        assert "_refreshAlbumTrackFindings(mbid)" in src
+class TestTheLookupPathRefreshesFindings:
+    """The MBID-apply path must refresh the tracklist findings."""
 
     def test_test_site_applies_the_mbid_and_refreshes_findings(self):
         src = TEST_SITE_ALBUM.read_text(encoding="utf-8")

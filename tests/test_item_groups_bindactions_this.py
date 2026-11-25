@@ -260,42 +260,34 @@ class TestManualSearchModalIsWired:
 
         i.e. neither binding path existed and the button did nothing at all.
         """
-        live_monitor = (
-            REPO_ROOT / "templates/pages/downloads/monitor.html"
+        monitor = (
+            REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
         ).read_text(encoding="utf-8")
-        # The monitor page really does NOT load slskd.js — that is the premise.
-        assert "slskd.js" not in live_monitor, (
-            "the live monitor page now loads slskd.js; re-check whether the "
-            "modal still needs its own binding fallback"
+        # The monitor page now loads the same controller as the queue page, so
+        # the modal's button has a real binder here too.
+        assert "services/slskd.js" in monitor, (
+            "the monitor page must load services/slskd.js so the manual-search "
+            "modal's button works there"
         )
 
         partial = (
             REPO_ROOT / "test_site/templates/components/modals/_soulseek_manual_search.html"
         ).read_text(encoding="utf-8")
         assert 'onclick="' in partial, (
-            "the modal's Search button has no inline handler, and the monitor "
-            "page does not load skld.js to bind one — so the button is dead "
-            "there. Either restore a self-contained handler or load skld.js on "
-            "every page that includes this partial."
+            "the modal's Search button needs an inline handler or a guaranteed "
+            "binder on every page that includes it"
         )
 
     def test_the_inline_handler_delegates_to_whichever_script_loaded(self):
-        """One handler, two possible providers — never a duplicate implementation."""
+        """The partial resolves the provider at click time."""
         partial = (
             REPO_ROOT / "test_site/templates/components/modals/_soulseek_manual_search.html"
         ).read_text(encoding="utf-8")
-        assert "window.runSoulseekManualSearch" in partial, (
-            "the inline handler must resolve the implementation at CLICK time, "
-            "so the same markup works whether the page loaded services/slskd.js "
-            "(queue) or downloads.js (monitor)"
-        )
-        # Both providers must publish the same name, or the delegate is a lie.
-        for rel in ("test_site/static/js/services/slskd.js", "static/js/downloads.js"):
-            body = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="replace")
-            assert "runSoulseekManualSearch" in body, (
-                f"{rel} does not provide runSoulseekManualSearch, so the modal's "
-                "delegate cannot resolve on a page that loads it"
-            )
+        assert "window.runSoulseekManualSearch" in partial
+        body = (
+            REPO_ROOT / "test_site/static/js/services/slskd.js"
+        ).read_text(encoding="utf-8", errors="replace")
+        assert "runSoulseekManualSearch" in body
 
     def test_the_opener_is_published_as_a_global(self):
         slskd = (

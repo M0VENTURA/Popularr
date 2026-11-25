@@ -189,7 +189,7 @@ class TestQueueEventsEndpoint:
 
 class TestFrontendFallsBackToADash:
     RENDERERS = (
-        ("live", REPO_ROOT / "static" / "js" / "downloads.js"),
+        ("live", REPO_ROOT / "test_site" / "static" / "js" / "pages/download-queue.js"),
         ("test_site", REPO_ROOT / "test_site" / "static" / "js" / "pages" / "download-queue.js"),
     )
 

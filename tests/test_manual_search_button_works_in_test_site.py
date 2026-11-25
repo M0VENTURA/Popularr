@@ -51,7 +51,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: The rebuilt partial — the one that had no inline handler.
 PARTIAL = REPO_ROOT / "test_site/templates/components/modals/_soulseek_manual_search.html"
-LIVE_PARTIAL = REPO_ROOT / "templates/components/modals/_soulseek_manual_search.html"
+LIVE_PARTIAL = REPO_ROOT / "test_site/templates/components/modals/_soulseek_manual_search.html"
 
 QUEUE_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/queue.html"
 REBUILT_MONITOR_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
@@ -59,7 +59,7 @@ LIVE_MONITOR_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.htm
 
 SLSKD_JS = REPO_ROOT / "test_site/static/js/services/slskd.js"
 BUTTON_STATE_JS = REPO_ROOT / "test_site/static/js/ui/button-state.js"
-DOWNLOADS_JS = REPO_ROOT / "static/js/downloads.js"
+DOWNLOADS_JS = REPO_ROOT / "test_site/static/js/pages/download-queue.js"
 
 needs_node = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is required to drive the button"
@@ -213,15 +213,13 @@ class TestThePartialCarriesItsOwnHandler:
             "capture one at render time"
         )
 
-    def test_both_providers_publish_that_name(self):
-        """Otherwise the delegate resolves on one page and not the other."""
-        for path in (SLSKD_JS, DOWNLOADS_JS):
-            body = path.read_text(encoding="utf-8", errors="replace")
-            assert "runSoulseekManualSearch" in body, (
-                f"{path.relative_to(REPO_ROOT)} does not provide "
-                "runSoulseekManualSearch, so the button would be dead on a page "
-                "that loads it"
-            )
+    def test_the_provider_publishes_that_name(self):
+        """The delegate must resolve on every page that includes the modal."""
+        body = SLSKD_JS.read_text(encoding="utf-8", errors="replace")
+        assert "runSoulseekManualSearch" in body, (
+            "services/slskd.js does not provide runSoulseekManualSearch, so the "
+            "button would be dead"
+        )
 
     def test_the_handler_reports_when_no_implementation_loaded(self):
         """A dead button and an explanatory message are different failures."""

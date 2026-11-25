@@ -91,7 +91,7 @@ def test_the_page_documents_the_same_number_of_steps() -> None:
     displayed_steps = len(ORDERED_STEPS) - 1  # base tier + curve are one <li>
     for tree in (
         pathlib.Path("test_site/templates/Pages/config.html"),
-        pathlib.Path("templates/pages/config.html"),
+        pathlib.Path("test_site/templates/Pages/config.html"),
     ):
         text = tree.read_text(encoding="utf-8")
         assert "The order the star rules run in" in text, (

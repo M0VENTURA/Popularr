@@ -998,7 +998,14 @@
     }
 
     try {
-      await global.api.postJson('/api/queue/add', { artist, title, album, source, priority });
+      const data = await global.api.postJson('/api/queue/add', { artist, title, album, source, priority });
+      // ⚠️ A dedupe is NOT an insert: `success: true` with `already_queued`
+      // means the row already existed. Saying "Added to queue" for it makes a
+      // pre-existing blocker look like a fresh add.
+      if (data && data.already_queued) {
+        notifyError(data.message || 'That track is already in the download queue.');
+        return;
+      }
       notifySuccess(`Added to queue: ${artist} - ${title}`);
       const form = document.getElementById('addToQueueForm');
       if (form) form.reset();

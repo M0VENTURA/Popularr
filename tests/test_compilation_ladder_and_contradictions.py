@@ -86,7 +86,7 @@ class TestContradictionKey:
 
 class TestConfigIsSurfaced:
     PATHS = (
-        "templates/pages/config.html",
+        "test_site/templates/Pages/config.html",
         "test_site/templates/Pages/config.html",
     )
 

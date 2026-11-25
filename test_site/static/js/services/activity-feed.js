@@ -60,6 +60,10 @@
     full_scan: 'Full Scan',
     library_scan: 'Library Scan',
     missing_releases_scan: 'Missing Releases Scan',
+    star_resync: 'Star Rating Resync',
+    genre_resync: 'Genre Resync',
+    genre_playlist_resync: 'Genre → Playlist Resync',
+    genre_playlist_resync_preview: 'Genre → Playlist Resync Preview',
   };
 
   function scanDisplayName(type) {

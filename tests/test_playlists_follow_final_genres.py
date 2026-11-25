@@ -136,8 +136,8 @@ class TestTheArtistCapDefaultsToFour:
         "path",
         [
             "test_site/static/js/pages/config.js",
-            "static/js/pages/config.js",
-            "static/js/config.js",
+            "test_site/static/js/pages/config.js",
+            "test_site/static/js/pages/config.js",
         ],
     )
     def test_the_config_page_fallback_is_four(self, path: str) -> None:

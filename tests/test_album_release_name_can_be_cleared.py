@@ -229,7 +229,7 @@ class TestThePageShowsWhatIsStored:
     def test_the_box_is_filled_from_the_stored_release_title(self) -> None:
         """The field would re-show the old name if the template fell back to
         anything else, so the display source is pinned to the column."""
-        template = (REPO_ROOT / "templates" / "pages" / "album_detail.html").read_text(
+        template = (REPO_ROOT / "test_site" / "templates" / "pages" / "album_detail.html").read_text(
             encoding="utf-8"
         )
         assert 'value="{{ album_data.release_title or \'\' }}"' in template

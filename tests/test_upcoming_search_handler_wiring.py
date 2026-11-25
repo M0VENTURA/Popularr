@@ -106,20 +106,20 @@ def test_the_test_site_publisher_really_publishes_the_handler() -> None:
 
 def test_live_tree_handler_chain_is_intact() -> None:
     """Live goes through main.js's encoded wrapper, backed by downloads.js."""
-    srcs = _script_srcs(REPO_ROOT / "templates" / "pages" / "dashboard.html")
-    assert "js/upcoming_releases.js" in srcs
-    assert "js/downloads.js" in srcs, (
+    srcs = _script_srcs(REPO_ROOT / "test_site" / "templates" / "pages" / "dashboard.html")
+    assert "js/services/upcoming-releases.js" in srcs
+    assert "js/pages/download-queue.js" in srcs, (
         "live dashboard.html must load downloads.js — it defines "
         "searchMusicBrainzRelease for the live tree"
     )
 
-    main_js = (REPO_ROOT / "static" / "js" / "main.js").read_text(encoding="utf-8")
+    main_js = (REPO_ROOT / "test_site" / "static" / "js" / "main.js").read_text(encoding="utf-8")
     assert re.search(r"window\.searchMusicBrainzReleaseFromEncoded\s*=", main_js), (
         "main.js must publish searchMusicBrainzReleaseFromEncoded; the live "
         "upcoming_releases.js calls it via searchFromEncoded"
     )
 
-    downloads = (REPO_ROOT / "static" / "js" / "downloads.js").read_text(encoding="utf-8")
+    downloads = (REPO_ROOT / "test_site" / "static" / "js" / "pages/download-queue.js").read_text(encoding="utf-8")
     assert re.search(r"function searchMusicBrainzRelease\s*\(", downloads), (
         "downloads.js no longer defines searchMusicBrainzRelease; retarget this "
         "test at whatever provides the live dashboard's handler"

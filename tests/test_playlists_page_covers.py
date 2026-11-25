@@ -29,9 +29,9 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MAIN_TEMPLATE = REPO_ROOT / "templates" / "playlists" / "index.html"
+MAIN_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "playlists" / "index.html"
 TS_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Playlists" / "index.html"
-MAIN_JS = REPO_ROOT / "static" / "js" / "playlists_index.js"
+MAIN_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages/playlists.js"
 TS_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "playlists.js"
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
@@ -469,7 +469,7 @@ class TestSelectingAPlaylistShowsItsTracks:
 class TestTheCoverCssFitsBothTrees:
     @pytest.mark.parametrize(
         "css",
-        [REPO_ROOT / "static" / "css" / "popularr.css",
+        [REPO_ROOT / "test_site" / "static" / "css" / "popularr.css",
          REPO_ROOT / "test_site" / "static" / "css" / "popularr.css"],
     )
     def test_the_cover_rules_exist(self, css):
@@ -479,7 +479,7 @@ class TestTheCoverCssFitsBothTrees:
 
     @pytest.mark.parametrize(
         "css",
-        [REPO_ROOT / "static" / "css" / "popularr.css",
+        [REPO_ROOT / "test_site" / "static" / "css" / "popularr.css",
          REPO_ROOT / "test_site" / "static" / "css" / "popularr.css"],
     )
     def test_the_cover_is_a_fixed_square(self, css):
@@ -491,7 +491,7 @@ class TestTheCoverCssFitsBothTrees:
 
     @pytest.mark.parametrize(
         "css",
-        [REPO_ROOT / "static" / "css" / "popularr.css",
+        [REPO_ROOT / "test_site" / "static" / "css" / "popularr.css",
          REPO_ROOT / "test_site" / "static" / "css" / "popularr.css"],
     )
     def test_mobile_shrinks_the_detail_cover(self, css):

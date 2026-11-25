@@ -44,7 +44,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from services.downloads import download_folder_service as dfs  # noqa: E402
 
 _RELEASE_MBID = "99999999-8888-7777-6666-555555555555"
-LIVE_MONITOR = REPO_ROOT / "static" / "js" / "monitor.js"
+LIVE_MONITOR = REPO_ROOT / "test_site" / "static" / "js" / "pages/monitor.js"
 TEST_SITE_MONITOR = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "monitor.js"
 
 

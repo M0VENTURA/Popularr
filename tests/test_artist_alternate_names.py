@@ -38,13 +38,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_SITE_ARTIST_PAGE = (
     REPO_ROOT / "test_site" / "templates" / "Pages" / "artist_detail_v2.html"
 )
-LIVE_ARTIST_PAGE = REPO_ROOT / "templates" / "pages" / "artist_detail_v2.html"
+LIVE_ARTIST_PAGE = REPO_ROOT / "test_site" / "templates" / "pages" / "artist_detail_v2.html"
 
 #: The About SHEET, in both trees. The Alternate Names card used to live in the
 #: page's About tab; the tab is gone and the card moved here, so these tests
 #: follow the markup rather than asserting on a tab that no longer exists.
 ABOUT_SHEETS = (
-    REPO_ROOT / "templates" / "components" / "modals" / "_artist_about_modal.html",
+    REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_about_modal.html",
     REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_artist_about_modal.html",
 )
 ARTIST_EXTRAS_JS = (
@@ -565,7 +565,7 @@ class TestTheAboutSection:
         the rebuilt module the Add and × buttons were inert there, which is the
         same "rendered but never wired" failure the modals partial records.
         """
-        live = (REPO_ROOT / "static" / "js" / "artist-page.js").read_text(encoding="utf-8")
+        live = (REPO_ROOT / "test_site" / "static" / "js" / "pages/artist-detail-extras.js").read_text(encoding="utf-8")
 
         assert "global.addArtistAlias = addArtistAlias" in live
         assert "removeArtistAlias" in live

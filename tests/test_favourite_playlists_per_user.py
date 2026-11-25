@@ -338,8 +338,8 @@ class TestTheConfigSurfaceExists:
     write is a config key that exists only in a docstring.
     """
 
-    _HTML = ["templates/pages/config.html", "test_site/templates/Pages/config.html"]
-    _JS = ["static/js/config.js", "test_site/static/js/pages/config.js"]
+    _HTML = ["test_site/templates/Pages/config.html", "test_site/templates/Pages/config.html"]
+    _JS = ["test_site/static/js/pages/config.js", "test_site/static/js/pages/config.js"]
     _INPUT_IDS = (
         "playlists_favourite_enabled",
         "playlists_favourite_min_stars",

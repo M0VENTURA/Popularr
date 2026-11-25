@@ -20,7 +20,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVED = ROOT / "test_site" / "static" / "js" / "pages" / "config.js"
-LIVE = ROOT / "static" / "js" / "config.js"
+LIVE = ROOT / "test_site" / "static" / "js" / "pages/config.js"
 
 
 @pytest.mark.parametrize("path", [SERVED, LIVE], ids=["served", "live"])

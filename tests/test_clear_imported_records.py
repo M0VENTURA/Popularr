@@ -323,7 +323,7 @@ class TestBothTreesExposeClearImported:
     @pytest.mark.parametrize(
         "template",
         [
-            "templates/components/search/_queue_status.html",
+            "test_site/templates/components/search/_queue_status.html",
             "test_site/templates/components/search/_queue_status.html",
         ],
     )
@@ -341,7 +341,7 @@ class TestBothTreesExposeClearImported:
     @pytest.mark.parametrize(
         "rel",
         [
-            "static/js/downloads.js",
+            "test_site/static/js/pages/download-queue.js",
             "test_site/static/js/pages/download-queue.js",
         ],
     )
@@ -398,7 +398,7 @@ class TestTheUiWarnsThatARescanIsNeeded:
     @pytest.mark.parametrize(
         "rel",
         [
-            "static/js/downloads.js",
+            "test_site/static/js/pages/download-queue.js",
             "test_site/static/js/pages/download-queue.js",
         ],
     )

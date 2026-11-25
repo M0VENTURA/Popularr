@@ -30,7 +30,6 @@ import pytest
 from tests._test_site_render import REPO_ROOT, build_env
 
 TREES = (
-    ("templates", "pages/artist_detail_v2.html"),
     ("test_site/templates", "Pages/artist_detail_v2.html"),
 )
 
@@ -216,7 +215,7 @@ class TestTheReleaseRowMenus:
 
     def test_the_menu_dispatch_is_bound_in_the_shared_module(self):
         """Both copies, because both trees serve this module."""
-        paths = (REPO_ROOT / "static" / "js" / "artist-releases.js",
+        paths = (REPO_ROOT / "test_site" / "static" / "js" / "pages/artist-releases.js",
                  REPO_ROOT / "test_site" / "static" / "js" / "pages" / "artist-releases.js")
         for path in paths:
             code = _stripped(_read(path))

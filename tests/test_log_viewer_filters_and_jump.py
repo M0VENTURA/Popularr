@@ -381,14 +381,6 @@ class TestStyling:
 
 
 class TestScope:
-    def test_logs_js_is_test_site_only(self):
-        """Asserted so nobody assumes a live-tree mirror exists.
-
-        The live log viewer is an inline IIFE inside templates/pages/logs.html
-        with no stylesheet at all — there is nothing to mirror into.
-        """
+    def test_the_log_viewer_module_is_served(self):
+        """There is one log viewer, and this is its module."""
         assert JS.is_file()
-        assert not (REPO_ROOT / "static" / "js" / "pages" / "logs.js").exists(), (
-            "a live-tree logs.js appeared — re-check whether this change should "
-            "be mirrored there"
-        )

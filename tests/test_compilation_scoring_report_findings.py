@@ -392,7 +392,7 @@ class TestACompilationTrackWithNoEvidenceCannotHoldFourStars:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
-        for rel in ("templates/pages/config.html", "test_site/templates/Pages/config.html"):
+        for rel in ("test_site/templates/Pages/config.html", "test_site/templates/Pages/config.html"):
             html = (root / rel).read_text(encoding="utf-8")
             assert "compilation_online_high_tier_min_score" in html, rel
             assert "compilation_online_high_tier_min_listeners" in html, rel
@@ -402,8 +402,8 @@ class TestACompilationTrackWithNoEvidenceCannotHoldFourStars:
 
         root = Path(__file__).resolve().parents[1]
         for rel in (
-            "static/js/config.js",
-            "static/js/pages/config.js",
+            "test_site/static/js/pages/config.js",
+            "test_site/static/js/pages/config.js",
             "test_site/static/js/pages/config.js",
         ):
             js = (root / rel).read_text(encoding="utf-8")

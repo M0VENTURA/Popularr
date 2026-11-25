@@ -31,8 +31,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 TREES = {
     "live": (
-        REPO_ROOT / "templates/pages/config.html",
-        REPO_ROOT / "static/js/config.js",
+        REPO_ROOT / "test_site/templates/Pages/config.html",
+        REPO_ROOT / "test_site/static/js/pages/config.js",
     ),
     "test_site": (
         REPO_ROOT / "test_site/templates/Pages/config.html",
@@ -348,23 +348,28 @@ class TestCollectionPopularityReport:
         assert "raw_score" in sql, "the cross-album number must lead the ordering"
 
     def test_the_route_exists_and_offloads_the_work(self) -> None:
-        """An `async def` reading the whole table must not block the loop."""
+        """The collection report runs as a background job, never inline."""
         routes = (REPO_ROOT / "routes/misc_routes.py").read_text(encoding="utf-8")
-        assert '@misc_api_bp.route("/popularity/report")' in routes
-        start = routes.index("async def api_collection_popularity_report")
-        body = routes[start:start + 2500]
-        assert "asyncio.to_thread" in body, (
-            "the collection report reads every track, so it must run off the event loop"
+        assert '@misc_api_bp.route("/popularity/report/start"' in routes
+        assert "create_report_job" in routes
+        service = (
+            REPO_ROOT / "services/popularity/popularity_report_export_service.py"
+        ).read_text(encoding="utf-8")
+        assert "threading.Thread" in service, (
+            "building the whole table CSV must run off the request thread"
         )
 
     @pytest.mark.parametrize("tree", sorted(TREES))
     def test_the_config_page_links_to_the_export(self, tree: str) -> None:
-        template, _js = TREES[tree]
+        template, js = TREES[tree]
         text = template.read_text(encoding="utf-8")
         assert 'id="popularity-export"' in text
-        assert "api_collection_popularity_report" in text, (
-            f"{tree}: the export card must point at the route by ENDPOINT, not a "
-            "hard-coded URL, so a prefix change cannot silently break it"
+        assert 'id="popularity_export_start_btn"' in text, (
+            f"{tree}: the card must offer the background export button"
+        )
+        script = js.read_text(encoding="utf-8")
+        assert "/api/popularity/report/start" in script, (
+            f"{tree}: the button must start the background export"
         )
 
 

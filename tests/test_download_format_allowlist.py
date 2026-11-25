@@ -163,7 +163,7 @@ class TestTheCompletionGate:
 class TestTheConfigPageExposesIt:
     @pytest.mark.parametrize(
         "page",
-        ["templates/pages/config.html", "test_site/templates/Pages/config.html"],
+        ["test_site/templates/Pages/config.html", "test_site/templates/Pages/config.html"],
     )
     def test_the_checkboxes_are_on_both_config_pages(self, page: str) -> None:
         src = (REPO_ROOT / page).read_text(encoding="utf-8")
@@ -176,7 +176,7 @@ class TestTheConfigPageExposesIt:
 
     @pytest.mark.parametrize(
         "js",
-        [REPO_ROOT / "static/js/config.js", REPO_ROOT / "test_site/static/js/pages/config.js"],
+        [REPO_ROOT / "test_site/static/js/pages/config.js", REPO_ROOT / "test_site/static/js/pages/config.js"],
     )
     def test_both_collectors_read_the_checkbox_group(self, js: Path) -> None:
         src = js.read_text(encoding="utf-8")

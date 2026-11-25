@@ -58,21 +58,18 @@ class TestTheRoute:
         works in a mode where the route refuses to serve it.
         """
         assert ACTIVITY_TPL.is_file()
-        assert not (REPO_ROOT / "templates/pages/activity.html").exists()
+        assert not (REPO_ROOT / "templates").exists(), (
+            "the legacy template tree should be gone"
+        )
 
-    def test_it_redirects_rather_than_erroring_when_the_cutover_is_off(self):
-        """⚠️ The page is rebuilt-only; a live-tree user must land somewhere sane.
-
-        Asserted on the guard itself: the alternative is a 500 from a missing
-        template, or an empty shell with no navigation. Both are worse than the
-        dashboard, which already shows the user the same three feeds.
-        """
+    def test_it_renders_the_served_template_with_no_cutover_guard(self):
+        """One UI now: the route renders directly, with no mode check."""
         source = (REPO_ROOT / "routes/ui_routes.py").read_text(encoding="utf-8")
         start = source.index('async def activity()')
         window = source[start:start + 1600]
-        assert "test_site_status" in window, "the cutover accessor is not consulted"
-        assert '"active"' in window or "'active'" in window
-        assert "redirect(url_for(\"ui.dashboard\"))" in window
+        assert 'render_template(\n        "pages/activity.html"' in window
+        assert "test_site_status" not in window
+        assert 'redirect(url_for("ui.dashboard"))' not in window
 
 
 # ---------------------------------------------------------------------------

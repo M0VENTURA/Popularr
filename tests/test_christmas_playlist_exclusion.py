@@ -315,7 +315,7 @@ def test_config_defaults_expose_the_exclusion() -> None:
 
 def test_config_page_exposes_both_settings() -> None:
     """Every configurable option must appear on the Config page."""
-    for rel in ("templates/pages/config.html",
+    for rel in ("test_site/templates/Pages/config.html",
                 "test_site/templates/Pages/config.html"):
         html = _source(rel)
         assert "playlists_exclude_christmas" in html, (
@@ -329,7 +329,7 @@ def test_config_page_exposes_both_settings() -> None:
 def test_config_js_persists_both_settings() -> None:
     """A control that is not in the save payload silently never persists."""
     for rel, field in (
-        ("static/js/config.js", "exclude_christmas_from_playlists"),
+        ("test_site/static/js/pages/config.js", "exclude_christmas_from_playlists"),
         ("test_site/static/js/pages/config.js", "exclude_christmas_from_playlists"),
     ):
         js = _source(rel)

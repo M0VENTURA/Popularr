@@ -33,8 +33,8 @@ def _code_only(source: str) -> str:
 
 # (template, review script path as referenced by the template, real script path)
 _TREES = [
-    ("templates/pages/album_detail.html", "js/metadata-review.js",
-     "static/js/metadata-review.js"),
+    ("test_site/templates/Pages/album_detail.html", "js/services/metadata-review.js",
+     "test_site/static/js/services/metadata-review.js"),
     ("test_site/templates/Pages/album_detail.html", "js/services/metadata-review.js",
      "test_site/static/js/services/metadata-review.js"),
 ]
@@ -103,7 +103,7 @@ class TestScriptDefinesTheHook:
 class TestLookupHooksTheReview:
     """The Lookup MBID flow must actually invoke the preview."""
 
-    @pytest.mark.parametrize("js", ["static/js/album_detail.js",
+    @pytest.mark.parametrize("js", ["test_site/static/js/pages/album.js",
                                     "test_site/static/js/pages/album.js"])
     def test_lookup_flow_calls_apply_proposal(self, js):
         code = _code_only(Path(js).read_text(encoding="utf-8"))
@@ -113,8 +113,8 @@ class TestLookupHooksTheReview:
 
 # Artist page — the per-album "waiting for review" summary.
 _ARTIST_TREES = [
-    ("templates/pages/artist_detail.html", "js/metadata-recommendations.js",
-     "static/js/metadata-recommendations.js"),
+    ("test_site/templates/Pages/artist_detail.html", "js/pages/metadata-recommendations.js",
+     "test_site/static/js/pages/metadata-recommendations.js"),
     ("test_site/templates/Pages/artist_detail.html",
      "js/pages/metadata-recommendations.js",
      "test_site/static/js/pages/metadata-recommendations.js"),

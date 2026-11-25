@@ -68,9 +68,9 @@ def _mp4_tag_items(tags):
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 TEMPLATES = [
-    REPO_ROOT / "templates" / "pages" / "config.html",
+    REPO_ROOT / "test_site" / "templates" / "pages" / "config.html",
     REPO_ROOT / "test_site" / "templates" / "Pages" / "config.html",
-    REPO_ROOT / "templates" / "auth" / "setup.html",
+    REPO_ROOT / "test_site" / "templates" / "auth" / "setup.html",
     REPO_ROOT / "test_site" / "templates" / "auth" / "setup.html",
 ]
 

@@ -1326,6 +1326,7 @@ def _write_album_track_file_tags(
     files_updated = 0
     corrections_recorded = 0
     _synced_ids: list[str] = []
+    _failed_ids: set[str] = set()
 
     try:
         from services.metadata.tag_file_service import (
@@ -1416,11 +1417,13 @@ def _write_album_track_file_tags(
                 # exactly the "I saved it and nothing changed" report, and DEBUG
                 # is invisible in a normal log tail.
                 else:
+                    _failed_ids.add(str(track.get("id") or ""))
                     logger.warning(
                         "Tag fill did not write the file",
                         track_id=track.get("id"), file_path=file_path,
                     )
             except Exception as exc:
+                _failed_ids.add(str(track.get("id") or ""))
                 logger.warning(
                     "Tag fill failed", track_id=track.get("id"), error=str(exc),
                 )
@@ -1445,6 +1448,24 @@ def _write_album_track_file_tags(
     # exist is NOT marked synced, so it is still visited once the file appears.
     if _synced_ids:
         _stamp_tag_sync(artist, album, _synced_ids)
+
+    # ⭐ The album page's "pending" badge means "a local correction an import
+    # has not confirmed". This pass just READ every file and either wrote what
+    # was missing or found it already matching, so the local side is done; the
+    # import's freshness gate still avoids reading a stale Navidrome index (a
+    # recent ``local_tags_written_at`` forces the scan check). Without this the
+    # badge survived every scan and only a manual import cleared it.
+    _confirmed = [
+        track_id for track_id in _synced_ids
+        if track_id and track_id not in _failed_ids
+    ]
+    if _confirmed:
+        try:
+            from services.scanning.reconciliation import confirm_local_writes
+
+            confirm_local_writes(_confirmed)
+        except Exception as exc:
+            logger.debug("Tag-sync pending clear failed", error=str(exc))
 
     return files_updated, corrections_recorded, ""
 

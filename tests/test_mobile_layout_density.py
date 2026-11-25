@@ -42,7 +42,7 @@ RELEASE_COMPONENT = TS / "templates" / "components" / "_release_section.html"
 ARTIST_CSS = TS / "static" / "css" / "artist.css"
 #: Both trees are SERVED — the live one is the default — so a fade applied to
 #: only one of them is missing for whoever is on the other.
-ARTIST_CSS_COPIES = [ARTIST_CSS, LIVE / "static" / "css" / "artist.css"]
+ARTIST_CSS_COPIES = [ARTIST_CSS, LIVE / "test_site" / "static" / "css" / "artist.css"]
 EXTRAS_JS = TS / "static" / "js" / "pages" / "artist-detail-extras.js"
 #: The SHARED release module. It is served by BOTH trees and pinned
 #: byte-identical by test_shared_module_copies_do_not_drift, so this change
@@ -50,7 +50,7 @@ EXTRAS_JS = TS / "static" / "js" / "pages" / "artist-detail-extras.js"
 #: instead (artist-detail-extras.js).
 SHARED_RELEASE_JS_COPIES = [
     TS / "static" / "js" / "pages" / "artist-releases.js",
-    LIVE / "static" / "js" / "artist-releases.js",
+    LIVE / "test_site" / "static" / "js" / "pages/artist-releases.js",
 ]
 
 #: The phone breakpoint every rule in this change shares.

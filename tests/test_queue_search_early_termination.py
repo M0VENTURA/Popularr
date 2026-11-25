@@ -407,7 +407,7 @@ def _strip_js_comments(source: str) -> str:
 class TestConfigPageSurface:
 
     @pytest.mark.parametrize("template", [
-        "templates/pages/config.html",
+        "test_site/templates/Pages/config.html",
         "test_site/templates/Pages/config.html",
     ])
     def test_template_renders_every_tuning_input(self, template):
@@ -417,7 +417,7 @@ class TestConfigPageSurface:
             assert f'for="{input_id}"' in src, f"{template} missing label for {input_id}"
 
     @pytest.mark.parametrize("collector", [
-        "static/js/config.js",
+        "test_site/static/js/pages/config.js",
         "test_site/static/js/pages/config.js",
     ])
     def test_collector_reads_every_tuning_input(self, collector):

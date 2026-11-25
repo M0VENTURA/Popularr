@@ -916,6 +916,7 @@ def apply_album_wide_ids(
     album_mbid: str | None = None,
     release_group_mbid: str | None = None,
     clear_album_mbid: bool = False,
+    previous_release_group_mbid: str | None = None,
 ) -> dict[str, Any]:
     """Write the album's RELEASE identity to EVERY row of that album.
 
@@ -952,6 +953,11 @@ def apply_album_wide_ids(
         # ``update_album_ids`` writes only non-empty values, and an explicit
         # clear must not simply be skipped — push the clear directly.
         cleared_ids: list[str] = []
+        _clear_scope_params: dict[str, Any] = {}
+        _clear_scope_sql = _release_group_scope_clause(
+            [previous_release_group_mbid] if previous_release_group_mbid else None,
+            _clear_scope_params,
+        )
         try:
             with db_session() as session:
                 result = session.execute(
@@ -960,8 +966,9 @@ def apply_album_wide_ids(
                         "musicbrainz_albumid = '' "
                         "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) "
                         "= LOWER(:artist) AND LOWER(album) = LOWER(:album)"
+                        + _clear_scope_sql
                     ),
-                    {"artist": artist, "album": album},
+                    {"artist": artist, "album": album, **_clear_scope_params},
                 )
                 rows_updated = result.rowcount or 0
                 if rows_updated:
@@ -972,8 +979,9 @@ def apply_album_wide_ids(
                                 "SELECT id FROM tracks "
                                 "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) "
                                 "= LOWER(:artist) AND LOWER(album) = LOWER(:album)"
+                                + _clear_scope_sql
                             ),
-                            {"artist": artist, "album": album},
+                            {"artist": artist, "album": album, **_clear_scope_params},
                         ).fetchall() or []
                     ]
         except Exception as exc:
@@ -1006,7 +1014,14 @@ def apply_album_wide_ids(
                 artist=artist, album=album, error=str(exc),
             )
 
-        files_updated = _clear_album_id_file_tags(artist, album)
+        files_updated = _clear_album_id_file_tags(
+            artist, album,
+            scope_release_groups=(
+                [previous_release_group_mbid]
+                if previous_release_group_mbid
+                else None
+            ),
+        )
         return {"rows_updated": rows_updated, "files_updated": files_updated}
 
     if album_mbid:
@@ -1016,14 +1031,25 @@ def apply_album_wide_ids(
     if len(payload) == 2:
         return {"rows_updated": 0, "files_updated": 0}
 
-    result, _status = update_album_ids(payload)
+    _scope_groups = [
+        group for group in (previous_release_group_mbid, release_group_mbid)
+        if str(group or "").strip()
+    ]
+    result, _status = update_album_ids(
+        payload, scope_release_groups=_scope_groups or None,
+    )
     return {
         "rows_updated": int(result.get("rows_updated") or 0),
         "files_updated": int(result.get("files_updated") or 0),
     }
 
 
-def _clear_album_id_file_tags(artist: str, album: str) -> int:
+def _clear_album_id_file_tags(
+    artist: str,
+    album: str,
+    *,
+    scope_release_groups: list[str] | None = None,
+) -> int:
     """Delete the album-id frame from every file of *artist*/*album*."""
     cleared = 0
     try:
@@ -1032,14 +1058,16 @@ def _clear_album_id_file_tags(artist: str, album: str) -> int:
             update_file_tags,
         )
 
+        scope_params: dict[str, Any] = {}
+        scope_sql = _release_group_scope_clause(scope_release_groups, scope_params)
         with db_session() as session:
             rows = session.execute(
                 text(
                     "SELECT file_path FROM tracks "
                     "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                    "AND LOWER(album) = LOWER(:album)"
+                    "AND LOWER(album) = LOWER(:album)" + scope_sql
                 ),
-                {"artist": artist, "album": album},
+                {"artist": artist, "album": album, **scope_params},
             ).fetchall() or []
 
         for row in rows:
@@ -1103,8 +1131,46 @@ def _row_already_has_ids(
     return True
 
 
-def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Update release IDs for an album's tracks."""
+def _release_group_scope_clause(
+    groups: list[str] | None,
+    params: dict[str, Any],
+    *,
+    prefix: str = "scope",
+) -> str:
+    """SQL that limits an album-wide id write to ONE release family.
+
+    ⚠️ TWO ALBUMS CAN SHARE AN ARTIST AND NAME. "I am YOU" is both a 2018 EP
+    and a track on the SKZ2020 compilation; scoping only by artist+album let a
+    save of one overwrite the release id (and release group) of the other, and
+    the next scan then wrote the other album's rejected ids back to the files —
+    the reported "it keeps reverting to the old release". Rows that belong to a
+    different, non-empty release group are a different album and are left
+    alone; rows with no group are still filled.
+    """
+    clean = [str(group).strip() for group in (groups or []) if str(group or "").strip()]
+    if not clean:
+        return ""
+    placeholders = []
+    for index, group in enumerate(dict.fromkeys(clean)):
+        key = f"{prefix}{index}"
+        params[key] = group.casefold()
+        placeholders.append(f":{key}")
+    return (
+        " AND (TRIM(COALESCE(musicbrainz_releasegroupid, '')) = '' "
+        f"OR LOWER(TRIM(musicbrainz_releasegroupid)) IN ({', '.join(placeholders)}))"
+    )
+
+
+def update_album_ids(
+    payload: dict[str, Any],
+    *,
+    scope_release_groups: list[str] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Update release IDs for an album's tracks.
+
+    ``scope_release_groups`` narrows the fan-out to rows that cannot belong to
+    another same-named album (no group, or one of the listed groups).
+    """
     artist = str(payload.get("artist") or "").strip()
     album = str(payload.get("album") or "").strip()
     if not artist or not album:
@@ -1156,6 +1222,8 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     file_updated = 0
     stamped_ids: list[str] = []
     _file_targets: list[tuple[Any, str]] = []
+    _scope_params: dict[str, Any] = {}
+    _scope_sql = _release_group_scope_clause(scope_release_groups, _scope_params)
     with db_session() as session:
         # ⭐ READ THE PRIOR IDS BEFORE THE UPDATE, not after.
         #
@@ -1174,9 +1242,9 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                         "SELECT id, file_path, musicbrainz_album_mbid, "
                         "musicbrainz_albumid, musicbrainz_releasegroupid FROM tracks "
                         "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                        "AND LOWER(album) = LOWER(:album)"
+                        "AND LOWER(album) = LOWER(:album)" + _scope_sql
                     ),
-                    {"artist": artist, "album": album},
+                    {"artist": artist, "album": album, **_scope_params},
                 ).fetchall() or []:
                     _tid = str(_r[0] or "")
                     _prior_ids[_tid] = (_r[2], _r[3], _r[4])
@@ -1192,9 +1260,9 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             text(
                 f"UPDATE tracks SET {', '.join(updates)} "
                 "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
-                "AND LOWER(album) = LOWER(:album)"
+                "AND LOWER(album) = LOWER(:album)" + _scope_sql
             ),
-            bind_values,
+            {**bind_values, **_scope_params},
         )
         rows = result.rowcount or 0
 
@@ -1210,9 +1278,9 @@ def update_album_ids(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
                             "SELECT id FROM tracks "
                             "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) "
                             "= LOWER(:artist) "
-                            "AND LOWER(album) = LOWER(:album)"
+                            "AND LOWER(album) = LOWER(:album)" + _scope_sql
                         ),
-                        {"artist": artist, "album": album},
+                        {"artist": artist, "album": album, **_scope_params},
                     ).fetchall() or []
                 ]
             except Exception as exc:

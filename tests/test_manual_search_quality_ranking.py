@@ -37,7 +37,6 @@ ROUTE = REPO_ROOT / "routes" / "download_search_routes.py"
 SERVICE = REPO_ROOT / "services" / "downloads" / "slskd_service.py"
 
 RENDERERS = (
-    ("live search tab", REPO_ROOT / "static" / "js" / "downloads.js"),
     ("test_site", REPO_ROOT / "test_site" / "static" / "js" / "services" / "slskd.js"),
 )
 
@@ -264,13 +263,6 @@ class TestRenderers:
         assert ">Slots<" in js, (
             f"{label}: a slots column is what makes the ranking visible — "
             "1 vs 8 slots matters when picking a peer by hand"
-        )
-
-    def test_both_live_renderers_have_the_column(self) -> None:
-        js = (REPO_ROOT / "static" / "js" / "downloads.js").read_text(encoding="utf-8")
-        # The search tab and the manual modal are separate renderers.
-        assert js.count('data-label="Slots"') >= 2, (
-            "both live renderers (search tab + manual modal) need the column"
         )
 
     def test_a_missing_slot_count_is_unknown_not_zero(self) -> None:

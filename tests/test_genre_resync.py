@@ -430,7 +430,7 @@ class TestWiring:
 
     @pytest.mark.parametrize(
         "rel",
-        ["templates/pages/config.html", "test_site/templates/Pages/config.html"],
+        ["test_site/templates/Pages/config.html", "test_site/templates/Pages/config.html"],
     )
     def test_config_page_has_the_controls(self, rel):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
@@ -439,7 +439,7 @@ class TestWiring:
 
     @pytest.mark.parametrize(
         "rel",
-        ["static/js/config.js", "test_site/static/js/pages/config.js"],
+        ["test_site/static/js/pages/config.js", "test_site/static/js/pages/config.js"],
     )
     def test_js_calls_the_endpoint(self, rel):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")

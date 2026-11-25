@@ -42,7 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Trees that ship to users. old_system/ is a frozen reference snapshot and is
 # deliberately excluded.
-TEMPLATE_ROOTS = (REPO_ROOT / "templates", REPO_ROOT / "test_site" / "templates")
+TEMPLATE_ROOTS = (REPO_ROOT / "test_site" / "templates", REPO_ROOT / "test_site" / "templates")
 
 # A tag whose name is followed only by whitespace and then Jinja: no attribute
 # has been emitted yet, so any element here sits inside the opening tag.
@@ -117,7 +117,7 @@ def test_album_detail_hero_tag_is_well_formed() -> None:
     checked = 0
     for path in (
         REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html",
-        REPO_ROOT / "templates" / "pages" / "album_detail.html",
+        REPO_ROOT / "test_site" / "templates" / "pages" / "album_detail.html",
     ):
         if not path.is_file():
             continue

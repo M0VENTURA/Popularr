@@ -122,7 +122,7 @@ class TestNoTemplateIsOrphaned:
 
     def _components(self) -> list[pathlib.Path]:
         out: list[pathlib.Path] = []
-        for templates in (REPO_ROOT / "templates", REPO_ROOT / "test_site/templates"):
+        for templates in (REPO_ROOT / "test_site" / "templates", REPO_ROOT / "test_site/templates"):
             if templates.is_dir():
                 out.extend(templates.rglob("*.html"))
         return out
@@ -188,5 +188,5 @@ class TestNoTemplateIsOrphaned:
         clearUpcomingReleasesMonitor) were defined nowhere.
         """
         assert not (
-            REPO_ROOT / "templates/components/search/_monitor_upcoming.html"
+            REPO_ROOT / "test_site/templates/components/search/_monitor_upcoming.html"
         ).exists()

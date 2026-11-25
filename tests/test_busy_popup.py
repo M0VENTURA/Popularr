@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE = REPO_ROOT / "static" / "js"
+LIVE = REPO_ROOT / "test_site" / "static" / "js"
 REBUILT = REPO_ROOT / "test_site" / "static" / "js"
 
 pytestmark = pytest.mark.skipif(
@@ -425,18 +425,18 @@ class TestTheTwoCopiesAgree:
         return text.strip()
 
     def test_both_copies_exist(self):
-        assert (LIVE / "busy-popup.js").is_file()
+        assert (LIVE / "ui/busy-popup.js").is_file()
         assert (REBUILT / "ui" / "busy-popup.js").is_file()
 
     def test_bodies_are_identical(self):
-        assert self._body(LIVE / "busy-popup.js") == self._body(REBUILT / "ui" / "busy-popup.js"), (
+        assert self._body(LIVE / "ui/busy-popup.js") == self._body(REBUILT / "ui" / "busy-popup.js"), (
             "The live (static/js/busy-popup.js) and rebuilt "
             "(test_site/static/js/ui/busy-popup.js) copies have drifted. Both "
             "trees load this module, so port the change to both."
         )
 
     def test_both_tree_bases_load_it(self):
-        for rel in ("templates/base.html", "test_site/templates/base.html"):
+        for rel in ("test_site/templates/base.html", "test_site/templates/base.html"):
             source = (REPO_ROOT / rel).read_text(encoding="utf-8")
             assert "busy-popup.js" in source, f"{rel} does not load the popup"
 
@@ -490,7 +490,7 @@ class TestPagesCallIt:
         `update(lookupBusy, …)` phase labels to no-ops.
         """
         releases = ("endLookupBusy", "_endAlbumLookupBusy")
-        for rel in ("test_site/static/js/pages/album.js", "static/js/album_detail.js"):
+        for rel in ("test_site/static/js/pages/album.js", "test_site/static/js/pages/album.js"):
             source = _strip_js_comments(self._read(rel))
             for name in releases:
                 # ⚠️ Scoped to THIS release function, not to the event name. Both
@@ -540,7 +540,7 @@ class TestPagesCallIt:
         )
 
     def test_live_album_page_does_the_same(self):
-        source = _strip_js_comments(self._read("static/js/album_detail.js"))
+        source = _strip_js_comments(self._read("test_site/static/js/pages/album.js"))
         opener = _js_function(source, "openAlbumLookupModal")
         acquisitions = _popup_acquisitions(opener)
         assert acquisitions, "the live lookup acquired no popup at all"
@@ -558,7 +558,7 @@ class TestPagesCallIt:
         preview finished — a one-frame spinner, and the several-second network
         wait it was added for left silent. It must be returned.
         """
-        source = _strip_js_comments(self._read("static/js/album_detail.js"))
+        source = _strip_js_comments(self._read("test_site/static/js/pages/album.js"))
         fn = _js_function(source, "applyAlbumMbid")
         # Assigned as a function expression, so slice to the closing of the
         # whole `window.applyAlbumMbid = function (...) { ... };` statement.
@@ -572,14 +572,14 @@ class TestPagesCallIt:
         assert "showAndRun('Adding to download queue" in source
 
     def test_live_search_flyout_shows_a_popup_when_queueing(self):
-        source = self._read("static/js/unified_search.js")
+        source = self._read("test_site/static/js/ui/search-flyout.js")
         assert "busyPopup.show('Adding to download queue" in source
         assert "busyPopup.hide(busied)" in source, (
             "the popup is shown but never hidden on the fetch path"
         )
 
     def test_live_album_queue_button_shows_a_popup(self):
-        source = self._read("static/js/album_detail.js")
+        source = self._read("test_site/static/js/pages/album.js")
         assert "Adding to download queue" in source
 
 
@@ -605,7 +605,7 @@ class TestTheLookupLifecycleDoesNotStrand:
     #: (label, page, acquire fn, release fn, handle variable)
     TREES = (
         ("rebuilt", "test_site/static/js/pages/album.js", "startLookupBusy", "endLookupBusy", "lookupBusy"),
-        ("live", "static/js/album_detail.js", "_startAlbumLookupBusy", "_endAlbumLookupBusy", "_albumLookupBusy"),
+        ("live", "test_site/static/js/pages/album.js", "_startAlbumLookupBusy", "_endAlbumLookupBusy", "_albumLookupBusy"),
     )
 
     _PROBE = """
@@ -733,7 +733,7 @@ class TestAlbumTemplateHandlersAreDefined:
         """Direct pin for the reported-relevant defect."""
         for page, js in (
             ("test_site/templates/Pages/album_detail.html", "test_site/static/js/pages/album.js"),
-            ("templates/pages/album_detail.html", "static/js/album_detail.js"),
+            ("test_site/templates/Pages/album_detail.html", "test_site/static/js/pages/album.js"),
         ):
             page_source = (REPO_ROOT / page).read_text(encoding="utf-8")
             if "autoLinkAllMbids" not in page_source:
@@ -749,7 +749,7 @@ class TestAlbumTemplateHandlersAreDefined:
 
     def test_it_calls_the_endpoint_that_exists(self):
         """The handler must target the real route, not an invented one."""
-        for js in ("static/js/album_detail.js", "test_site/static/js/pages/album.js"):
+        for js in ("test_site/static/js/pages/album.js", "test_site/static/js/pages/album.js"):
             source = (REPO_ROOT / js).read_text(encoding="utf-8")
             assert "/api/musicbrainz/link-album-mbids" in source, js
 
@@ -783,7 +783,7 @@ class TestAlbumTemplateHandlersAreDefined:
         problems = []
         for page in (
             "test_site/templates/Pages/album_detail.html",
-            "templates/pages/album_detail.html",
+            "test_site/templates/Pages/album_detail.html",
         ):
             handlers = self._handlers(page)
             if not handlers:
@@ -826,7 +826,7 @@ class TestAlbumTemplateHandlersAreDefined:
         )
         for js in (
             "test_site/static/js/pages/album.js",
-            "static/js/album_detail.js",
+            "test_site/static/js/pages/album.js",
         ):
             source = (REPO_ROOT / js).read_text(encoding="utf-8")
             for name in handlers:
@@ -1319,7 +1319,7 @@ class TestGuardedCallsAreNotGuardingAGhost:
         """Direct pin for the concrete defect, so a rename or removal of the
         definition cannot quietly reintroduce the silent no-op."""
         for label, js in (
-            ("live", LIVE / "album_detail.js"),
+            ("live", LIVE / "pages/album.js"),
             ("rebuilt", REBUILT / "pages" / "album.js"),
         ):
             source = _strip_js_comments(js.read_text(encoding="utf-8"))

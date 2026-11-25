@@ -127,6 +127,7 @@ def sync_remote_navidrome_before_import(
             )
             from services.scanning.reconciliation import (
                 has_dirty_navidrome_metadata,
+                latest_local_tag_write_epoch,
             )
             from services.scanning.scan_state import load_scan_checkpoint
 
@@ -135,9 +136,27 @@ def sync_remote_navidrome_before_import(
                 if checkpoint_file
                 else {}
             )
-            dirty = bool(has_dirty_navidrome_metadata() or is_rescan_required())
             has_successful_import = bool(
                 checkpoint.get("last_successful_import_ts")
+            )
+            # ⭐ A RECENT LOCAL WRITE IS ENOUGH, EVEN AFTER THE PENDING FLAG IS
+            # RETIRED. The album save clears ``metadata_dirty_for_navidrome``
+            # once its files are on disk (so the page stops showing "pending"),
+            # but Navidrome may not have scanned those files yet. Reading its
+            # index now would import the PRE-save values — the exact revert this
+            # gate exists to prevent. ``local_tags_written_at`` survives the
+            # clear, so it is what the freshness comparison uses.
+            latest_local_write = latest_local_tag_write_epoch()
+            local_write_unimported = bool(
+                has_successful_import
+                and latest_local_write is not None
+                and latest_local_write
+                > (_epoch(checkpoint.get("last_successful_import_ts")) or 0.0)
+            )
+            dirty = bool(
+                has_dirty_navidrome_metadata()
+                or is_rescan_required()
+                or local_write_unimported
             )
             if dirty and _skip_scan_after_local_write_enabled():
                 # Dirty rows do not mean Navidrome has not scanned since the
@@ -146,7 +165,7 @@ def sync_remote_navidrome_before_import(
                 # is at/after the newest local tag write, read that verified
                 # state instead.
                 status = nav_client.get_scan_status()
-                latest_write = _latest_dirty_local_write_epoch()
+                latest_write = latest_local_write
                 last_scan = _epoch(status.get("lastScan"))
                 if (
                     status.get("success")

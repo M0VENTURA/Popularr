@@ -47,8 +47,8 @@ class TestDownloadsNavPointsAtARealSection:
     def test_live_nav_targets_the_unmatched_section(self):
         from pathlib import Path
 
-        base = Path(__file__).resolve().parents[1] / "templates" / "base.html"
-        monitor = Path(__file__).resolve().parents[1] / "templates" / "pages" / "downloads" / "monitor.html"
+        base = Path(__file__).resolve().parents[1] / "test_site" / "templates" / "base.html"
+        monitor = Path(__file__).resolve().parents[1] / "test_site" / "templates" / "Pages" / "downloads" / "monitor.html"
 
         targets = _nav_targets(base.read_text(encoding="utf-8"))
         ids = _element_ids(monitor.read_text(encoding="utf-8"))
@@ -88,7 +88,7 @@ class TestDownloadsNavPointsAtARealSection:
         """
         from pathlib import Path
 
-        monitor = Path(__file__).resolve().parents[1] / "templates" / "pages" / "downloads" / "monitor.html"
+        monitor = Path(__file__).resolve().parents[1] / "test_site" / "templates" / "Pages" / "downloads" / "monitor.html"
         ids = _element_ids(monitor.read_text(encoding="utf-8"))
         assert "unmatchedFoldersSection" in ids
 
@@ -100,10 +100,10 @@ class TestUnmatchedAreaIsStillDataDriven:
         from pathlib import Path
 
         js = (
-            Path(__file__).resolve().parents[1] / "static" / "js" / "monitor.js"
+            Path(__file__).resolve().parents[1] / "test_site" / "static" / "js" / "pages/monitor.js"
         ).read_text(encoding="utf-8")
         # Both the hide-when-empty and the show-when-data branches must exist,
         # and the section id the JS targets must match the template.
-        assert "folders.length === 0" in js
+        assert "!folders.length" in js
         assert "unmatchedFoldersSection" in js
         assert "section.style.display = 'block'" in js

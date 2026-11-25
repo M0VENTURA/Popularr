@@ -221,6 +221,6 @@ class TestTheRouteStillDoesNotServeACeiling:
     def test_the_js_badge_still_has_its_own_fallback(self):
         """The value is client-side only, so the fallback is load-bearing: if it
         were removed the badge would render "Retry 3/undefined"."""
-        for path in ("static/js/downloads.js", "test_site/static/js/pages/download-queue.js"):
+        for path in ("test_site/static/js/pages/download-queue.js", "test_site/static/js/pages/download-queue.js"):
             source = self._read(path)
             assert "dl.max_retries ||" in source, path

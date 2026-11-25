@@ -187,7 +187,7 @@ def _strip_js_comments(source: str) -> str:
 @pytest.mark.parametrize(
     "rel_path",
     [
-        "static/js/album_detail.js",
+        "test_site/static/js/pages/album.js",
         "test_site/static/js/pages/album.js",
     ],
 )
@@ -227,7 +227,7 @@ def test_album_js_does_not_navigate_to_the_dead_delete_url(rel_path: str):
 @pytest.mark.parametrize(
     "rel_path",
     [
-        "static/js/album_detail.js",
+        "test_site/static/js/pages/album.js",
         "test_site/static/js/pages/album.js",
     ],
 )

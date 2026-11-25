@@ -43,7 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Both trees must agree — this page exists in each.
 TRACK_TEMPLATES = (
-    REPO_ROOT / "templates" / "pages" / "track_detail.html",
+    REPO_ROOT / "test_site" / "templates" / "pages" / "track_detail.html",
     REPO_ROOT / "test_site" / "templates" / "Pages" / "track_detail.html",
 )
 

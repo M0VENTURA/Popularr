@@ -26,19 +26,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: The shared macro library, which must stay identical in intent in both trees.
 COMPONENTS = [
     "test_site/templates/components/_release_section.html",
-    "templates/components/_release_section.html",
+    "test_site/templates/components/_release_section.html",
 ]
 
 #: The per-release expand/collapse script, in both trees.
 RELEASE_SCRIPTS = [
     "test_site/static/js/pages/artist-releases.js",
-    "static/js/artist-releases.js",
+    "test_site/static/js/pages/artist-releases.js",
 ]
 
 #: The stylesheets that style the collapsed header.
 STYLESHEETS = [
     "test_site/static/css/artist.css",
-    "static/css/artist.css",
+    "test_site/static/css/artist.css",
 ]
 
 

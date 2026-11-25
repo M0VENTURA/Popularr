@@ -40,7 +40,7 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 TREES = {
-    "live": (REPO_ROOT / "templates/pages/downloads", REPO_ROOT / "static/js"),
+    "live": (REPO_ROOT / "test_site/templates/Pages/downloads", REPO_ROOT / "test_site/static/js"),
     "rebuilt": (
         REPO_ROOT / "test_site/templates/Pages/downloads",
         REPO_ROOT / "test_site/static/js",
@@ -118,7 +118,7 @@ class TestTheQueuePageJumpButton:
     @pytest.mark.parametrize(
         "rel",
         [
-            "templates/pages/downloads/queue.html",
+            "test_site/templates/Pages/downloads/queue.html",
             "test_site/templates/Pages/downloads/queue.html",
         ],
     )
@@ -131,10 +131,3 @@ class TestTheQueuePageJumpButton:
         assert 'href="/downloads/discover/upcoming"' in live, (
             "the jump button must be a plain link to the upcoming page"
         )
-
-    def test_the_monitor_still_defines_its_own(self) -> None:
-        """CONTROL — the monitor legitimately defines it inline."""
-        src = (
-            REPO_ROOT / "templates/pages/downloads/monitor.html"
-        ).read_text(encoding="utf-8")
-        assert "function jumpToUpcomingReleases(" in src

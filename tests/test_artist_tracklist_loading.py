@@ -105,7 +105,7 @@ def _release_module_paths() -> list[Path]:
     return [
         p
         for p in (
-            LIVE_STATIC / "js/artist-releases.js",
+            LIVE_STATIC / "js/pages/artist-releases.js",
             REBUILT_STATIC / "js/pages/artist-releases.js",
         )
         if p.is_file()

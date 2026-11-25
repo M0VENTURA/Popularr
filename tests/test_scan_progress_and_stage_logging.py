@@ -30,8 +30,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 FINALISE_STAGE = REPO_ROOT / "services" / "popularity" / "stages" / "finalise_stage.py"
 SCAN_LOG_SOURCES = (
-    REPO_ROOT / "static" / "js" / "dashboard.js",
-    REPO_ROOT / "static" / "js" / "main.js",
+    REPO_ROOT / "test_site" / "static" / "js" / "pages/dashboard.js",
+    REPO_ROOT / "test_site" / "static" / "js" / "main.js",
     REPO_ROOT / "test_site" / "static" / "js" / "pages" / "dashboard.js",
     REPO_ROOT / "test_site" / "static" / "js" / "main.js",
 )

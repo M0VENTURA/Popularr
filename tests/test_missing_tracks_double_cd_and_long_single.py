@@ -250,6 +250,38 @@ class TestAPositionNoLongerProvesPresence:
         )
         assert missing == [], "an unknown length must stay permissive"
 
+    def test_the_file_length_settles_an_unscanned_row(
+        self, monkeypatch, harness
+    ):
+        """REPORTED — track 19 was missing but never listed.
+
+        The row's DB duration was NULL (never scanned), so the pairing rule saw
+        no contradicting length and let a different song at number 19 claim the
+        release's track. The file itself has a length, and reading it decides.
+        """
+        _seed("t19", "Freak on a Leash (Dante Ross mix)", "19", duration=None)
+        monkeypatch.setattr(
+            ams, "_file_duration_seconds", lambda path: 232.0,
+        )
+        missing, _ = _missing(
+            monkeypatch, harness,
+            [_mb("Another Song", 19, duration=215000)],
+        )
+        assert missing == ["Another Song"], (
+            "the wrong recording at position 19 hid the missing track"
+        )
+
+    def test_a_matching_file_length_keeps_it_present(self, monkeypatch, harness):
+        """CONTROL — the file proves it IS the release's recording."""
+        _seed("t19", "Another Song (local spelling)", "19", duration=None)
+        monkeypatch.setattr(
+            ams, "_file_duration_seconds", lambda path: 215.0,
+        )
+        missing, _ = _missing(
+            monkeypatch, harness, [_mb("Another Song", 19, duration=215000)]
+        )
+        assert missing == []
+
     def test_the_exclusion_count_still_adds_up(self, monkeypatch, harness):
         """The documented invariant: missing + excluded == mb_total."""
         _seed("t1", "One", "1", duration=100)

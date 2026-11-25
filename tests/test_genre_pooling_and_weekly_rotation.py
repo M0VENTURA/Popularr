@@ -29,8 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 TREES = {
     "live": (
-        REPO_ROOT / "templates/pages/config.html",
-        REPO_ROOT / "static/js/config.js",
+        REPO_ROOT / "test_site/templates/Pages/config.html",
+        REPO_ROOT / "test_site/static/js/pages/config.js",
     ),
     "test_site": (
         REPO_ROOT / "test_site/templates/Pages/config.html",

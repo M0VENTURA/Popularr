@@ -265,17 +265,6 @@ def test_full_scan_writer_records_item_counters():
 @pytest.mark.parametrize(
     "rel_path",
     [
-        "static/js/dashboard.js",
-        # ⚠️ The rebuilt dashboard's label map MOVED, and this assertion follows
-        # it rather than pinning the file it used to live in.
-        #
-        # `test_site/static/js/services/activity-feed.js` now owns the scan-type
-        # labels, because the Activity page labels the same scans and a second
-        # copy is how two surfaces start disagreeing about one of them. The
-        # dashboard keeps a one-line DELEGATE (`scanDisplayName`), which
-        # `test_the_rebuilt_dashboard_delegates_its_labels` pins — so the
-        # requirement (never render the raw `full_scan` string) still holds, it
-        # is just satisfied from one place instead of two.
         "test_site/static/js/services/activity-feed.js",
     ],
 )
@@ -303,7 +292,7 @@ def test_the_rebuilt_dashboard_delegates_its_labels():
 
 @pytest.mark.parametrize(
     "rel_path",
-    ["static/js/dashboard.js", "test_site/static/js/pages/dashboard.js"],
+    ["test_site/static/js/pages/dashboard.js", "test_site/static/js/pages/dashboard.js"],
 )
 def test_dashboards_use_nullish_coalescing_for_the_counter(rel_path: str):
     """`||` renders a legitimate 0 total as `?`; `??` does not."""

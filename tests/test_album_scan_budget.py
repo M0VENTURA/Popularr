@@ -379,8 +379,8 @@ class TestTheTrackCountQueryIsOneRoundTrip:
 
 class TestTheTrackTimeoutIsOnTheConfigPage:
     TREES = (
-        ("live", REPO_ROOT / "templates" / "pages" / "config.html",
-         REPO_ROOT / "static" / "js" / "config.js"),
+        ("live", REPO_ROOT / "test_site" / "templates" / "pages" / "config.html",
+         REPO_ROOT / "test_site" / "static" / "js" / "pages/config.js"),
         ("test_site", REPO_ROOT / "test_site" / "templates" / "Pages" / "config.html",
          REPO_ROOT / "test_site" / "static" / "js" / "pages" / "config.js"),
     )
@@ -435,7 +435,7 @@ class TestTheBehaviourIsDescribedHonestly:
     def test_the_track_help_text_explains_the_derived_budgets(self) -> None:
         """The old text had three dials and said only "raise it if your
         artists need longer", which was wrong advice for a large artist."""
-        html = (REPO_ROOT / "templates" / "pages" / "config.html").read_text(
+        html = (REPO_ROOT / "test_site" / "templates" / "pages" / "config.html").read_text(
             encoding="utf-8"
         )
         assert "track count" in html and "Various Artists" in html, (
@@ -1006,7 +1006,7 @@ class TestTheZeroTrackSummaryTellsTheTruth:
         )
 
         for rel in (
-            "templates/pages/config.html",
+            "test_site/templates/Pages/config.html",
             "test_site/templates/Pages/config.html",
         ):
             html = (REPO_ROOT / rel).read_text(encoding="utf-8")

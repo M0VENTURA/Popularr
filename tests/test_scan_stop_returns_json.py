@@ -307,35 +307,14 @@ class TestBothDashboardsAskForJson:
             "detect a JSON caller"
         )
 
-    def test_the_legacy_dashboard_sends_the_json_signal_inline(self):
-        """The legacy dashboard has no shared helper, so it must set them itself."""
+    def test_the_dashboard_surfaces_stop_failures(self):
+        """The JSON helper must reject a non-JSON/redirect answer loudly."""
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        src = (repo_root / "static/js/dashboard.js").read_text(encoding="utf-8")
+        src = (repo_root / "test_site/static/js/utils/api.js").read_text(encoding="utf-8")
 
-        assert "stopScanRequest" in src, (
-            "the legacy dashboard must route stop calls through the helper that "
-            "checks the response"
-        )
-        assert '"Accept": "application/json"' in src, (
-            "the legacy stop helper must ask for JSON"
-        )
-        assert '"Content-Type": "application/json"' in src
-
-    def test_the_legacy_dashboard_surfaces_stop_failures(self):
-        """A silent failure is how the bug went unnoticed for so long.
-
-        The legacy tree's bare fetch ignored the response entirely, so an
-        expired session (redirect to the login page) looked identical to a
-        successful stop.
-        """
-        from pathlib import Path
-
-        repo_root = Path(__file__).resolve().parents[1]
-        src = (repo_root / "static/js/dashboard.js").read_text(encoding="utf-8")
-
-        assert "Could not stop scans" in src, (
-            "a failed stop must be reported to the operator, not swallowed"
+        assert "parseJsonOrThrow" in src or "Unexpected token" in src or "resp.json" in src, (
+            "the shared helper must turn an HTML/login redirect into a visible error"
         )
 

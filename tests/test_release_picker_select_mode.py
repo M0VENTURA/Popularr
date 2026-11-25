@@ -56,8 +56,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 ROUTE = REPO_ROOT / "routes" / "musicbrainz_routes.py"
 ALBUM_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
-LIVE_ALBUM_JS = REPO_ROOT / "static" / "js" / "album_detail.js"
-ALBUM_HTML = REPO_ROOT / "templates" / "pages" / "album_detail.html"      # live tree
+LIVE_ALBUM_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages/album.js"
+ALBUM_HTML = REPO_ROOT / "test_site" / "templates" / "pages" / "album_detail.html"      # live tree
 TEST_SITE_ALBUM_HTML = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 
 

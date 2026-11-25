@@ -350,7 +350,7 @@ class TestTheOrganizeSpinnerCanActuallyAppear:
         "rel",
         [
             "test_site/templates/components/modals/_organize_group.html",
-            "templates/components/modals/_organize_group.html",
+            "test_site/templates/components/modals/_organize_group.html",
         ],
     )
     def test_no_inline_important_on_the_loading_element(self, rel: str) -> None:
@@ -377,7 +377,7 @@ class TestTheOrganizeSpinnerCanActuallyAppear:
         "rel",
         [
             "test_site/templates/components/modals/_organize_group.html",
-            "templates/components/modals/_organize_group.html",
+            "test_site/templates/components/modals/_organize_group.html",
         ],
     )
     def test_the_undo_button_uses_a_real_bootstrap_size_class(self, rel: str) -> None:
@@ -450,4 +450,4 @@ class TestTheArtistTrackEditModal:
     def test_the_artist_page_does_not_load_the_live_controller(self) -> None:
         """The bug's cause: the name lived in a file this page never loads."""
         page = (TS_TEMPLATES / "Pages/artist_detail.html").read_text(encoding="utf-8")
-        assert "js/artist_detail.js" not in page
+        assert "js/pages/artist-detail-extras.js" not in page

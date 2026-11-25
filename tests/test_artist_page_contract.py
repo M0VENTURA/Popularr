@@ -471,7 +471,7 @@ def _module_body(path: Path) -> str:
         # (static/js/pages/*.js). The PAIR is what must stay equivalent, not the
         # relative path.
         (
-            "js/artist-releases.js",
+            "js/pages/artist-releases.js",
             "js/pages/artist-releases.js",
             # Each module publishes a different global, so the "was this file
             # gutted?" canary has to be per-module. A single shared canary would
@@ -481,7 +481,7 @@ def _module_body(path: Path) -> str:
         # busy-popup is loaded by BOTH trees' base.html, so a divergence would
         # make the queue/lookup progress popup behave differently depending
         # only on the cutover flag.
-        ("js/busy-popup.js", "js/ui/busy-popup.js", "global.busyPopup"),
+        ("js/ui/busy-popup.js", "js/ui/busy-popup.js", "global.busyPopup"),
     ],
 )
 def test_shared_module_copies_do_not_drift(
@@ -510,7 +510,7 @@ def test_release_module_is_not_jinja() -> None:
     the whole file, which is why nearly every artist-page function was dead.
     Ping the local copy too so this module cannot repeat that mistake.
     """
-    for rel in ("js/artist-releases.js", "js/artist-page.js"):
+    for rel in ("js/pages/artist-releases.js", "js/pages/artist-detail-extras.js"):
         for root in (LIVE_STATIC, REBUILT_STATIC):
             path = root / rel
             if not path.is_file():
@@ -546,7 +546,7 @@ def _release_module_paths() -> list[Path]:
     return [
         p
         for p in (
-            LIVE_STATIC / "js/artist-releases.js",
+            LIVE_STATIC / "js/pages/artist-releases.js",
             REBUILT_STATIC / "js/pages/artist-releases.js",
         )
         if p.is_file()

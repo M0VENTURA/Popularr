@@ -386,7 +386,7 @@ class TestThePreviewRunsInTheBackground:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
-        for rel in ("static/js/config.js", "test_site/static/js/pages/config.js"):
+        for rel in ("test_site/static/js/pages/config.js", "test_site/static/js/pages/config.js"):
             src = (root / rel).read_text(encoding="utf-8")
             block = src[src.index("async function runGenrePlaylistPreview"):]
             block = block[:block.index("async function runGenrePlaylistApply")]
@@ -468,7 +468,7 @@ class TestTheJobIsVisible:
 
         src = (
             Path(__file__).resolve().parents[1]
-            / "static/js/activity-feed.js"
+            / "test_site/static/js/services/activity-feed.js"
         ).read_text(encoding="utf-8")
         for scan_type in (svc.SCAN_TYPE, svc.PREVIEW_SCAN_TYPE):
             assert f"{scan_type}:" in src, (

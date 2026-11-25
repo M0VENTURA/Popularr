@@ -406,11 +406,11 @@ class TestResolveGenreMaxTracks:
 
 class TestGenreMaxTracksConfigContract:
     TEMPLATES = [
-        "templates/pages/config.html",
+        "test_site/templates/Pages/config.html",
         "test_site/templates/Pages/config.html",
     ]
     COLLECTORS = [
-        "static/js/config.js",
+        "test_site/static/js/pages/config.js",
         "test_site/static/js/pages/config.js",
     ]
 

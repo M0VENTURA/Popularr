@@ -584,7 +584,7 @@ class TestAlbumFindingRoutes:
 
 class TestAlbumJsWiring:
     TEST_SITE = "test_site/static/js/pages/album.js"
-    LIVE = "static/js/album_detail.js"
+    LIVE = "test_site/static/js/pages/album.js"
 
     def _read(self, rel: str) -> str:
         return (REPO_ROOT / rel).read_text(encoding="utf-8")
@@ -621,7 +621,7 @@ class TestAlbumJsWiring:
         assert "mb_total" in source
 
     @pytest.mark.parametrize("rel", [
-        "templates/pages/album_detail.html",
+        "test_site/templates/Pages/album_detail.html",
         "test_site/templates/Pages/album_detail.html",
     ])
     def test_tracklist_rows_carry_data_track_id(self, rel):

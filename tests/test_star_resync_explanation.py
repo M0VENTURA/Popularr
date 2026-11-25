@@ -56,7 +56,7 @@ class TestTheHistogramIsCarried:
 class TestTheFrontEndRendersThem:
     @pytest.mark.parametrize(
         "path",
-        ["test_site/static/js/pages/config.js", "static/js/config.js"],
+        ["test_site/static/js/pages/config.js", "test_site/static/js/pages/config.js"],
     )
     def test_both_collectors_render_the_histogram(self, path: str) -> None:
         import pathlib
@@ -67,7 +67,7 @@ class TestTheFrontEndRendersThem:
 
     @pytest.mark.parametrize(
         "path",
-        ["test_site/static/js/pages/config.js", "static/js/config.js"],
+        ["test_site/static/js/pages/config.js", "test_site/static/js/pages/config.js"],
     )
     def test_both_collectors_render_the_reason(self, path: str) -> None:
         import pathlib

@@ -182,8 +182,8 @@ class TestCallersDoNotClaimSuccessForADedupe:
     @pytest.mark.parametrize(
         "rel",
         [
-            "static/js/downloads.js",
-            "static/js/album_detail.js",
+            "test_site/static/js/pages/download-queue.js",
+            "test_site/static/js/pages/album.js",
             "test_site/static/js/pages/album.js",
         ],
     )
@@ -198,7 +198,7 @@ class TestCallersDoNotClaimSuccessForADedupe:
     def test_the_queue_form_does_not_alert_success_unconditionally(self):
         """``addToQueue`` must BRANCH, not alert the success string directly."""
         body = _function_body(
-            "static/js/downloads.js", "async function addToQueue", "function searchMusicBrainzForQueue"
+            "test_site/static/js/pages/download-queue.js", "async function addToQueue", "function searchMusicBrainzForQueue"
         )
 
         # The condition must be live code, not a literal that disables the branch.
@@ -240,24 +240,4 @@ class TestCallersDoNotClaimSuccessForADedupe:
         dedupe_arm = branch[: branch.index("return")]
         assert "Added to download queue" not in dedupe_arm, (
             "the dedupe arm must not use the success title"
-        )
-
-    def test_the_live_album_button_does_not_tick_a_dedupe(self):
-        """Same contract for the live tree's ``queueMissingTrack``."""
-        body = _function_body(
-            "static/js/album_detail.js", "window.queueMissingTrack = function", "window.ignoreMissingTrack"
-        )
-
-        assert re.search(r"if\s*\(\s*data\.already_queued\s*\)", body), (
-            "the live album page must branch explicitly on a dedupe"
-        )
-        dedupe_at = body.index("data.already_queued")
-        branch = body[dedupe_at:]
-
-        # The dedupe must return before the success tick is applied.
-        assert "return" in branch, "the dedupe branch must return"
-        dedupe_arm = branch[: branch.index("return")]
-        assert "btn-success" not in dedupe_arm, (
-            "the dedupe arm must not apply the green success class, or a dedupe "
-            "is displayed as a successful add"
         )

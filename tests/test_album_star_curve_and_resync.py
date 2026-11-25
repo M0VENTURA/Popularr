@@ -201,7 +201,7 @@ class TestConfigIsSurfacedOnTheConfigPage:
     """§4.1: every new configurable option must appear on the Config page."""
 
     PATHS = (
-        "templates/pages/config.html",
+        "test_site/templates/Pages/config.html",
         "test_site/templates/Pages/config.html",
     )
 
@@ -231,8 +231,8 @@ class TestConfigIsSurfacedOnTheConfigPage:
             assert field in html, f"{field} missing from {rel}"
 
     @pytest.mark.parametrize("rel", (
-        "static/js/config.js",
-        "static/js/pages/config.js",
+        "test_site/static/js/pages/config.js",
+        "test_site/static/js/pages/config.js",
         "test_site/static/js/pages/config.js",
     ))
     def test_config_js_sends_the_new_blocks(self, rel):

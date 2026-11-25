@@ -316,7 +316,7 @@ class TestTheWordingMatchesWhatTheImportActuallyDoes:
     SCAN_MODAL = REPO_ROOT / "test_site" / "static" / "js" / "ui" / "scan-modal.js"
     MODE_KEY = REPO_ROOT / "test_site" / "templates" / "components" / "_scan_mode_key.html"
     SCAN_SHEET = REPO_ROOT / "test_site" / "templates" / "components" / "_scan_modal.html"
-    LIVE_DASHBOARD = REPO_ROOT / "templates" / "pages" / "dashboard.html"
+    LIVE_DASHBOARD = REPO_ROOT / "test_site" / "templates" / "pages" / "dashboard.html"
 
     def test_the_import_really_does_trigger_a_remote_scan(self) -> None:
         """The premise. If this stops being true, every description below is wrong."""

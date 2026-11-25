@@ -38,7 +38,6 @@ PROBE = REPO_ROOT / "tests" / "js" / "scan-preflight-probe.js"
 # (module, template tree) pairs — the rebuilt tree is served first when the
 # cutover is on, so a change to one tree only is invisible to the other user.
 TREES = [
-    ("static/js/scan-preflight.js", "templates/pages"),
     ("test_site/static/js/services/scan-preflight.js", "test_site/templates/Pages"),
 ]
 
@@ -49,7 +48,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_probe(scenario: str, module: str = MODULES[1]) -> dict:
+def _run_probe(scenario: str, module: str = MODULES[0]) -> dict:
     # encoding is pinned: the dialog names scans with an em dash, and letting
     # the platform default decode node's stdout mangles it into mojibake, which
     # then fails an assertion the shipped code actually satisfies.
@@ -152,11 +151,11 @@ class TestModuleIsLoaded:
 
     @pytest.mark.parametrize("template,expected", [
         ("test_site/templates/Pages/dashboard.html", "js/services/scan-preflight.js"),
-        ("templates/pages/dashboard.html", "js/scan-preflight.js"),
+        ("test_site/templates/Pages/dashboard.html", "js/services/scan-preflight.js"),
         ("test_site/templates/Pages/artist_detail_v2.html", "js/services/scan-preflight.js"),
-        ("templates/pages/artist_detail_v2.html", "js/scan-preflight.js"),
+        ("test_site/templates/Pages/artist_detail_v2.html", "js/services/scan-preflight.js"),
         ("test_site/templates/Pages/artist_list.html", "js/services/scan-preflight.js"),
-        ("templates/pages/artist_list.html", "js/scan-preflight.js"),
+        ("test_site/templates/Pages/artist_list.html", "js/services/scan-preflight.js"),
     ])
     def test_page_loads_the_gate(self, template, expected):
         text = (REPO_ROOT / template).read_text(encoding="utf-8")
@@ -198,11 +197,11 @@ class TestArtistPageScansThroughTheSheet:
 
     ARTIST_TEMPLATES = [
         "test_site/templates/Pages/artist_detail_v2.html",
-        "templates/pages/artist_detail_v2.html",
+        "test_site/templates/Pages/artist_detail_v2.html",
     ]
     ARTIST_MODULES = [
         "test_site/static/js/pages/artist-detail-extras.js",
-        "static/js/artist-page.js",
+        "test_site/static/js/pages/artist-detail-extras.js",
     ]
 
     @pytest.mark.parametrize("template", ARTIST_TEMPLATES)
@@ -239,7 +238,7 @@ class TestArtistPageScansThroughTheSheet:
 
     @pytest.mark.parametrize("sheet_js", [
         "test_site/static/js/ui/scan-modal.js",
-        "static/js/ui/scan-modal.js",
+        "test_site/static/js/ui/scan-modal.js",
     ])
     def test_the_sheet_gates_both_dispatch_paths(self, sheet_js):
         """⭐ The inherited guard. The sheet must gate the FORM path as well as
@@ -299,7 +298,7 @@ class TestJSEntryPointsCallTheGate:
 
     def test_live_dashboard_start_functions_are_gated(self):
         """The LIVE tree is unchanged: its dashboard still owns the starters."""
-        js = "static/js/dashboard.js"
+        js = "test_site/static/js/pages/dashboard.js"
         code = _code_only((REPO_ROOT / js).read_text(encoding="utf-8"))
         for fn in ("runDashboardPopularityScan", "startNavidromeImport",
                    "startNavidromeServerScan", "startEssentiaScan"):
@@ -381,7 +380,7 @@ class TestJSEntryPointsCallTheGate:
 
     @pytest.mark.parametrize("js", [
         "test_site/static/js/pages/artists.js",
-        "static/js/artist_list.js",
+        "test_site/static/js/pages/artists.js",
     ])
     def test_letter_scan_is_gated(self, js):
         code = _code_only((REPO_ROOT / js).read_text(encoding="utf-8"))
@@ -391,7 +390,7 @@ class TestJSEntryPointsCallTheGate:
 
     @pytest.mark.parametrize("js", [
         "test_site/static/js/pages/artist-detail-extras.js",
-        "static/js/artist-page.js",
+        "test_site/static/js/pages/artist-detail-extras.js",
     ])
     def test_metadata_refresh_delegates_to_the_sheet(self, js):
         """⚠️ This replaces the direct-call assertion, because the PATH changed.
@@ -427,7 +426,7 @@ class TestLabels:
 
         module = _run_probe.__globals__  # noqa: F841  (keep import local/simple)
         # Read the labels the module ships and compare with the server's list.
-        src = (REPO_ROOT / MODULES[1]).read_text(encoding="utf-8")
+        src = (REPO_ROOT / MODULES[0]).read_text(encoding="utf-8")
         server = (
             REPO_ROOT / "services/scanning/pipelines/progress_service.py"
         ).read_text(encoding="utf-8")

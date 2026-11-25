@@ -43,7 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_TEMPLATES = REPO_ROOT / "test_site" / "templates"
-LIVE_TEMPLATES = REPO_ROOT / "templates"
+LIVE_TEMPLATES = REPO_ROOT / "test_site" / "templates"
 
 _JINJA_COMMENT = re.compile(r"\{#.*?#\}", re.S)
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)

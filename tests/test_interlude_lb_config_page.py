@@ -90,7 +90,7 @@ class TestInterludeLbConfigPageContract:
         # silently drop them from config.yaml.
         js_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "static", "js", "config.js",
+            "test_site", "static", "js", "pages", "config.js",
         )
         with open(js_path, encoding="utf-8") as f:
             js = f.read()

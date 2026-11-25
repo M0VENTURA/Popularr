@@ -34,9 +34,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
-LIVE_JS = ROOT / "static" / "js" / "downloads.js"
+LIVE_JS = ROOT / "test_site" / "static" / "js" / "pages/download-queue.js"
 TEST_JS = ROOT / "test_site" / "static" / "js" / "pages" / "download-queue.js"
-LIVE_PARTIAL = ROOT / "templates" / "components" / "search" / "_queue_status.html"
+LIVE_PARTIAL = ROOT / "test_site" / "templates" / "components" / "search" / "_queue_status.html"
 TEST_PARTIAL = (
     ROOT / "test_site" / "templates" / "components" / "search" / "_queue_status.html"
 )

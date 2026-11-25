@@ -37,7 +37,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 #: tree is the DEFAULT mode, so a wrong path in either is a user-visible 404.
 JS_ROOTS = (
     REPO_ROOT / "test_site" / "static" / "js",
-    REPO_ROOT / "static" / "js",
+    REPO_ROOT / "test_site" / "static" / "js",
 )
 
 #: api paths that are ALREADY wrong, with why. Each entry is checked, so fixing
@@ -59,9 +59,6 @@ _KNOWN_BROKEN: dict[str, str] = {
     "/api/playlist/download":
         "the served routes are /api/playlist-downloads and "
         "/api/playlist-downloads/create — same caveat as above",
-    "/api/genres/recommendations":
-        "the served routes are /api/genres/artist/<name> and "
-        "/api/artist/genre-recommendations",
 }
 
 # ⚠️ `/api/slskd/download-single` WAS PINNED HERE AND IS NOT ANY MORE. Its only
@@ -75,7 +72,7 @@ _KNOWN_BROKEN: dict[str, str] = {
 _IGNORED_FILES: dict[str, str] = {
     # A Jinja page template loaded via <script src>, so the browser discards
     # the whole file on the first `{%` — none of its calls ever run.
-    "static/js/artist_detail.js":
+    "test_site/static/js/pages/artist-detail-extras.js":
         "dead file: a Jinja template served as JavaScript, discarded on parse",
 }
 
@@ -228,7 +225,7 @@ class TestTheAuditItselfWorks:
     def test_it_checks_both_trees(self):
         files = {rel for rel, _line, _path in _called_paths()}
         assert any(f.startswith("test_site/") for f in files)
-        assert any(f.startswith("static/") for f in files)
+        assert any(f.startswith("test_site/static/") for f in files)
 
     def test_segment_matching_is_not_a_string_prefix(self):
         """`/api/a` must not be considered served by `/api/abcdef`."""
@@ -378,7 +375,7 @@ class TestTheReportedPath:
         """The live dashboard always used the right spelling — if it ever
         changes, the two trees would disagree and one of them would 404."""
         source = strip_js_comments(
-            (REPO_ROOT / "static/js/dashboard.js").read_text(encoding="utf-8")
+            (REPO_ROOT / "test_site/static/js/pages/dashboard.js").read_text(encoding="utf-8")
         )
         assert "/api/recent-scans" in source
 

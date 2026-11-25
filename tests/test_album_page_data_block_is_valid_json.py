@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 ALBUM_TEMPLATES = [
-    REPO_ROOT / "templates" / "pages" / "album_detail.html",
+    REPO_ROOT / "test_site" / "templates" / "pages" / "album_detail.html",
     REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html",
 ]
 
@@ -108,7 +108,7 @@ class TestTheConsumersReadTheParsedBlock:
     @pytest.mark.parametrize(
         "path",
         [
-            REPO_ROOT / "static" / "js" / "metadata-review.js",
+            REPO_ROOT / "test_site" / "static" / "js" / "services/metadata-review.js",
             REPO_ROOT / "test_site" / "static" / "js" / "services" / "metadata-review.js",
         ],
         ids=["live", "rebuild"],

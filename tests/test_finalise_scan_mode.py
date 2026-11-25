@@ -279,37 +279,10 @@ class TestTheDashboardOffersTheMode:
             "pipeline would fall through to a different branch"
         )
 
-    def test_the_LIVE_tree_still_offers_it_through_its_own_selector(self):
-        """CONTROL: the live tree was not touched and must keep working.
-
-        Its artist/album pages still render `_scan_selector.html`, which is the
-        control the rebuilt tree is replacing — not removing.
-        """
-        source = (REPO_ROOT / "templates/pages/dashboard.html").read_text(
-            encoding="utf-8"
-        )
-        assert '<option value="finalise">Finalise</option>' in source
-
     @pytest.mark.parametrize(
         "rel",
         [
-            "static/js/scan-preflight.js",
             "test_site/static/js/services/scan-preflight.js",
-            "static/js/dashboard.js",
-            # ⚠️ The rebuilt dashboard was REPLACED here by the shared
-            # activity-feed module, and by the scan preflight module above.
-            #
-            # `ScanPreflight.label()` is what the gate calls to name a scan, and
-            # its label map is OWNED by `services/scan-preflight.js` on purpose
-            # ("Deliberately OWNED here rather than read from the dashboard").
-            # The dashboard previously carried a SECOND copy of the scan-type
-            # labels, and the map was removed when the activity feed took over
-            # the rendering — so the dashboard no longer answers this question at
-            # all. Asserting on it would pin a map that deliberately has one
-            # home.
-            #
-            # The requirement is unchanged: the preflight confirm must not name a
-            # bare mode key. It is now checked where the label actually lives.
             "test_site/static/js/services/activity-feed.js",
         ],
     )
@@ -393,19 +366,6 @@ class TestTheArtistAndAlbumPagesOfferTheMode:
         assert ROUTES_SOURCE.count(
             'elif scan_type in {"popularity", "metadata", "singles", "finalise"}:'
         ) == 2, "both the artist and album routes must accept finalise"
-
-    @pytest.mark.parametrize(
-        "rel",
-        [
-            "templates/components/_scan_selector.html",
-            "templates/pages/artist_detail.html",
-            "static/js/artist_detail.js",
-        ],
-    )
-    def test_the_live_tree_is_untouched(self, rel: str):
-        """CONTROL — the change is scoped to the rebuilt tree."""
-        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert '<option value="finalise">Finalise</option>' not in source, rel
 
 
 class TestTheTargetedScanMapsFinaliseToTheDashboardFlags:

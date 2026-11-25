@@ -40,15 +40,15 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = [
-    REPO_ROOT / "templates" / "pages" / "album_detail.html",
+    REPO_ROOT / "test_site" / "templates" / "pages" / "album_detail.html",
     REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html",
 ]
 PARTIALS = [
-    REPO_ROOT / "templates" / "components" / "modals" / "_bulk_delete.html",
+    REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_bulk_delete.html",
     REPO_ROOT / "test_site" / "templates" / "components" / "modals" / "_bulk_delete.html",
 ]
 SCRIPTS = [
-    REPO_ROOT / "static" / "js" / "album_detail.js",
+    REPO_ROOT / "test_site" / "static" / "js" / "pages/album.js",
     REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js",
 ]
 

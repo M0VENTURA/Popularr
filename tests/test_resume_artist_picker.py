@@ -316,8 +316,6 @@ _TREES = [
     ("test_site/templates/Pages/dashboard.html", "js/services/scan-resume-picker.js",
      "test_site/static/js/services/scan-resume-picker.js",
      "test_site/static/js/ui/scan-modal.js"),
-    ("templates/pages/dashboard.html", "js/scan-resume-picker.js",
-     "static/js/scan-resume-picker.js", "static/js/dashboard.js"),
 ]
 
 

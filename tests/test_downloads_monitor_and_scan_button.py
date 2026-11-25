@@ -40,7 +40,7 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MONITOR_JS = REPO_ROOT / "test_site/static/js/pages/monitor.js"
 DASH_JS = REPO_ROOT / "test_site/static/js/pages/dashboard.js"
-LIVE_DASH_JS = REPO_ROOT / "static/js/pages/dashboard.js"
+LIVE_DASH_JS = REPO_ROOT / "test_site/static/js/pages/dashboard.js"
 
 
 @pytest.fixture()

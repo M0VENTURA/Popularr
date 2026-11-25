@@ -217,11 +217,11 @@ class TestConfigPageExposesTheWindow:
     """
 
     TEMPLATES = [
-        "templates/pages/config.html",
+        "test_site/templates/Pages/config.html",
         "test_site/templates/Pages/config.html",
     ]
     COLLECTORS = [
-        "static/js/config.js",
+        "test_site/static/js/pages/config.js",
         "test_site/static/js/pages/config.js",
     ]
 
@@ -300,7 +300,7 @@ class TestPurgeWindowCoherence:
         If N < M the purge silently deletes rows the display window still wants
         to show. The defaults must not fight each other.
         """
-        source = (REPO_ROOT / "templates" / "pages" / "config.html").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "test_site" / "templates" / "pages" / "config.html").read_text(encoding="utf-8")
         purge_block = source[source.index('id="upcoming_releases_purge_days"'):]
         purge_default = int(purge_block.split('placeholder="')[1].split('"')[0])
 

@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import structlog
@@ -336,6 +337,67 @@ def mark_local_tags_written_for_track_ids(track_ids: Iterable[Any]) -> int:
     except Exception as exc:
         logger.debug("Local tag write stamp failed", count=len(ids), error=str(exc))
         return 0
+
+
+def confirm_local_writes(track_ids: Iterable[Any]) -> int:
+    """Retire the dirty flag once the local files hold the stored values.
+
+    The dirty flag exists to stop a stale Navidrome import overwriting a newer
+    local correction. Once the album save's disk phase has written those values
+    into the audio files AND requested a rescan, the correction is no longer
+    "pending" — the next import verifies the scan first (see
+    ``_latest_local_write_epoch`` in the Navidrome pipeline), so the protection
+    has done its job and the album page must stop showing the pending badge.
+
+    ``local_tags_written_at`` is deliberately KEPT: it is what the import's
+    freshness check compares against the last successful scan.
+    """
+    ids = [str(value).strip() for value in track_ids or [] if str(value or "").strip()]
+    if not ids:
+        return 0
+    placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
+    params = {f"id{i}": value for i, value in enumerate(ids)}
+    try:
+        from sqlalchemy import text
+
+        with db_session() as session:
+            result = session.execute(
+                text(
+                    "UPDATE tracks SET metadata_dirty_for_navidrome = FALSE "
+                    f"WHERE CAST(id AS TEXT) IN ({placeholders})"
+                ),
+                params,
+            )
+            return int(result.rowcount or 0)
+    except Exception as exc:
+        logger.debug("Post-save dirty clear failed", count=len(ids), error=str(exc))
+        return 0
+
+
+def latest_local_tag_write_epoch() -> float | None:
+    """Newest local tag write across ALL rows (dirty or not)."""
+    try:
+        from sqlalchemy import text
+
+        with db_session() as session:
+            value = session.execute(
+                text("SELECT MAX(local_tags_written_at) FROM tracks")
+            ).scalar()
+    except Exception:
+        return None
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def mark_local_tags_written_for_path(file_path: str) -> int:

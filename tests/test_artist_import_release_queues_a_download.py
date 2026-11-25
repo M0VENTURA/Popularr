@@ -49,7 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PROBE = REPO_ROOT / "tests" / "js" / "import-missing-release-probe.js"
 
 MODULES = (
-    "static/js/artist-releases.js",
+    "test_site/static/js/pages/artist-releases.js",
     "test_site/static/js/pages/artist-releases.js",
 )
 

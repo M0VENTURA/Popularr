@@ -465,10 +465,6 @@ class TestFrontendsStillSendTheBatchShape:
         root = Path(__file__).resolve().parents[1]
         return (root / relative_path).read_text(encoding="utf-8")
 
-    def test_downloads_page_posts_files(self):
-        source = self._read("static/js/downloads_page.js")
-        assert "body: JSON.stringify({ files })" in source
-
     def test_rebuilt_slskd_service_posts_files(self):
         source = self._read("test_site/static/js/services/slskd.js")
         assert "{ files: files }" in source
@@ -489,10 +485,3 @@ class TestFrontendsStillSendTheBatchShape:
         )
         assert "queue_id: opts.queueId" in source
 
-    def test_both_point_at_the_download_endpoint(self):
-        for path in (
-            "static/js/downloads_page.js",
-            "test_site/static/js/services/slskd.js",
-        ):
-            source = self._read(path)
-            assert "/api/slskd/download" in source, path

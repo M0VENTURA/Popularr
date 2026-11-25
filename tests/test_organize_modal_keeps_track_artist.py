@@ -25,7 +25,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 
 TREES = {
-    "live": REPO / "static" / "js" / "downloads.js",
+    "live": REPO / "test_site" / "static" / "js" / "pages/download-queue.js",
     "rebuilt": REPO / "test_site" / "static" / "js" / "pages" / "download-queue.js",
 }
 
