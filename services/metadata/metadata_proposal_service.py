@@ -64,14 +64,21 @@ _ALBUM_FIELD_SPECS: tuple[tuple[str, str, str], ...] = (
     ("album_type", "Album Type", "album_type"),
     ("album_mbid", "MusicBrainz Release ID", "release_mbid"),
     ("album_release_group_mbid", "MusicBrainz Release Group ID", "release_group_mbid"),
-    ("artist_mbid", "MusicBrainz Artist ID", "album_artist_mbid"),
+    ("artist_mbid", "MusicBrainz Album Artist ID", "album_artist_mbid"),
     ("album_recordlabel", "Record Label", "recordlabel"),
     ("album_catalognumber", "Catalog Number", "catalognumber"),
     ("album_barcode", "Barcode", "barcode"),
     ("album_releasedate", "Release Date", "releasedate"),
     ("album_media", "Media Format", "media"),
     ("album_disctotal", "Disc Total", "disctotal"),
+    ("album_tracktotal", "Track Total", "tracktotal"),
     ("album_releasecountry", "Release Country", "releasecountry"),
+    ("album_releasestatus", "Release Status", "status"),
+    ("album_originaldate", "Original Date", "original_date"),
+    ("album_script", "Script", "script"),
+    ("album_asin", "ASIN", "asin"),
+    ("album_language", "Language", "language"),
+    ("album_discsubtitle", "Disc Subtitle", "discsubtitle"),
 )
 
 #: Per-track proposals: (DB column / field name, human label, MB track key).
@@ -81,6 +88,13 @@ _TRACK_FIELD_SPECS: tuple[tuple[str, str, str], ...] = (
     ("track_number", "Track #", "mb_track_number"),
     ("disc_number", "Disc #", "mb_disc_number"),
     ("mbid", "MusicBrainz Recording ID", "mb_recording_mbid"),
+    # The three per-track entity ids below follow the CHOSEN release. A lookup
+    # that corrected only the recording id left the artist/track/work ids from
+    # the previous release in place (the reported mixed-identity rows).
+    ("musicbrainz_releasetrackid", "MusicBrainz Release Track ID", "release_track_mbid"),
+    ("musicbrainz_artistid", "MusicBrainz Artist ID", "artist_mbid"),
+    ("musicbrainz_workid", "MusicBrainz Work ID", "work_mbid"),
+    ("isrc", "ISRC", "isrc"),
     ("writer", "Writer", "writer"),
     # ⭐ COMPOSER / LYRICIST were already stored, scanned and written to the
     # files (``payload_builder`` carries both, ``metadata_extractor`` fills
@@ -488,7 +502,21 @@ def _album_level_proposals(
         "album_releasedate": _current("releasedate"),
         "album_media": _current("media"),
         "album_disctotal": _current("disctotal"),
+        "album_tracktotal": _current("tracktotal"),
         "album_releasecountry": _current("releasecountry"),
+        "album_releasestatus": _current("releasestatus", "musicbrainz_albumstatus"),
+        "album_originaldate": _current("originaldate"),
+        "album_script": _current("script"),
+        "album_asin": _current("asin"),
+        "album_language": _current("language"),
+        "album_discsubtitle": _current("discsubtitle"),
+        # ⚠️ The album page's "Artist ID" box is the RELEASE's album artist.
+        # Reading ``musicbrainz_artistid`` proposed the value from a random
+        # track row, which is how an album save fanned the album-artist id onto
+        # every track (the Vitro/Various Artists corruption).
+        "artist_mbid": _current(
+            "musicbrainz_albumartistid", "musicbrainz_artistid"
+        ),
         "album_genres": _current("genres"),
     }
 
@@ -784,6 +812,14 @@ def _track_proposals(
             # (and mis-comparing) for every genre row.
             "musicbrainz_genres": _genres_text(local.get("musicbrainz_genres")),
             "artist": _as_text(local.get("artist")),
+            "musicbrainz_releasetrackid": _as_text(
+                local.get("musicbrainz_releasetrackid")
+            ),
+            "musicbrainz_artistid": _as_text(local.get("musicbrainz_artistid")),
+            "musicbrainz_workid": _as_text(
+                local.get("musicbrainz_workid") or local.get("work_mbid")
+            ),
+            "isrc": _as_text(local.get("isrc")),
         }
         proposed_map: dict[str, str] = {
             "title": _as_text(entry.get("mb_title")),
@@ -811,6 +847,13 @@ def _track_proposals(
                 else (_album_mb_genres or mb_track.get("musicbrainz_genres") or "")
             ),
             "artist": _as_text(mb_track.get("artist")),
+            "musicbrainz_releasetrackid": _as_text(
+                entry.get("release_track_mbid")
+                or mb_track.get("release_track_mbid")
+            ),
+            "musicbrainz_artistid": _as_text(mb_track.get("artist_mbid")),
+            "musicbrainz_workid": _as_text(mb_track.get("work_mbid")),
+            "isrc": _as_text(mb_track.get("isrc")),
         }
 
         for field, label, _key in _TRACK_FIELD_SPECS:

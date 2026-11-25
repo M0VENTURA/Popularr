@@ -2275,6 +2275,10 @@ def _flatten_release(release: dict[str, Any], release_id: str) -> dict[str, Any]
                 "mb_track_number": _as_int(position, 0),
                 "mb_title": track_title,
                 "mb_recording_mbid": str(recording.get("id") or ""),
+                # The TRACK id (this recording's position on the release) is a
+                # different entity from the recording id and must follow the
+                # chosen release.
+                "release_track_mbid": str(track.get("id") or ""),
                 "mb_duration": length,
                 "mb_genres": list(genres),
                 "isrc": _first_isrc(recording),
@@ -2396,6 +2400,29 @@ def _flatten_release(release: dict[str, Any], release_id: str) -> dict[str, Any]
         "release_group_mbid": str(release_group.get("id") or ""),
         "release_group_title": str(release_group.get("title") or ""),
         "release_title": str(release.get("title") or ""),
+        # Fields the album page exposes and a Lookup MBID should be able to
+        # propose. ``tracktotal`` is the RELEASE's track count (all media),
+        # ``script`` and ``asin`` come off the release itself.
+        "tracktotal": str(len(tracks)) if tracks else None,
+        "script": str(
+            (release.get("text-representation") or {}).get("script") or ""
+        ).strip(),
+        "asin": str(release.get("asin") or "").strip(),
+        "language": str(
+            (release.get("text-representation") or {}).get("language") or ""
+        ).strip(),
+        # A release-wide disc subtitle only exists when every medium shares it;
+        # different per-disc titles cannot be represented by one form field.
+        "discsubtitle": (
+            str(media[0].get("title") or "").strip()
+            if isinstance(media, list)
+            and len({
+                str(medium.get("title") or "").strip()
+                for medium in media
+                if isinstance(medium, dict)
+            }) == 1
+            else ""
+        ),
         "release_group_genres": _join_genre_names(release_group.get("genres")),
         "release_genres": _join_genre_names(release.get("genres")),
         "specific_release_title": str(release.get("title") or ""),

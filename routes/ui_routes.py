@@ -2772,6 +2772,11 @@ async def album_detail(album_path: str) -> Any:
             # correction had to be applicable — without them here the save
             # silently dropped the staged value.
             "composer", "lyricist",
+            # Per-track entity ids follow the CHOSEN release. Without them a
+            # Lookup MBID left the old release's artist/track/work ids behind
+            # (mixed identities inside one album).
+            "musicbrainz_releasetrackid", "musicbrainz_artistid",
+            "musicbrainz_workid", "isrc", "recording_mbid",
         })
 
         # A SAVED review clears the stashed recommendations for this album —
@@ -3170,6 +3175,12 @@ async def album_detail(album_path: str) -> Any:
                         if _svalue is None or str(_svalue).strip() == "":
                             continue
                         payload[_sfield] = _svalue
+                        # ``mbid`` is the LEGACY column; the id the scanner,
+                        # dedupe and file writer use is ``recording_mbid``.
+                        # Writing only the former left the canonical identity
+                        # stale after a reviewed correction.
+                        if _sfield == "mbid":
+                            payload["recording_mbid"] = _svalue
                     # A reviewed cover verdict renames the title to the library's
                     # "Title (Original Artist Cover)" convention — mirroring the
                     # compare/apply path — unless the title was staged explicitly.
