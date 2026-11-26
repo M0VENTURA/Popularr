@@ -110,6 +110,38 @@ _CACHE_FLUSH_SECONDS = max(
 _CACHE_IO_LOCK = threading.Lock()
 _INIT_LOCK = threading.RLock()
 
+#: The parsed cache file, read once per process.
+#:
+#: ``None`` = not read yet. Two singleton factories (``_get_service`` and
+#: ``get_shared_mb_service``) each construct a ``MusicBrainzService``, and both
+#: ended up in the same process; reading the file per instance doubled the
+#: startup cost and left two independent maps racing to overwrite each other.
+_CACHE_FILE_ENTRIES: dict[str, Any] | None = None
+
+
+def _load_cache_file_once() -> dict[str, Any]:
+    """The persisted MBID entries, parsed once per process (may be empty)."""
+    global _CACHE_FILE_ENTRIES
+    with _INIT_LOCK:
+        if _CACHE_FILE_ENTRIES is not None:
+            return _CACHE_FILE_ENTRIES
+        entries: dict[str, Any] = {}
+        try:
+            if os.path.exists(CACHE_FILE):
+                with _CACHE_IO_LOCK:
+                    with open(CACHE_FILE, "r", encoding="utf-8") as handle:
+                        payload = json.load(handle)
+                loaded = payload.get("entries") if isinstance(payload, dict) else None
+                if isinstance(loaded, dict):
+                    entries = loaded
+        except Exception as exc:
+            # A corrupt or truncated file is ignored outright: this cache is an
+            # optimisation, never a source of truth.
+            Logger.debug("MBID cache could not be read — starting empty", error=str(exc))
+            entries = {}
+        _CACHE_FILE_ENTRIES = entries
+        return entries
+
 _MB_BATCH_CHUNK = 20
 _MB_BATCH_SIMILARITY_FLOOR = 0.6
 _MBID_CACHE_SIMILARITY_FLOOR = 0.6
@@ -774,10 +806,87 @@ class MusicBrainzService:
         self._cache_last_save = time.monotonic()
         self._mbid_cache: "OrderedDict[str, Any]" = OrderedDict()
         self._missing_release_group_warned = False
+        # ⚠️ ONLY a service that owns its own client may use the ON-DISK cache.
+        #
+        # The file is production state. A service built WITH an injected client
+        # is a test double (every integration test does this), and restoring
+        # production entries into it made lookups answer from unrelated real
+        # world data — three tests in ``test_album_title_and_version_matching``
+        # and four in ``test_known_mbid_skips_recording_search`` failed exactly
+        # that way. An injected client therefore starts with an empty cache.
+        self._cache_loaded = http_client is not None
         atexit.register(self.flush_cache)
 
     def flush_cache(self) -> None:
         self._maybe_flush_cache(force=True)
+
+    def _ensure_cache_loaded(self) -> None:
+        """Restore the persisted MBID cache the first time it is consulted.
+
+        ⚠️ LAZY, NOT IN ``__init__``. The restore is what makes the 30-day
+        positive TTL real across restarts (see ``_load_cache``), but doing it in
+        the constructor charged every lookup-less instance a file read. It is
+        deferred to the first lookup and skipped entirely for a service with an
+        injected client (see ``__init__``).
+        """
+        if self._cache_loaded:
+            return
+        with self._mem_lock:
+            if self._cache_loaded:
+                return
+            self._cache_loaded = True
+        self._load_cache()
+
+    def _load_cache(self) -> None:
+        """Restore the persisted recording-MBID cache from disk.
+
+        ⚠️ THIS IS THE OTHER HALF OF ``_maybe_flush_cache`` AND IT WAS MISSING.
+
+        The cache was written to ``mbid_cache.json`` every 30 seconds and on
+        exit, with a 30-day positive TTL and a 7-day negative TTL — and nothing
+        ever read the file back. ``self._mbid_cache`` started empty in every new
+        process, so after a restart EVERY track re-paid a rate-limited
+        MusicBrainz recording search, which is the single most expensive call in
+        the scan (1 req/s). A full rescan of a 5000-track library therefore
+        spent ~80 minutes in the search that the file already contained.
+
+        Entries whose timestamps are already past their TTL are dropped on load
+        rather than kept and re-checked later, so the map cannot grow across
+        restarts. A corrupt or truncated file is ignored outright — the cache is
+        an optimisation, never a source of truth.
+
+        The parsed file is read ONCE per process and shared: ``_get_service()``
+        and ``get_shared_mb_service()`` each build an instance, and reading the
+        file twice would double the startup cost while both maps then raced to
+        overwrite each other's contents on the next flush.
+        """
+        entries = _load_cache_file_once()
+        if not entries:
+            return
+
+        now = time.time()
+        loaded = 0
+        with self._mem_lock:
+            for key, value in entries.items():
+                if not isinstance(value, (list, tuple)) or len(value) < 2:
+                    continue
+                try:
+                    mbid = str(value[0] or "")
+                    score = float(value[1] or 0)
+                    cached_at = float(value[2]) if len(value) >= 3 else now
+                except (TypeError, ValueError):
+                    continue
+                # Apply the same TTLs the live lookup uses, so an expired entry
+                # does not sit in memory looking fresh.
+                ttl = _MBID_CACHE_TTL_SECONDS if mbid else _MBID_NEGATIVE_TTL_SECONDS
+                if now - cached_at >= ttl:
+                    continue
+                self._mbid_cache[key] = [mbid, score, cached_at]
+                loaded += 1
+                if len(self._mbid_cache) > _MBID_CACHE_MAX_SIZE:
+                    self._mbid_cache.popitem(last=False)
+        if loaded:
+            Logger.debug("MBID cache restored from disk", entries=loaded, path=CACHE_FILE)
 
     @staticmethod
     def _cache_key(
@@ -830,6 +939,8 @@ class MusicBrainzService:
         }
         if not self.enabled or not title or not artist:
             return "", 0.0
+        # First real use: bring the persisted cache in (see the method note).
+        self._ensure_cache_loaded()
 
         cache_key = self._cache_key(
             title,
@@ -1871,8 +1982,33 @@ class MusicBrainzService:
                 pass
         try:
             with _CACHE_IO_LOCK:
-                with open(CACHE_FILE, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle)
+                # ⚠️ MERGE WITH WHAT IS ALREADY ON DISK, then write atomically.
+                #
+                # Two ``MusicBrainzService`` instances share this file (see
+                # ``_load_cache_file_once``). Writing only ``self._mbid_cache``
+                # meant the last flush silently DELETED every entry the other
+                # instance had resolved — so the file never accumulated, and
+                # restoring it would have restored a fraction of the work.
+                # Merging keeps both maps' newest values.
+                existing: dict[str, Any] = {}
+                try:
+                    if os.path.exists(CACHE_FILE):
+                        with open(CACHE_FILE, "r", encoding="utf-8") as handle:
+                            prior = json.load(handle)
+                        prior_entries = (
+                            prior.get("entries") if isinstance(prior, dict) else None
+                        )
+                        if isinstance(prior_entries, dict):
+                            existing = prior_entries
+                except Exception:
+                    existing = {}
+                merged = {**existing, **payload["entries"]}
+                # A truncated write must not destroy a good cache: write beside
+                # the target and rename over it.
+                tmp_path = f"{CACHE_FILE}.tmp"
+                with open(tmp_path, "w", encoding="utf-8") as handle:
+                    json.dump({"entries": merged}, handle)
+                os.replace(tmp_path, CACHE_FILE)
         except Exception:
             pass
 

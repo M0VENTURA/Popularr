@@ -578,6 +578,16 @@ def _artist_dominant_genres(
 ) -> list[str]:
     if not artist:
         return []
+    # ⚠️ MEMOISED PER PROCESS. This is an ARTIST-level query (LIMIT 500 over the
+    # artist's catalogue) but it was issued once per genre-less TRACK, with no
+    # cache: an album of 12 tracks lacking musical genres ran the same scan 12
+    # times, and a VA compilation re-ran it for every performer. The answer
+    # cannot differ between sibling tracks, and nothing in a scan invalidates it.
+    _key = (str(artist).casefold().strip(), int(max_genres))
+    _cached = _bounded_cache_get(_ARTIST_DOMINANT_GENRES_CACHE, _key)
+    if _cached is not _MISSING:
+        return list(_cached)
+
     try:
         from db.engine import db_session as _db_session
         from sqlalchemy import text as _text
@@ -606,13 +616,14 @@ def _artist_dominant_genres(
                 {"artist": artist},
             )
             rows = [dict(r._mapping) for r in result.fetchall() or []]
-
-        if not rows:
-            return []
-
-        return _album_top_genres(rows, max_genres=max_genres)
     except Exception:
+        # Do NOT cache a failure: a transient DB error must not pin "no genres"
+        # for the life of the process.
         return []
+
+    genres = _album_top_genres(rows, max_genres=max_genres) if rows else []
+    _bounded_cache_put(_ARTIST_DOMINANT_GENRES_CACHE, _key, list(genres))
+    return list(genres)
 
 
 def _build_effective_track(
@@ -622,6 +633,46 @@ def _build_effective_track(
     effective_track = dict(track)
     effective_track.update(update_payload)
     return effective_track
+
+
+def _album_listener_distributions(
+    *,
+    album_context: dict[str, Any],
+    album_tracks: list[dict[str, Any]] | None = None,
+    prefetched_popularity: dict[str, dict[str, Any]] | None,
+) -> tuple[list[float] | None, list[float] | None, list[tuple[int, int]]]:
+    """Album-scoped listener distributions, computed ONCE per album.
+
+    ⚠️ WHY THE MEMO. The computation is a pure function of the album's tracks
+    and its prefetched popularity — identical for every sibling track — but it
+    was called from ``_score_track_popularity``, again from
+    ``_reconstruct_raw_blend`` (which re-enters the scorer on the CACHED path
+    whenever ``raw_score`` is missing), and a third time from the singles block.
+    That is O(tracks²) title normalisation per album, on every scan, for an
+    answer that cannot differ between tracks.
+
+    The memo is keyed on the identity of the two inputs INSIDE ``album_context``
+    — the ctx dict is built once per album and handed to every track job, so it
+    is the natural cache slot. Keying on ``id()`` is safe here because the
+    entries live only as long as that dict does; nothing is retained globally.
+    """
+    cache = album_context.get("_listener_dist_cache") if isinstance(album_context, dict) else None
+    if not isinstance(cache, dict):
+        cache = {}
+    key = (id(album_tracks), id(prefetched_popularity))
+    if key in cache:
+        return cache[key]
+    if len(cache) > 8:
+        # One entry per album in practice; a runaway ctx must not grow forever.
+        cache.clear()
+    cache[key] = _build_album_listener_distributions(
+        album_context=album_context,
+        album_tracks=album_tracks,
+        prefetched_popularity=prefetched_popularity,
+    )
+    if isinstance(album_context, dict):
+        album_context["_listener_dist_cache"] = cache
+    return cache[key]
 
 
 def _build_album_listener_distributions(
@@ -714,7 +765,18 @@ def _album_edition_annotation(
     album_context: dict[str, Any] | None,
     album_tracks: list[dict[str, Any]] | None = None,
 ) -> str | None:
+    """The album's edition annotation, computed ONCE per album.
+
+    ⚠️ WHY THE MEMO. This concatenates EVERY track title of the album and runs
+    ``album_version_annotation`` over the result — an album-shaped answer — but
+    it was called once per TRACK (from ``process_track``) to feed a MusicBrainz
+    lookup that is then usually skipped on the cached path. On a 12-track album
+    that is 12 identical passes over the same 12 titles.
+    """
     context = album_context if isinstance(album_context, dict) else {}
+    if "_edition_annotation" in context:
+        return context["_edition_annotation"]
+
     album_name = _as_str(context.get("album"))
 
     titles: list[str] = []
@@ -725,10 +787,13 @@ def _album_edition_annotation(
 
     try:
         from helpers.normalization_service import album_version_annotation
-        return album_version_annotation(album_name, titles)
+        result = album_version_annotation(album_name, titles)
     except Exception as exc:
         logger.debug("Album version annotation lookup failed", error=str(exc))
-        return None
+        result = None
+    if isinstance(album_context, dict):
+        context["_edition_annotation"] = result
+    return result
 
 
 _GENRE_SOURCE_COLUMNS = (
@@ -788,6 +853,12 @@ _MB_RECORDING_GENRE_CACHE: dict[str, tuple[list, list]] = {}
 #: (a 20-track album was 20 Discogs searches and hit the rate limit).
 _DISCOGS_GENRE_CACHE: dict[tuple[str, str], list] = {}
 _LB_RECORDING_TAGS_CACHE: dict[str, list] = {}
+#: ``_artist_dominant_genres`` results, keyed ``(artist.casefold(), max_genres)``.
+#:
+#: ARTIST-level, but it was queried once per genre-less TRACK with no cache — the
+#: same LIMIT-500 catalogue scan repeated for every sibling and every performer on
+#: a compilation. Shares ``_GENRE_CACHE_LOCK`` and ``_GENRE_CACHE_MAX``.
+_ARTIST_DOMINANT_GENRES_CACHE: dict[tuple[str, int], list] = {}
 _GENRE_CACHE_MAX = 4000
 
 # ⚠️ The scan runs up to 8 ``process_track`` workers at once. Unguarded, the
@@ -801,19 +872,58 @@ _MISSING = object()
 
 
 def _bounded_cache_get(cache: dict[Any, Any], key: Any) -> Any:
-    """Cached value for *key*, or ``_MISSING``."""
+    """Cached value for *key*, or ``_MISSING``. Promotes the entry (LRU).
+
+    The promotion matters as much as the value: without it the eviction in
+    ``_bounded_cache_put`` could only ever see insertion order, so the hottest
+    keys were discarded first. See that function's note.
+    """
     with _GENRE_CACHE_LOCK:
-        return cache.get(key, _MISSING)
+        if key not in cache:
+            return _MISSING
+        value = cache.pop(key)
+        cache[key] = value
+        return value
 
 
 def _bounded_cache_put(cache: dict[Any, Any], key: Any, value: Any) -> None:
+    """Store *key* → *value*, evicting the LEAST-RECENTLY-USED entry.
+
+    ⚠️ ``next(iter(cache))`` WAS FIFO, NOT LRU — and that is what turned these
+    caches into miss generators on a real library.
+
+    The scan touches release groups and recordings in album order, so the
+    entries inserted FIRST are the ones fetched again EARLIEST in the next pass.
+    Evicting by insertion order therefore guaranteed the hottest keys were gone
+    before they could be reused: ``_MB_RECORDING_GENRE_CACHE`` is keyed per
+    RECORDING, so any library above ``_GENRE_CACHE_MAX`` recordings thrashed and
+    every miss cost a rate-limited MusicBrainz ``get_recording`` (1 req/s).
+
+    ``dict`` preserves insertion order and ``pop``/re-assign moves a key to the
+    end, so a touch on read promotes it. ``_bounded_cache_get`` cannot do that
+    under a plain ``dict`` without a write, so promotion happens here and in the
+    read helpers that expect it.
+    """
     with _GENRE_CACHE_LOCK:
+        if key in cache:
+            # Promote: drop and re-insert so this key is the newest.
+            cache.pop(key, None)
         while len(cache) >= _GENRE_CACHE_MAX:
             try:
                 cache.pop(next(iter(cache)))
             except (StopIteration, KeyError):
                 break
         cache[key] = value
+
+
+def _bounded_cache_touch(cache: dict[Any, Any], key: Any) -> Any:
+    """Read *key*, promoting it to most-recently-used. ``_MISSING`` if absent."""
+    with _GENRE_CACHE_LOCK:
+        if key not in cache:
+            return _MISSING
+        value = cache.pop(key)
+        cache[key] = value
+        return value
 
 
 #: "feat." credits — WORD-bounded. A plain ``"feat" in text`` also matched
@@ -1056,7 +1166,7 @@ def _score_track_popularity(
         cfg_single_boost, cfg_floor, cfg_live_penalty, cfg_instrumental_penalty = 1.15, 5.0, 0.5, 0.8
 
     _album_lf_listeners, _album_lb_fresh, _album_lf_lb_pairs = (
-        _build_album_listener_distributions(
+        _album_listener_distributions(
             album_context=album_context,
             album_tracks=album_tracks,
             prefetched_popularity=prefetched_popularity,
@@ -3016,7 +3126,7 @@ def process_track(
             )
             album_track_count = len(album_context.get("tracks") or []) or 1
 
-            _sd_album_lf, _sd_album_lb, _ = _build_album_listener_distributions(
+            _sd_album_lf, _sd_album_lb, _ = _album_listener_distributions(
                 album_context=album_context,
                 album_tracks=album_tracks,
                 prefetched_popularity=prefetched_popularity,

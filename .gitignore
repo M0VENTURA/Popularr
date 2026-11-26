@@ -20,3 +20,6 @@ htmlcov/
 # Env / secrets
 .env
 config.yaml
+
+# Runtime MusicBrainz recording-MBID cache (per-deployment state, not source)
+mbid_cache.json

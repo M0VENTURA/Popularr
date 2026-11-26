@@ -3217,6 +3217,13 @@ def get_features_config() -> dict[str, Any]:
         and mature-track settings.  Flags in ``_DEFAULT_FEATURE_FLAGS`` are
         present even when absent from the config file, so a fresh install
         gets the intended behaviour with no config edit.
+
+    ⚠️ DELIBERATELY NOT CACHED. ``get_feature`` is called from the scan hot path
+    (~10 per album in the skip gate, once per track via ``should_freeze_track``),
+    which looks like a caching win — but the merged dict is ~60 keys and copying
+    it measures at 0.37 µs either way (3.7 ms across a 1000-album scan). A cache
+    here would buy nothing measurable while adding a second global that must be
+    invalidated in lockstep with ``_CONFIG_CACHE``.
     """
     cfg = get_config()
     features = cfg.get("features", {})
