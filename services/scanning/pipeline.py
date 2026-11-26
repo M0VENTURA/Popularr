@@ -539,12 +539,35 @@ def run_full_library_scan(force: bool = False, restart: bool = False):
         try:
             from services.popularity.scan_scope import resume_global_playlists
 
-            resume_global_playlists()
             if _completed:
+                # ⚠️ THE ISRC SYNC WAS MISSING ON THIS PATH ENTIRELY.
+                #
+                # Every artist's ``finalise_scan`` skips ``_sync_isrc_popularity``
+                # while playlists are deferred (see the guard in
+                # ``finalise_scan``), and the dashboard "All" scan calls it here
+                # from ``popularity_pipeline``. This older full-library entry
+                # point deferred the same way but never called the sync, so ISRC
+                # popularities were simply never propagated on a scan started
+                # from here. Run it BEFORE clearing the deferral, for the same
+                # straggler reason as the other path.
                 from services.popularity.stages.finalise_stage import (
                     _run_global_playlist_rebuild,
+                    _sync_isrc_popularity,
+                    invalidate_genre_playlist_rows,
                 )
 
+                try:
+                    _isrc_updated, _isrc_affected = _sync_isrc_popularity()
+                    if _isrc_updated:
+                        invalidate_genre_playlist_rows()
+                        logger.info(
+                            "[SCAN_PIPELINE] ISRC sync: %s track(s) updated", _isrc_updated
+                        )
+                except Exception as _isrc_exc:
+                    logger.debug("[SCAN_PIPELINE] End-of-scan ISRC sync failed: %s", _isrc_exc)
+
+            resume_global_playlists()
+            if _completed:
                 _run_global_playlist_rebuild({}, force=True)
         except Exception as exc:
             logger.debug(

@@ -209,3 +209,63 @@ def singles_detection_is_fresh(track: dict[str, Any], *, now: datetime | None = 
     if not track.get("is_single"):
         ttl_hours *= _SINGLE_NEGATIVE_TTL_MULTIPLIER
     return (ref - ts).total_seconds() < ttl_hours * 3600
+
+
+#: A confirmed COVER keeps its verdict; only an unresolved one is re-checked.
+#:
+#: The deep album pass deliberately re-verifies a positive verdict (a stale
+#: "(X Cover)" attribution must be able to heal), so this gate must never
+#: suppress it. ``cover_detector_impl`` uses the same 90-day window for its own
+#: ``_checked_fresh``; sharing the number keeps the two from disagreeing.
+COVER_RECHECK_DAYS = 90
+
+
+def cover_verdict_is_fresh(track: dict[str, Any], *, now: datetime | None = None) -> bool:
+    """True when this track's cover verdict is settled and need not be re-derived.
+
+    ⚠️ THE MISSING HALF OF THE SINGLES FIX. ``singles_detection_is_fresh`` stops
+    a completed "not a single" from being re-detected on every scan; cover
+    detection had no equivalent, so every non-forced scan re-ran
+    ``detect_cover_song`` for EVERY track. For a track carrying a ``work_mbid``
+    that path builds a fresh ``CoverDetector`` and fans out work-relations,
+    recording-relations and Last.fm listener lookups — up to ~50 requests each,
+    with all of the detector's per-instance caches thrown away every time.
+
+    ``cover_last_checked`` is already stamped by the deep pass on NEGATIVE
+    results too (``cover_detector_impl._persist_checked``), which is exactly what
+    makes "this is not a cover" cacheable.
+
+    ⚠️ WHAT THIS MUST NOT SUPPRESS — the caller still needs the block to run for:
+
+    * a POSITIVE verdict, because the deep pass re-verifies positives by design
+      and freezing one would lock in a stale "(X Cover)" attribution;
+    * a title that still carries cover WORDING, since stripping that suffix is
+      the other job the block does and it is not a detection at all;
+    * a manual override, which is handled below as always-settled.
+    """
+    if track.get("cover_manual_override"):
+        # A human decided; never spend a request to second-guess it.
+        return True
+    if bool(track.get("is_cover")) or bool(track.get("original_cover_artist")):
+        # Positives are re-verified by the deep pass on purpose.
+        return False
+
+    raw = track.get("cover_last_checked")
+    if not raw:
+        return False
+
+    ts = raw
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(ts, datetime):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    ref = now if now is not None else datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return (ref - ts).days < COVER_RECHECK_DAYS

@@ -276,9 +276,15 @@ _LIVE_TITLE_RE = re.compile(
 )
 
 #: Process-level memo so a VA compilation's many tracks do not each open a DB
-#: session to upsert the same performer. Bounded by the number of distinct
-#: track artists in one process run (the scan's worker pool).
+#: session to upsert the same performer.
+#:
+#: ⚠️ CAPPED. It was an unbounded ``set`` that grew by distinct track artist for
+#: the life of the process, with nothing clearing it between scans. A plain set
+#: cannot evict by recency, but a size cap is enough here: dropping an entry only
+#: costs one redundant upsert, and that statement is idempotent
+#: (``ON CONFLICT (name) DO UPDATE``).
 _TRACK_ARTIST_REGISTRY_CACHE: set[str] = set()
+_TRACK_ARTIST_REGISTRY_MAX = 20000
 _TRACK_ARTIST_REGISTRY_LOCK = threading.Lock()
 
 
@@ -320,6 +326,13 @@ def _ensure_track_artist_registered(name: str, mbid: str | None = None) -> None:
             )
             session.commit()
         with _TRACK_ARTIST_REGISTRY_LOCK:
+            if len(_TRACK_ARTIST_REGISTRY_CACHE) >= _TRACK_ARTIST_REGISTRY_MAX:
+                # Drop half to amortise the sweep; a dropped name just means one
+                # more idempotent upsert next time it is seen.
+                for _stale in list(_TRACK_ARTIST_REGISTRY_CACHE)[
+                    : _TRACK_ARTIST_REGISTRY_MAX // 2
+                ]:
+                    _TRACK_ARTIST_REGISTRY_CACHE.discard(_stale)
             _TRACK_ARTIST_REGISTRY_CACHE.add(key)
     except Exception as exc:
         logger.debug(
@@ -3452,8 +3465,48 @@ def process_track(
         or _as_str(track.get("is_cover_reason"))
         or _as_str(track.get("original_cover_artist"))
     )
-    if not popularity_only and not singles_detection_only and not _skip_covers and not (
-        _fill_only_covers and _has_cover_data
+    # ⚠️ A SETTLED VERDICT IS NOT RE-DERIVED ON EVERY SCAN.
+    #
+    # Reported as the missing half of the singles fix: ``singles_detection_is_fresh``
+    # stops a completed "not a single" from being re-detected, but cover
+    # detection had no equivalent. So every non-forced scan re-ran
+    # ``detect_cover_song`` for EVERY track — and for a track carrying a
+    # ``work_mbid`` that path constructs a fresh ``CoverDetector`` and fans out
+    # work-rels, recording-rels and Last.fm listener lookups (up to ~50 requests)
+    # per track, discarding the detector's per-instance caches each time.
+    #
+    # ``cover_last_checked`` already records completion — the deep pass stamps it
+    # on NEGATIVE results too (``_persist_checked``), which is what makes a
+    # "not a cover" cacheable. Positives are deliberately NOT skipped here: the
+    # deep pass re-verifies them by design, and suppressing that would freeze a
+    # stale verdict.
+    _cover_settled = False
+    if not _force_covers:
+        try:
+            # Imported locally, exactly as the singles freshness check is.
+            from services.popularity.popularity_cache_policy import (
+                cover_verdict_is_fresh,
+            )
+
+            _cover_settled = cover_verdict_is_fresh(track)
+        except Exception:
+            # A broken policy import must not stop cover detection from running.
+            _cover_settled = False
+        # ⚠️ THE BLOCK HAS TWO JOBS, and only one of them is detection.
+        #
+        # It also STRIPS cover wording from the title
+        # (``title_had_cover_wording``), and that is not a detection at all —
+        # skipping it leaves "(Artist Cover)" on a track the deep pass cannot
+        # re-title. So a track whose title still carries that wording always
+        # runs the block, whatever the freshness gate says.
+        if track.get("title_had_cover_wording"):
+            _cover_settled = False
+    if (
+        not popularity_only
+        and not singles_detection_only
+        and not _skip_covers
+        and not _cover_settled
+        and not (_fill_only_covers and _has_cover_data)
     ):
         try:
             effective_track = _build_effective_track(track, update_payload)
@@ -3611,6 +3664,28 @@ def process_track(
                         title=_clean_title,
                         detector_verdict=reason,
                     )
+                # ── STAMP COMPLETION ON A SETTLED NEGATIVE ──────────────────
+                #
+                # ``cover_verdict_is_fresh`` can only skip the quick check if
+                # something RECORDS that the check ran. The deep pass stamps
+                # negatives via ``_persist_checked``, but the quick path never
+                # did — so on a library whose deep pass has not covered a track,
+                # nothing was ever cacheable.
+                #
+                # ⚠️ NOT when the cover WORDING was stripped: that branch says the
+                # title needs the deep pass to decide, so marking it settled
+                # would freeze an unverified title. And not on a positive
+                # verdict — positives are re-verified by design (see
+                # ``cover_verdict_is_fresh``).
+                if (
+                    not is_cover
+                    and not _cover_wording_removed
+                    and not _cover_manual_override
+                    and not track.get("cover_last_checked")
+                ):
+                    from datetime import datetime as _dt, timezone as _tz
+
+                    update_payload["cover_last_checked"] = _dt.now(_tz.utc)
         except Exception as e:
             logger.debug("Cover detection failed", track_id=track_id, error=str(e))
 

@@ -907,7 +907,15 @@ def _run_full_scan_as_artist_pipeline(
         try:
             from services.popularity.scan_scope import resume_global_playlists
 
-            resume_global_playlists()
+            # ⚠️ THE ISRC SYNC RUNS BEFORE THE DEFERRAL IS CLEARED.
+            #
+            # It used to run AFTER ``resume_global_playlists()``, which meant the
+            # deferral flag was already False while the sync was in flight. An
+            # abandoned artist worker — the exact hazard ``scan_scope`` exists to
+            # handle — could then reach its own ``finalise_scan``, find deferred
+            # False, and run the same whole-library ISRC self-join a second time,
+            # concurrently. Keeping the flag set until the sync has finished
+            # makes the straggler skip it, which is what the deferral is for.
             if status == "complete":
                 from services.popularity.stages.finalise_stage import (
                     _run_global_playlist_rebuild,
@@ -925,6 +933,11 @@ def _run_full_scan_as_artist_pipeline(
                 except Exception as _isrc_exc:
                     logger.debug("[FULL_SCAN] End-of-scan ISRC sync failed", error=str(_isrc_exc))
 
+            # Cleared only now, immediately before the rebuild needs it: the
+            # rebuild must NOT be deferred, and by this point the per-artist
+            # finalise passes have all finished.
+            resume_global_playlists()
+            if status == "complete":
                 _run_global_playlist_rebuild({}, force=True)
         except Exception as exc:
             logger.debug(

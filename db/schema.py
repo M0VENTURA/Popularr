@@ -659,6 +659,11 @@ INDEXES_TO_ENSURE: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_tracks_artist_norm ON tracks (LOWER(COALESCE(NULLIF(album_artist, ''), artist)))",
     "CREATE INDEX IF NOT EXISTS idx_tracks_album_norm ON tracks (LOWER(COALESCE(album, '')))",
     "CREATE INDEX IF NOT EXISTS idx_tracks_album_artist_trim ON tracks (LOWER(TRIM(COALESCE(NULLIF(album_artist, ''), artist))))",
+    # The OTHER arm of `_sync_essential_playlist`'s four-way OR. Without this the
+    # planner cannot bitmap-OR all four arms and falls back to a sequential scan
+    # of `tracks` — once per artist, ~1000 times on a large library. See
+    # migrations/versions/038_tracks_artist_trim_idx.py.
+    "CREATE INDEX IF NOT EXISTS idx_tracks_artist_trim ON tracks (LOWER(TRIM(artist)))",
     "CREATE EXTENSION IF NOT EXISTS pg_trgm",
     "CREATE INDEX IF NOT EXISTS idx_tracks_title_trgm ON tracks USING gin (lower(coalesce(title, '')) gin_trgm_ops)",
     "CREATE INDEX IF NOT EXISTS idx_tracks_artist_trgm ON tracks USING gin (lower(coalesce(artist, '')) gin_trgm_ops)",

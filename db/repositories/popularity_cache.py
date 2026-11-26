@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db.engine import db_session
 
@@ -48,6 +48,18 @@ def get_cached_popularity_for_titles(
     cached ``Herzblut (feat. Melissa Bonny)`` — are both fetched; callers
     re-key by their NORMALISED title, which collapses such variants onto
     one entry.  Returns a dict keyed by lowercased title.
+
+    ⚠️ ``LIMIT 500`` IS A CAP ON THE ARTIST-WIDE SWEEP, NOT ON THE ANSWER.
+    The whole-artist query is capped so a huge artist cannot return unbounded
+    rows, but the cap is ordered by listener count — so for an artist with more
+    than 500 cached titles the DEEP CUTS were silently dropped, and every scan
+    re-fetched them from Last.fm/ListenBrainz because the cache never appeared to
+    have them. "Various Artists" always exceeds it, since every compilation tile
+    shares that artist key.
+
+    The requested titles are therefore fetched SEPARATELY and cannot be truncated
+    — they are exactly what the caller asked for. The two sets are merged, with
+    the exact-title rows winning.
     """
     if not titles:
         return {}
@@ -66,6 +78,30 @@ def get_cached_popularity_for_titles(
                 {"artist": artist},
             )
             rows = result.fetchall() or []
+
+            # The rows the caller actually needs, regardless of the sweep cap.
+            # Bounded by the caller's own list, so this cannot blow up.
+            wanted = sorted({str(t).strip() for t in titles if str(t).strip()})
+            if wanted:
+                try:
+                    exact = session.execute(
+                        text("""
+                            SELECT artist, title, lastfm_listeners, lastfm_playcount,
+                                   listenbrainz_listens, listenbrainz_users, lastfm_tags, source, updated_at,
+                                   recording_mbid, release_track_title
+                            FROM track_popularity_cache
+                            WHERE LOWER(artist) = LOWER(:artist)
+                              AND LOWER(title) IN :wanted
+                        """).bindparams(
+                            bindparam("wanted", expanding=True)
+                        ),
+                        {"artist": artist, "wanted": [w.lower() for w in wanted]},
+                    )
+                    rows = list(exact.fetchall() or []) + list(rows)
+                except Exception:
+                    # A failed top-up must not lose the artist-wide sweep.
+                    pass
+
             out: dict[str, dict[str, Any]] = {}
             for row in rows:
                 # SQLAlchemy 2.0 Row objects do NOT support string indexing

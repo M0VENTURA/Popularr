@@ -790,6 +790,44 @@ def clear_release_caches() -> None:
         _BEST_RELEASE_CACHE.clear()
 
 
+class _BoundedDict(dict):
+    """A dict that evicts least-recently-used keys past a size cap.
+
+    ⚠️ THESE THREE CACHES WERE UNBOUNDED. ``_artist_singles_cache``,
+    ``_album_year_cache`` and ``_single_result_cache`` grow by library size —
+    one entry per distinct artist, album or title — and nothing ever clears them
+    between scans. On a large library they accumulate for the life of the web
+    process. Growth was proportional rather than runaway, so this was a memory
+    leak rather than an outage, but it has no upper bound.
+
+    Behaves exactly like the ``dict`` it replaces (``in``, ``[]``, ``[]=``), so
+    no call site changes; only the eviction is new.
+    """
+
+    __slots__ = ("_cap",)
+
+    def __init__(self, cap: int = 20000) -> None:
+        super().__init__()
+        self._cap = max(1, int(cap))
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if key in self:
+            super().__delitem__(key)
+        super().__setitem__(key, value)
+        while len(self) > self._cap:
+            try:
+                super().__delitem__(next(iter(self)))
+            except (StopIteration, KeyError):
+                break
+
+    def __getitem__(self, key: Any) -> Any:
+        value = super().__getitem__(key)
+        # Promote on read so a hot key is not the next evicted.
+        super().__delitem__(key)
+        super().__setitem__(key, value)
+        return value
+
+
 class MusicBrainzService:
     def __init__(
         self,
@@ -798,9 +836,12 @@ class MusicBrainzService:
     ) -> None:
         self.enabled = enabled
         self.http = http_client or MusicBrainzHttpClient(enabled=enabled)
-        self._artist_singles_cache: dict[str, list[dict[str, Any]]] = {}
-        self._album_year_cache: dict[str, int | None] = {}
-        self._single_result_cache: dict[str, bool] = {}
+        # ⚠️ BOUNDED. These three grow by library size (one entry per artist /
+        # album / title) and nothing clears them between scans, so on a large
+        # library they accumulated for the life of the process. See _BoundedDict.
+        self._artist_singles_cache: "dict[str, list[dict[str, Any]]]" = _BoundedDict()
+        self._album_year_cache: "dict[str, int | None]" = _BoundedDict()
+        self._single_result_cache: "dict[str, bool]" = _BoundedDict()
         self._mem_lock = threading.Lock()
         self._cache_dirty = False
         self._cache_last_save = time.monotonic()

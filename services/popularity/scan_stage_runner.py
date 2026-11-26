@@ -1999,59 +1999,84 @@ def _apply_track_artist_relative_normalization(album_results: list[dict[str, Any
 
 
 def _persist_album_relative_scores(rows: list[dict[str, Any]]) -> None:
+    """Write remapped scores for an album in ONE round trip.
+
+    ⚠️ BATCHED. This used to issue one ``UPDATE`` per row inside a single
+    session, and it runs TWICE per album (the provisional pass and the
+    artist-boundary reconcile), so an album of T tracks cost 2T statements. The
+    values are per-row, not shared, so this is an executemany — the same SQL,
+    one DBAPI round trip instead of T.
+    """
     if not rows:
+        return
+    params: list[dict[str, Any]] = []
+    for tr in rows:
+        tid = str(tr.get("track_id") or "")
+        if not tid:
+            continue
+        params.append({"s": float(tr.get("final_score") or 0), "id": tid})
+    if not params:
         return
     try:
         with db_session() as session:
-            for tr in rows:
-                tid = str(tr.get("track_id") or "")
-                if not tid:
-                    continue
-                session.execute(
-                    text(
-                        "UPDATE tracks SET final_score = :s, popularity = :s "
-                        "WHERE CAST(id AS TEXT) = :id"
-                    ),
-                    {"s": float(tr.get("final_score") or 0), "id": tid},
-                )
+            session.execute(
+                text(
+                    "UPDATE tracks SET final_score = :s, popularity = :s "
+                    "WHERE CAST(id AS TEXT) = :id"
+                ),
+                params,
+            )
     except Exception as exc:
         # WARNING: when this fails the remapped scores silently never save.
         logger.warning("Album-relative score persist failed", error=str(exc))
 
 
 def _persist_popularity_marking(rows: list[dict[str, Any]]) -> None:
+    """Write popularity marking for an album in ONE round trip.
+
+    ⚠️ BATCHED, for the same reason as ``_persist_album_relative_scores``: this
+    ran one ``UPDATE`` per row, twice per album. The two per-row ``continue``
+    guards are applied while BUILDING the parameter list, so the statement itself
+    is unchanged.
+    """
     if not rows:
+        return
+    params: list[dict[str, Any]] = []
+    for tr in rows:
+        if tr.get("_context_only"):
+            continue
+        tid = str(tr.get("track_id") or "")
+        if not tid:
+            continue
+
+        conf = tr.get("single_confidence")
+        sources = tr.get("single_sources")
+
+        # Do not overwrite if confidence is missing or degraded on frozen tracks
+        if not conf and tr.get("popularity_frozen"):
+            continue
+
+        params.append(
+            {
+                "marked": bool(tr.get("popularity_marked")),
+                "conf": str(conf) if conf else None,
+                "sources": json.dumps(sources, ensure_ascii=False) if sources is not None else None,
+                "id": tid,
+            }
+        )
+    if not params:
         return
     try:
         with db_session() as session:
-            for tr in rows:
-                if tr.get("_context_only"):
-                    continue
-                tid = str(tr.get("track_id") or "")
-                if not tid:
-                    continue
-
-                conf = tr.get("single_confidence")
-                sources = tr.get("single_sources")
-
-                # Do not overwrite if confidence is missing or degraded on frozen tracks
-                if not conf and tr.get("popularity_frozen"):
-                    continue
-
-                session.execute(
-                    text(
-                        "UPDATE tracks SET popularity_marked = :marked, "
-                        "single_confidence = COALESCE(:conf, single_confidence), "
-                        "single_sources = COALESCE(CAST(:sources AS JSONB), single_sources) "
-                        "WHERE CAST(id AS TEXT) = :id"
-                    ),
-                    {
-                        "marked": bool(tr.get("popularity_marked")),
-                        "conf": str(conf) if conf else None,
-                        "sources": json.dumps(sources, ensure_ascii=False) if sources is not None else None,
-                        "id": tid,
-                    },
-                )
+            session.execute(
+                text(
+                    "UPDATE tracks SET popularity_marked = :marked, "
+                    "single_confidence = COALESCE(:conf, single_confidence), "
+                    "single_sources = COALESCE(CAST(:sources AS JSONB), single_sources) "
+                    "WHERE CAST(id AS TEXT) = :id"
+                ),
+                params,
+            )
     except Exception as exc:
         logger.warning("Popularity marking persist failed", error=str(exc))
 

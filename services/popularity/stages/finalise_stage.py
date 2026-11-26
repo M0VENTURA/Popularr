@@ -92,6 +92,7 @@ import random
 import re
 import threading
 import time
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict, defaultdict
 from datetime import datetime
 from statistics import mean, median, stdev
@@ -632,26 +633,64 @@ def _album_curve_rules() -> dict[str, Any]:
         return {}
 
 
+class _SortedPool(list):
+    """A pool already filtered positive and sorted ascending.
+
+    ⚠️ THIS IS THE WHOLE POINT OF THE TYPE. ``_rank_percentile`` and
+    ``_below_percentile`` are called ONCE PER TRACK for the same album and the
+    same artist catalogue, and both used to rebuild the list
+    (``[float(v) for v in pool if v > 0]``) on every call — O(tracks x catalogue)
+    allocations per album, twice over.
+
+    Marking a prepared list lets the helpers skip that rebuild while still
+    accepting a raw list from any other caller (tests, one-off calls). ``list``
+    subclassing keeps it duck-compatible everywhere a plain list is used.
+    """
+
+    __slots__ = ()
+
+
+def _valid_sorted_pool(pool: Any) -> list[float] | None:
+    """*pool* as positive floats ascending, reusing a prepared ``_SortedPool``.
+
+    Filtering and sorting are the expensive part; they must happen ONCE per
+    album, not once per track. Returns ``None`` when nothing usable remains.
+    """
+    if isinstance(pool, _SortedPool):
+        return pool
+    if not pool:
+        return None
+    valid = sorted(float(v) for v in pool if float(v or 0) > 0)
+    return _SortedPool(valid) if valid else None
+
+
 def _rank_percentile(score: float, pool: list[float]) -> float | None:
     """Position in ``pool`` measured from the TOP (best = 1.0, worst = 0.0).
 
     Ties share the rank of the first of them, so equal scores get equal stars.
+
+    ⚠️ ``pool`` IS ASSUMED ALREADY FILTERED AND SORTED ASCENDING when the caller
+    passes a list built for repeated use (see ``_album_curve_star``). A raw list
+    still works: it is filtered and sorted here.
     """
-    valid = [float(v) for v in (pool or []) if float(v or 0) > 0]
+    valid = _valid_sorted_pool(pool)
     if not valid:
         return None
     if len(valid) == 1:
         return 1.0
-    rank = sum(1 for v in valid if v > score) + 1
+    # Number of entries strictly GREATER than ``score``, via bisect: the list is
+    # ascending, so everything after the rightmost ``<= score`` is greater.
+    above = len(valid) - bisect_right(valid, score)
+    rank = above + 1
     return 1.0 - (rank - 1) / (len(valid) - 1)
 
 
 def _below_percentile(score: float, pool: list[float]) -> float | None:
     """Fraction of ``pool`` strictly below ``score`` (0.0-1.0)."""
-    valid = [float(v) for v in (pool or []) if float(v or 0) > 0]
+    valid = _valid_sorted_pool(pool)
     if not valid:
         return None
-    return sum(1 for v in valid if v < score) / len(valid)
+    return bisect_left(valid, score) / len(valid)
 
 
 def _album_curve_star(
@@ -681,8 +720,10 @@ def _album_curve_star(
         return None
 
     min_tracks = int(float(rules.get("min_album_tracks") or 3))
-    valid_album = [float(v) for v in (album_pool or []) if float(v or 0) > 0]
-    if len(valid_album) < min_tracks:
+    # Prepared once by the caller where possible (see ``_SortedPool``); a raw
+    # list is still accepted, just filtered and sorted here.
+    valid_album = _valid_sorted_pool(album_pool)
+    if not valid_album or len(valid_album) < min_tracks:
         return None
 
     pos = _rank_percentile(score, valid_album)
@@ -1446,6 +1487,17 @@ def _assign_stars(
     compilation_online_rules: dict[str, Any] | None = None,
     album_curve_rules: dict[str, Any] | None = None,
     album_curve_pool: list[float] | None = None,
+    # ⚠️ The ARTIST-catalogue reference for the album curve, in curve-metric
+    # space, precomputed once per album by the caller.
+    #
+    # ``_album_curve_star`` only consumes this list through an ordinal
+    # percentile, and the transformation is a pure function of ``artist_scores``
+    # — which is CONSTANT for every track of a non-compilation album. Rebuilding
+    # it per track meant ``tracks x catalogue`` calls to ``_curve_metric`` (each
+    # with its own lazy import) for an identical answer.
+    #
+    # ``None`` keeps the inline path for direct callers and tests.
+    album_curve_artist_pool: list[float] | None = None,
     compilation_ladder_rules: dict[str, Any] | None = None,
     release_type: str = "",
     release_track_count: int = 0,
@@ -1981,18 +2033,25 @@ def _assign_stars(
     if not is_compilation and not is_live and not popularity_only and not _is_single_release:
         _curve_rules = album_curve_rules if album_curve_rules is not None else _album_curve_rules()
         if _curve_rules and _curve_rules.get("enabled"):
-            _curve_pool = (
-                [float(v) for v in album_curve_pool if float(v or 0) > 0]
-                if album_curve_pool is not None
-                else [float(v) for v in _album_pool if float(v or 0) > 0]
-            )
+            # ⚠️ PREPARED POOLS. ``_album_curve_star`` filters and sorts both
+            # pools and then only takes an ordinal percentile of each, so doing
+            # that per track made this O(tracks x catalogue) twice over. A
+            # ``_SortedPool`` is passed through untouched; ``_curve_metric`` on
+            # the artist catalogue is likewise precomputed by the caller.
+            _curve_pool = _valid_sorted_pool(
+                album_curve_pool if album_curve_pool is not None else _album_pool
+            ) or _SortedPool()
             _curve_star = _album_curve_star(
                 score=_curve_metric(track, fallback=score),
                 album_pool=_curve_pool,
-                artist_scores=[
-                    _curve_metric({"lastfm_listeners": v}, fallback=v)
-                    for v in (artist_scores or [])
-                ] or list(artist_scores or []),
+                artist_scores=(
+                    album_curve_artist_pool
+                    if album_curve_artist_pool is not None
+                    else [
+                        _curve_metric({"lastfm_listeners": v}, fallback=v)
+                        for v in (artist_scores or [])
+                    ]
+                ),
                 raw_listeners=float(track.get("lastfm_listeners") or 0),
                 rules=_curve_rules,
             )
@@ -7265,6 +7324,30 @@ def post_album_star_ratings(
             if not bool(r.get("exclude_from_stats"))
         ]
         _curve_pool = [v for v in _curve_pool if v > 0]
+        # Sorted once here so the per-track percentile can bisect it.
+        _curve_pool = _SortedPool(sorted(_curve_pool))
+
+        # ⚠️ COMPUTED ONCE PER ALBUM, not once per track.
+        #
+        # ``_assign_stars`` used to rebuild this inside its per-track curve
+        # block: a list comprehension over the WHOLE artist catalogue, for every
+        # track, so a 12-track album with a 600-track catalogue made 7,200 calls
+        # to ``_curve_metric`` (each doing a lazy import + a log10) to produce an
+        # identical list 12 times. ``artist_scores`` is constant for the album,
+        # and the curve block is gated on ``not is_compilation``, so the
+        # compilation branch that swaps in per-track catalogues never reaches it.
+        #
+        # Hoisting is behaviour-identical: ``_album_curve_star`` only uses this
+        # through an ordinal percentile, and the transform is monotonic.
+        #
+        # Wrapped in ``_SortedPool`` so the per-track percentile can bisect it
+        # instead of re-filtering and re-sorting the catalogue for every track.
+        _curve_artist_pool = _SortedPool(
+            sorted(
+                _curve_metric({"lastfm_listeners": v}, fallback=v)
+                for v in (artist_scores or [])
+            )
+        )
 
         _comp_online_rules: dict[str, Any] | None = None
         if is_compilation:
@@ -7324,6 +7407,7 @@ def post_album_star_ratings(
                     compilation_online_rules=_comp_online_rules,
                     album_curve_rules=_curve_rules,
                     album_curve_pool=_curve_pool,
+                    album_curve_artist_pool=_curve_artist_pool,
                     compilation_ladder_rules=_comp_ladder_rules,
                     release_type=_release_type,
                     release_track_count=_release_track_count,

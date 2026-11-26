@@ -2438,6 +2438,29 @@ def _run_full_enrichment(
     album_artist: str | None = None,
     release_group_mbid: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, list[Any]]]:
+    """Full per-album enrichment. Runs at most ONCE per album per scan.
+
+    ⚠️ IT WAS RUNNING TWICE ON A METADATA SCAN.
+
+    ``enrich_album`` calls this when ``not defer_full``, and
+    ``enrich_album_extras`` calls it unconditionally. ``defer_full_enrichment``
+    is only set for a ``_full_pass``, so on a metadata-only scan both fire and
+    every sub-step is paid twice: the album-art hunt (Navidrome → CAA → AudioDB
+    → Discogs, which is ONLINE and uncached for an album that has no art), the
+    release-extended MusicBrainz fetch, the per-row releasecountry UPDATE, and —
+    on a remix album — a genre write for every track.
+
+    The memo is keyed on ``album_context``, which is built once per album and
+    handed to BOTH call sites, so the second call returns the first call's
+    result instead of recomputing it. Returning the cached TUPLE matters:
+    ``enrich_album_extras`` assigns these values onto ``album_result``, so a
+    "return early with nothing" guard would blank ``similar_artists`` and
+    ``artist_metadata`` for the rest of the album's processing.
+    """
+    _memo = album_context.get("_full_enrichment_result") if isinstance(album_context, dict) else None
+    if isinstance(_memo, tuple) and len(_memo) == 2:
+        return _memo
+
     art_source = _fetch_album_art_with_fallback(artist, album, discogs_token)
     metadata = _read_artist_metadata(artist)
     _fetch_artist_lastfm_tags(artist)
@@ -2471,6 +2494,11 @@ def _run_full_enrichment(
     _apply_live_remix_album_tagging(artist, album, detected_type, album_tracks)
     _persist_alternate_takes(album_context)
 
+    if isinstance(album_context, dict):
+        # Remember the result so the other call site (whichever runs second)
+        # reuses it — see the docstring for why this must be the values, not a
+        # bare "already done" flag.
+        album_context["_full_enrichment_result"] = (metadata, similar)
     return metadata, similar
 
 
