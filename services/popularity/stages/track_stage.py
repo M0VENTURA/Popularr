@@ -1420,8 +1420,38 @@ def _resolve_track_mb_metadata(
         ).strip()
         _batch_corrects = bool(_batch_mbid) and _batch_mbid != _stored_mbid
 
+        # ⚠️ A RESOLVED RECORDING IS NOT A RESOLVED ROW.
+        #
+        # Reported: on Skindred — *You Got This*, a completed scan left every
+        # track's "MusicBrainz Release Track ID: empty → <id>" pending, so the
+        # album reviewed them all as unapplied changes even though
+        # metadata_update.apply_during_scan is ON.
+        #
+        # The skip below was "has a recording MBID and has genres → nothing to
+        # do", and it dropped the WHOLE batch entry — including the
+        # ``release_track_mbid`` the album batch had just resolved. The release
+        # track id is a SEPARATE identity from the recording id: an album already
+        # in the library is fully resolved as recordings yet still has no
+        # position on its release, which is the normal state after an import that
+        # only carried recording ids.
+        #
+        # So the batch must also survive when it supplies a release-track id this
+        # row does not have. Otherwise the value is thrown away before the
+        # ``payload["musicbrainz_releasetrackid"]`` assignment can ever run.
+        _batch_release_track = _as_str(
+            (mb_data or {}).get("release_track_mbid")
+        ).strip()
+        _stored_release_track = _as_str(
+            track.get("musicbrainz_releasetrackid")
+        ).strip()
+        _batch_fills_release_track = bool(_batch_release_track) and not _stored_release_track
+
         if frozen_track or (
-            _has_mbid and _has_genres and not _force_meta and not _batch_corrects
+            _has_mbid
+            and _has_genres
+            and not _force_meta
+            and not _batch_corrects
+            and not _batch_fills_release_track
         ):
             logger.debug("Skipping MB metadata lookup", track_id=track_id, reason="frozen or fully resolved")
             mb_data = None
