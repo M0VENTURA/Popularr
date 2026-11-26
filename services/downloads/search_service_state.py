@@ -148,12 +148,53 @@ def read_search_service_state() -> dict[str, Any]:
         paused_until = 0.0
     remaining = max(0, int(round(paused_until - time.time())))
     explicitly_available = payload.get("available") is True
+    available = bool(explicitly_available or remaining <= 0)
+
+    reason = str(payload.get("reason") or "")
+
+    # ⚠️ A PERSISTED "UNAVAILABLE" MUST BE CORROBORATED BY THE TRANSPORT.
+    #
+    # A breaker can be left open by evidence that had nothing to do with the
+    # connection (zero-result searches used to trip it), and the file then
+    # outlives the condition: the worker that would clear it only writes on its
+    # next successful search, which may be hours away. Meanwhile the dashboard
+    # keeps claiming an outage.
+    #
+    # When slskd itself answers a liveness probe, the service is reachable by
+    # definition — so report it that way and let the next search heal the file.
+    if not available and _probe_transport_alive():
+        available = True
+        reason = ""
+        remaining = 0
+
     return {
         "known": True,
-        "available": bool(explicitly_available or remaining <= 0),
-        "reason": str(payload.get("reason") or ""),
-        "tier": int(payload.get("tier") or 0),
-        "paused_until_iso": str(payload.get("paused_until_iso") or ""),
+        "available": available,
+        "reason": "" if available else reason,
+        "tier": int(payload.get("tier") or 0) if not available else 0,
+        "paused_until_iso": str(payload.get("paused_until_iso") or "") if not available else "",
         "retry_in_seconds": remaining,
         "updated_at": str(payload.get("updated_at") or ""),
     }
+
+
+def _probe_transport_alive() -> bool:
+    """True when slskd answers right now (cheap, bounded, fails closed).
+
+    Uses the same shared HTTP client the queue uses — ``is_connected`` asks
+    slskd for its server state, which is the authoritative "is the Soulseek
+    connection up" answer.
+
+    Deliberately fails CLOSED (returns False on any error): an unreachable
+    slskd must not turn a real outage into a healthy verdict.
+    """
+    try:
+        from api_clients.slskd_http import get_slskd_client
+
+        client = get_slskd_client()
+        if client is None or not getattr(client, "enabled", False):
+            return False
+        return bool(client.is_connected())
+    except Exception as exc:
+        logger.debug("Search-service transport probe failed", error=str(exc))
+        return False

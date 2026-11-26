@@ -5,10 +5,17 @@
 {% block content %}
 {% from "components/_recent_album_row.html" import recent_album_row %}
 <div class="container-fluid mt-4">
-    <div id="dashboardFlags"
-         data-launch-on-startup="{{ 'true' if launch_on_startup else 'false' }}"
-         data-first-full-scan-done="{{ 'true' if first_full_scan_done else 'false' }}"
-         hidden></div>
+    {#
+      ⚠️ `dashboardFlags` MUST STAY. It is not a data payload — main.js's SSE
+      handler returns early when it is present (`updateGlobalScanBar` bails on
+      `#dashboardFlags`), because THIS page's own poll owns the scan bar. A
+      rename or removal would make two writers fight over the same bar.
+
+      `data-launch-on-startup` and `data-first-full-scan-done` were removed:
+      nothing ever read them. The route still passes `launch_on_startup` and a
+      hardcoded `first_full_scan_done=True`, neither of which reached the page.
+    #}
+    <div id="dashboardFlags" hidden></div>
 
     {% if error %}
     <div class="alert alert-danger alert-dismissible fade show shadow-sm" role="alert">
@@ -37,6 +44,34 @@
       reachable or while a recorded outage's backoff window has expired.
     #}
     <div id="searchServiceAlert" class="d-none"></div>
+
+    {#
+      Whole-scheduler alert. The processor alert below covers ONE job; this
+      covers the APScheduler that owns every background job. Written by
+      renderSchedulerAlert() from `scheduler` on /api/queue-processor/status.
+    #}
+    <div id="schedulerAlert" class="d-none"></div>
+
+    {#
+      Disk space for the music and downloads volumes. A full volume corrupts
+      imports and tag writes in ways that look like unrelated bugs, so it is
+      surfaced before that happens. Written by renderDiskSpaceAlert().
+    #}
+    <div id="diskSpaceAlert" class="d-none"></div>
+
+    {#
+      Downloads that were DISCARDED (wrong artist/length/format). Rendered by
+      dashboard.js from `rejections` on /api/queue-processor/status. Those
+      reasons cannot live on the queue row: a rejected download is deleted and
+      the row returns to `queued`, overwriting `failure_reason` within minutes.
+    #}
+    <div id="discardedDownloadsAlert" class="d-none"></div>
+
+    {#
+      Queue summary strip. Hidden while the queue is completely empty — a row of
+      zeros on a quiet library is noise. Written by renderQueueSummary().
+    #}
+    <div id="queueSummaryStrip" class="d-none"></div>
 
     {# A completed background popularity CSV stays available here. #}
     <div id="popularityReportReady" class="d-none"></div>
@@ -147,13 +182,10 @@
                         <span id="scannerState" class="fw-normal" role="status" aria-live="polite">Idle</span>
                     </span>
 
-                    {# Kept for `updateActiveScans`, which writes it. Hidden: the
-                       state is already spelled out in the row, and a badge
-                       repeating it was the redundant second signal the mock-up
-                       drops. #}
-                    <span id="scannerStatusBadge" class="badge bg-secondary ms-2" style="font-size:0.65rem;" hidden>
-                        <i class="bi bi-circle-fill me-1 small" aria-hidden="true"></i> Idle
-                    </span>
+                    {# The old `scannerStatusBadge` lives here no more: it was
+                       `hidden` in markup and written on every poll, so it
+                       rendered nothing. The state is already spelled out in
+                       `scannerState` above. #}
 
                     {# ── IDLE action ───────────────────────────────────────── #}
                     <div id="scannerIdleState" class="ms-auto d-flex align-items-center">

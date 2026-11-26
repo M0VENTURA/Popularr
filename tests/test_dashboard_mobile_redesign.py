@@ -909,8 +909,6 @@ def recent_row() -> str:
         top_tracks=[],
         error=None,
         scan_active=False,
-        launch_on_startup=False,
-        first_full_scan_done=True,
         perpetual=False,
         forced=False,
         nav_users=[],

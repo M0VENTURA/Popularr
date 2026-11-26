@@ -449,17 +449,6 @@
       else stateLabel.textContent = 'Idle';
     }
 
-    const badge = document.getElementById('scannerStatusBadge');
-    if (badge) {
-      // An import counts as ACTIVE here: the badge reports whether the library
-      // is being worked on, and hiding the Start button is a separate concern.
-      const activeNow = !!(running || importRunning);
-      badge.innerHTML = '<i class="bi bi-circle-fill me-1 small"></i> ' +
-        (activeNow ? 'Active' : 'Idle');
-      badge.className = 'badge ' + (activeNow ? 'bg-success' : 'bg-secondary');
-      badge.style.fontSize = '0.65rem';
-    }
-
     const panel = document.getElementById('activeScansPanel');
     const body = document.getElementById('activeScansBody');
     if (!panel || !body) return;
@@ -851,7 +840,16 @@
   async function updateQueueProcessorAlert() {
     const host = document.getElementById('queueProcessorAlert');
     const serviceHost = document.getElementById('searchServiceAlert');
-    if (!host && !serviceHost) return;
+    const discardedHost = document.getElementById('discardedDownloadsAlert');
+    const summaryHost = document.getElementById('queueSummaryStrip');
+    const schedulerHost = document.getElementById('schedulerAlert');
+    const diskHost = document.getElementById('diskSpaceAlert');
+    if (
+      !host && !serviceHost && !discardedHost && !summaryHost
+      && !schedulerHost && !diskHost
+    ) {
+      return;
+    }
 
     let data;
     try {
@@ -861,6 +859,209 @@
     }
     renderQueueProcessorAlert(host, data);
     renderSearchServiceAlert(serviceHost, data);
+    renderSchedulerAlert(schedulerHost, data);
+    renderDiskSpaceAlert(diskHost, data);
+    renderDiscardedDownloadsAlert(discardedHost, data);
+    renderQueueSummary(summaryHost, data);
+  }
+
+  /**
+   * Disk-space alert for the music and downloads volumes.
+   *
+   * Nothing used to watch these. A full volume does not fail cleanly: imports
+   * copy a file, the tag write truncates, and the track is left half-written
+   * — which then reads as a metadata bug in some unrelated subsystem.
+   *
+   * Only `warn`/`critical` draw anything, and the dismissal key includes the
+   * rounded percentage so a worsening volume re-surfaces.
+   */
+  function renderDiskSpaceAlert(host, data) {
+    if (!host) return;
+    const disk = (data && data.disk_space) || {};
+    const level = String(disk.level || 'unknown');
+    if (!disk.known || (level !== 'warn' && level !== 'critical')) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    const percent = Number(disk.worst_percent);
+    const alertId = `disk-space|${level}|${percent.toFixed(0)}`;
+    if (isAlertDismissed(alertId)) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    // Name the volume that is actually short, not just "disk is low".
+    const short = ((disk.volumes) || [])
+      .filter((v) => v && v.known && Number(v.free_percent) <= Number(disk.warn_percent))
+      .map((v) => `${v.label} (${Number(v.free_percent).toFixed(1)}% free)`)
+      .join(', ');
+
+    const critical = level === 'critical';
+    host.classList.remove('d-none');
+    host.innerHTML = `
+      <div class="alert ${critical ? 'alert-danger' : 'alert-warning'} py-2 px-3 mb-3"
+           style="font-size:.85rem;" data-alert-id="${escapeAttr(alertId)}">
+        <button type="button" class="btn-close js-dismiss-alert float-end ms-2"
+                aria-label="Dismiss"></button>
+        <div class="fw-semibold">
+          <i class="bi bi-hdd me-1"></i>${critical ? 'Disk space critically low' : 'Disk space is running low'}
+        </div>
+        <div class="small mt-1">
+          ${esc(short || `${percent.toFixed(1)}% free`)}.
+          Imports and tag writes can fail or truncate when a volume fills.
+        </div>
+      </div>`;
+  }
+
+  /**
+   * Background-scheduler alert.
+   *
+   * `scheduler` describes the APScheduler that owns EVERY background job —
+   * library sync, playlist maintenance, missing-releases, the queue watchdog.
+   * The processor alert next to it only covers one job, so a dead scheduler
+   * previously read as "queue is fine, everything is fine".
+   *
+   * Quiet when the scheduler is running with jobs registered, and quiet when it
+   * is not initialised in THIS process at all (a split deployment where the
+   * web process never built one is normal, not an outage).
+   */
+  function renderSchedulerAlert(host, data) {
+    if (!host) return;
+    const scheduler = (data && data.scheduler) || {};
+    if (!scheduler.available || scheduler.running) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    const alertId = `scheduler|${scheduler.reason || 'stopped'}`;
+    if (isAlertDismissed(alertId)) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    host.classList.remove('d-none');
+    host.innerHTML = `
+      <div class="alert alert-danger py-2 px-3 mb-3" style="font-size:.85rem;"
+           data-alert-id="${escapeAttr(alertId)}">
+        <button type="button" class="btn-close js-dismiss-alert float-end ms-2"
+                aria-label="Dismiss"></button>
+        <div class="fw-semibold">
+          <i class="bi bi-calendar-x me-1"></i>Background jobs are not running
+        </div>
+        <div class="small mt-1">
+          ${esc(scheduler.reason || 'The scheduler is not running.')}
+          Scheduled scans, imports and playlist maintenance will not run until it is.
+        </div>
+      </div>`;
+  }
+
+  /**
+   * Discarded-download alert.
+   *
+   * A rejected download is DELETED and its queue row returns to `queued`, so
+   * `failure_reason` is overwritten within minutes — the live queue can never
+   * show why. The rejection log outlives that, and this is the only place the
+   * operator would notice a systematic problem (a wrong release matched for a
+   * whole album, say) rather than a one-off bad candidate.
+   *
+   * Dismissal is keyed on the TOTAL, like the scan alerts: acknowledging "12
+   * discarded" must not hide the fact that it grew to 40.
+   */
+  function renderDiscardedDownloadsAlert(host, data) {
+    if (!host) return;
+    const rejections = (data && data.rejections) || {};
+    const total = Number(rejections.total) || 0;
+    if (!rejections.known || total <= 0) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    const alertId = `discarded-downloads|${total}`;
+    if (isAlertDismissed(alertId)) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    const topReason = String(rejections.top_reason || '').replace(/_/g, ' ');
+    const topCount = Number(rejections.top_count) || 0;
+    const breakdown = topReason && topCount
+      ? `Most common reason: ${esc(topReason)} (${topCount}).`
+      : '';
+
+    host.classList.remove('d-none');
+    host.innerHTML = `
+      <div class="alert alert-warning py-2 px-3 mb-3" style="font-size:.85rem;"
+           data-alert-id="${escapeAttr(alertId)}">
+        <button type="button" class="btn-close js-dismiss-alert float-end ms-2"
+                aria-label="Dismiss"></button>
+        <div class="fw-semibold">
+          <i class="bi bi-x-octagon me-1"></i>${total} downloaded file${total === 1 ? '' : 's'} discarded
+        </div>
+        <div class="small mt-1">
+          These were deleted after verification failed, so the queue row was not marked failed.
+          ${breakdown}
+        </div>
+        <div class="mt-2">
+          <a class="btn btn-sm btn-outline-secondary py-0 px-2" href="/downloads/monitor">
+            Review discards
+          </a>
+        </div>
+      </div>`;
+  }
+
+  /**
+   * Queue summary strip: the counts the status payload already carries.
+   *
+   * The dashboard names the processor's health but never its WORKLOAD, so
+   * "downloads are not moving" needed a trip to another page to diagnose.
+   * Hidden when nothing is queued, active or failed — an all-zero row is noise.
+   */
+  function renderQueueSummary(host, data) {
+    if (!host) return;
+    const stats = (data && data.queue_stats) || {};
+    const queued = Number(stats.queued) || 0;
+    const active = Number(stats.active) || 0;
+    const failed = Number(stats.failed) || 0;
+    const ready = Number(stats.ready) || 0;
+    const waiting = Number(stats.pending_release) || 0;
+
+    if (!queued && !active && !failed && !ready && !waiting) {
+      host.innerHTML = '';
+      host.classList.add('d-none');
+      return;
+    }
+
+    const cells = [
+      ['Queued', queued, 'text-info'],
+      ['Downloading', active, 'text-success'],
+      ['Waiting for release', waiting, 'text-muted'],
+      ['Imported', ready, 'text-success'],
+      ['Failed', failed, failed > 0 ? 'text-danger' : 'text-muted'],
+    ].filter(([, value]) => value > 0);
+
+    host.classList.remove('d-none');
+    host.innerHTML = `
+      <div class="card shadow-sm mb-3">
+        <div class="card-body py-2 px-3 d-flex flex-wrap align-items-center gap-3">
+          <span class="small text-muted fw-semibold text-uppercase">
+            <i class="bi bi-cloud-arrow-down me-1"></i>Download queue
+          </span>
+          ${cells.map(([label, value, cls]) => `
+            <span class="small">
+              <span class="fw-bold ${cls}">${value}</span>
+              <span class="text-muted">${esc(label)}</span>
+            </span>`).join('')}
+          <a class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto"
+             href="/downloads">Manage</a>
+        </div>
+      </div>`;
   }
 
   function renderQueueProcessorAlert(host, data) {
@@ -1105,6 +1306,10 @@
     updateQueueProcessorAlert,
     renderQueueProcessorAlert,
     renderSearchServiceAlert,
+    renderSchedulerAlert,
+    renderDiskSpaceAlert,
+    renderDiscardedDownloadsAlert,
+    renderQueueSummary,
     restartQueueProcessorFromDashboard,
   };
 

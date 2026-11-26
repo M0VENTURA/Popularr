@@ -1113,9 +1113,103 @@ def update_file_tags(
 ) -> bool:
     if not file_path or not tag_updates:
         return False
+    tag_updates = _guard_album_release_id(file_path, tag_updates)
     return write_tags_to_file(
         file_path, tag_updates, force=force, defer_stamp=defer_stamp
     )
+
+
+def _guard_album_release_id(
+    file_path: str, tag_updates: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Refuse to let ONE file re-identify its album.
+
+    ⚠️ WHY THIS EXISTS. Reported on Korn — *Untouchables*: the album was merged
+    in Navidrome and stayed merged for hours, then split again. The two files
+    ended up with different release ids — the Canadian release on track 1 and
+    the JAPANESE release on the bonus remix — because a per-track write stamped
+    that track's own release onto its file.
+
+    The album-level writers (the unifier, the album save) fan ONE id across
+    every row and file, and they are the only sanctioned way to change an
+    album's release. A single-track write that disagrees with what the rest of
+    the album already holds would split it, so that key is dropped here and
+    reported. Everything else in the payload is still written.
+
+    Returns: the (possibly) filtered payload. A no-op when the payload carries
+    no album id, when the file is not in the library, or when the album has no
+    consensus yet (a first write is always allowed).
+    """
+    requested = str(
+        tag_updates.get("musicbrainz_albumid")
+        or tag_updates.get("musicbrainz_album_mbid")
+        or ""
+    ).strip()
+    if not requested:
+        return tag_updates
+
+    try:
+        from sqlalchemy import text as _text
+        from db.engine import db_session as _db_session
+
+        with _db_session() as session:
+            row = session.execute(
+                _text(
+                    "SELECT album, COALESCE(NULLIF(album_artist, ''), artist) AS artist "
+                    "FROM tracks WHERE file_path = :path LIMIT 1"
+                ),
+                {"path": str(file_path)},
+            ).fetchone()
+            if not row:
+                return tag_updates
+            album = str(row[0] or "").strip()
+            artist = str(row[1] or "").strip()
+            if not album or not artist:
+                return tag_updates
+
+            rows = session.execute(
+                _text(
+                    "SELECT musicbrainz_albumid, musicbrainz_album_mbid, "
+                    "  musicbrainz_releasegroupid "
+                    "FROM tracks "
+                    "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                    "  AND LOWER(album) = LOWER(:album)"
+                ),
+                {"artist": artist, "album": album},
+            ).fetchall() or []
+    except Exception as exc:
+        logger.debug("Album release-id guard unavailable", error=str(exc))
+        return tag_updates
+
+    # Consensus = the single non-empty id the rest of the album agrees on.
+    # A malformed id (equal to the release group) is never a candidate.
+    ids: set[str] = set()
+    for album_row in rows:
+        value = str(
+            (album_row[0] or album_row[1] or "") if hasattr(album_row, "__getitem__") else ""
+        ).strip()
+        group = str(album_row[2] or "").strip()
+        if not value or (group and value.casefold() == group.casefold()):
+            continue
+        ids.add(value.casefold())
+
+    if len(ids) != 1 or requested.casefold() in ids:
+        # No consensus, or the request already agrees with it: allow.
+        return tag_updates
+
+    consensus = next(iter(ids))
+    # ⚠️ This module uses the STDLIB logger: keyword arguments raise
+    # "Logger._log() got an unexpected keyword argument".
+    logger.warning(
+        "Refused a single-track release-id write that would split the album "
+        "(path=%s requested=%s album_id=%s artist=%s album=%s)",
+        file_path, requested, consensus, artist, album,
+    )
+    filtered = {
+        key: value for key, value in tag_updates.items()
+        if key not in {"musicbrainz_albumid", "musicbrainz_album_mbid"}
+    }
+    return filtered
 
 
 def _get_track_file_path(track_id: str) -> str | None:
@@ -1602,6 +1696,12 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
         _album_value = metadata.get(_column)
         if _album_value is not None and str(_album_value).strip() != "":
             tag_updates[_COLUMN_TO_TAG_FIELD.get(_column, _column)] = _album_value
+
+    # ⚠️ Same album-identity guard as ``update_file_tags``: a single-track
+    # import must not stamp its own release onto a file whose album already
+    # holds a different one (the reported Korn split that survived eight hours
+    # and then reverted when the bonus track was re-written).
+    tag_updates = _guard_album_release_id(file_path, tag_updates)
 
     return write_tags_to_file(file_path, tag_updates)
 

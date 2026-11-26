@@ -168,6 +168,27 @@ def _candidate_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
+def _remember_rejected(queue_id: Any, file_path: str, reason: str) -> None:
+    """Persist a permanently-unusable library candidate for THIS queue row.
+
+    Library rows are files on disk: their length and their identity do not
+    change between queue cycles, so a candidate that fails here fails for ever.
+    Recording it keeps the next cycle from re-reading the same audio (the log
+    showed one Korn mismatch re-tested for over an hour).
+    """
+    if not queue_id or not file_path:
+        return
+    try:
+        from db.repositories.queue import record_rejected_candidate
+
+        record_rejected_candidate(int(queue_id), "", file_path, reason)
+    except Exception as exc:
+        logger.debug(
+            "Could not remember a rejected library candidate",
+            queue_id=queue_id, path=file_path, error=str(exc),
+        )
+
+
 def try_library_copy(item: dict[str, Any]) -> dict[str, Any] | None:
     """Copy an owned copy of *item* into the downloads folder, or return None.
 
@@ -207,6 +228,17 @@ def try_library_copy(item: dict[str, Any]) -> dict[str, Any] | None:
         _file_matches_queue_item = None
 
     selected: dict[str, Any] | None = None
+    # Candidates already ruled out FOR THIS ROW are remembered on the row, so a
+    # permanently-wrong length is not re-tested on every queue cycle. The log
+    # showed the same Korn/Bush mismatches re-checked for over an hour.
+    _already_rejected: set[str] = set()
+    try:
+        from db.repositories.queue import get_rejected_candidate_keys
+
+        _already_rejected = get_rejected_candidate_keys(item)
+    except Exception:
+        _already_rejected = set()
+
     for candidate in _candidate_rows(item):
         candidate_album = str(candidate.get("album") or "").strip().casefold()
         # The track is already on the target album — there is nothing to import.
@@ -218,6 +250,14 @@ def try_library_copy(item: dict[str, Any]) -> dict[str, Any] | None:
             continue
 
         file_path = str(candidate.get("file_path") or "")
+        if _already_rejected:
+            try:
+                from db.repositories.queue import _candidate_key
+
+                if _candidate_key("", file_path) in _already_rejected:
+                    continue
+            except Exception:
+                pass
         quality_ok, quality_reason = _quality_ok(file_path)
         if not quality_ok:
             logger.info(
@@ -226,6 +266,7 @@ def try_library_copy(item: dict[str, Any]) -> dict[str, Any] | None:
                 path=file_path,
                 reason=quality_reason,
             )
+            _remember_rejected(queue_id, file_path, f"quality:{quality_reason}")
             continue
 
         actual_duration = _file_duration_seconds(
@@ -247,6 +288,14 @@ def try_library_copy(item: dict[str, Any]) -> dict[str, Any] | None:
                 found=round(float(actual_duration), 1),
                 tolerance=tolerance,
             )
+            # A file's length never changes, so this candidate can never
+            # qualify: remember it rather than re-reading the same audio on
+            # every queue cycle.
+            _remember_rejected(
+                queue_id, file_path,
+                f"length {round(float(actual_duration), 1)}s vs "
+                f"{round(float(expected_duration), 1)}s",
+            )
             continue
 
         if _file_matches_queue_item is not None:
@@ -261,6 +310,7 @@ def try_library_copy(item: dict[str, Any]) -> dict[str, Any] | None:
                     queue_id=queue_id,
                     path=file_path,
                 )
+                _remember_rejected(queue_id, file_path, "metadata mismatch")
                 continue
 
         selected = candidate

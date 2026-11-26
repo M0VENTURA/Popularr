@@ -286,12 +286,17 @@ class TestTheScannerCardIsOneRow:
     def test_every_id_the_poller_writes_survived(self) -> None:
         """A renamed id is a control that silently stops updating.
 
-        `updateActiveScans()` writes all six of these by id.
+        `updateActiveScans()` writes these by id. ``scannerStatusBadge`` was
+        REMOVED on 2026-11-26: it was hidden in markup and written every poll,
+        so it rendered nothing — `scannerState` carries the same fact.
         """
         html = _read(DASHBOARD_HTML)
-        for element_id in ("scannerState", "scannerStatusBadge", "scannerIdleState",
+        for element_id in ("scannerState", "scannerIdleState",
                            "scannerActiveState", "activeScansPanel", "activeScansBody"):
             assert f'id="{element_id}"' in html, f"{element_id} lost in the restructure"
+        assert 'id="scannerStatusBadge"' not in html, (
+            "the hidden badge came back — write the state into scannerState only"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -453,6 +453,59 @@ def queue_processor_schedule_snapshot() -> dict[str, Any]:
     }
 
 
+def scheduler_health_snapshot() -> dict[str, Any]:
+    """Whole-scheduler health, for the dashboard's background-jobs alert.
+
+    ``queue_processor_schedule_snapshot`` answers a narrower question ("is the
+    queue job armed?"). Nothing on the dashboard answered the broader one: if
+    the scheduler thread dies, or its SQLAlchemy jobstore cannot be read, EVERY
+    background job stops — nightly library sync, playlist maintenance, the
+    missing-releases pass — while every page looks healthy.
+
+    Side-effect free (reads ``_SCHEDULER`` directly), because a status endpoint
+    polled every few seconds must never build the singleton.
+    """
+    scheduler = _SCHEDULER
+    if scheduler is None:
+        return {
+            "available": False,
+            "running": False,
+            "job_count": 0,
+            "jobs": [],
+            "reason": "scheduler not initialised in this process",
+        }
+
+    try:
+        running = bool(scheduler.running)
+    except Exception:
+        running = False
+
+    job_ids: list[str] = []
+    job_error = ""
+    if running:
+        try:
+            job_ids = sorted(str(j.id) for j in (scheduler.get_jobs() or []))
+        except Exception as exc:
+            job_error = str(exc)
+
+    if not running:
+        reason = "scheduler is not running in this process"
+    elif job_error:
+        reason = f"job store could not be read: {job_error}"
+    elif not job_ids:
+        reason = "scheduler is running but has no jobs registered"
+    else:
+        reason = f"{len(job_ids)} background job(s) scheduled"
+
+    return {
+        "available": True,
+        "running": running,
+        "job_count": len(job_ids),
+        "jobs": job_ids,
+        "reason": reason,
+    }
+
+
 def kick_download_queue_processor() -> dict[str, Any]:
     """Ask the in-process queue job to fire immediately (the Restart button).
 

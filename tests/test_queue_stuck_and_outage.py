@@ -97,26 +97,31 @@ class TestTheEmptySearchStreak:
 
         pipeline.reset_empty_search_streak()
 
-    def test_five_in_a_row_trips_the_breaker(self):
+    def test_five_in_a_row_does_not_claim_an_outage(self):
+        """Empty results are about the TRACKS, not the connection.
+
+        This used to trip the breaker, which is what made the dashboard report
+        "search service unreachable" while slskd was serving 250-response
+        searches and completing downloads.
+        """
         from services.downloads import download_pipeline_service as pipeline
 
         assert pipeline._search_service_looks_down() is False
-        for _ in range(pipeline._EMPTY_STREAK_LIMIT - 1):
+        for _ in range(pipeline._EMPTY_STREAK_LIMIT):
             pipeline._bump_empty_streak(False)
-        assert pipeline._search_service_looks_down() is False
 
-        pipeline._bump_empty_streak(False)
-        assert pipeline._search_service_looks_down() is True
+        assert pipeline._search_service_looks_down() is False
+        assert pipeline._search_unavailable_until == 0
 
     def test_one_result_resets_the_streak(self):
         from services.downloads import download_pipeline_service as pipeline
 
         for _ in range(pipeline._EMPTY_STREAK_LIMIT):
             pipeline._bump_empty_streak(False)
-        assert pipeline._search_service_looks_down() is True
+        assert pipeline._empty_search_streak >= pipeline._EMPTY_STREAK_LIMIT
 
         pipeline._bump_empty_streak(True)
-        assert pipeline._search_service_looks_down() is False
+        assert pipeline._empty_search_streak == 0
 
     def test_a_down_service_does_not_schedule_a_miss(self):
         """The zero-result branch must SKIP, not stamp a Thursday retry date."""
@@ -128,8 +133,8 @@ class TestTheEmptySearchStreak:
         branch = src.split("if not all_results:", 1)[1]
         head = branch[: branch.index("_schedule_search_retry")]
 
-        assert "_search_service_looks_down()" in head, (
-            "the outage check must run BEFORE the miss is scheduled"
+        assert "_bump_empty_streak(False)" in head, (
+            "the streak must be counted BEFORE the miss is scheduled"
         )
         assert 'status": "search_service_down"' in branch
 

@@ -58,10 +58,21 @@ class TestHandling:
         assert "12 track" in updates[-1][1]["failure_reason"]
 
     def test_without_a_release_id_it_waits_instead_of_searching(self, monkeypatch):
-        updates: list[tuple] = []
+        """It must PARK with a real retry time, not just flip the status.
+
+        ``update_queue_item(status=...)`` left ``next_retry_at`` NULL, and the
+        ready query treats NULL as DUE — so this row was re-fetched on every
+        queue cycle (the reported "left pending_release" line every ~35s for
+        hours) and its attempt count never moved.
+        """
+        scheduled: list[tuple] = []
         monkeypatch.setattr(
-            pipeline, "update_queue_item",
-            lambda qid, **kw: updates.append((qid, kw)) or {"id": qid},
+            "db.repositories.queue.schedule_queue_retry",
+            lambda qid, status, next_retry_at, reason="": (
+                scheduled.append((qid, status, next_retry_at, reason))
+                or {"success": True, "status": status}
+            ),
+            raising=False,
         )
         called = {"download": False}
         monkeypatch.setattr(
@@ -75,7 +86,10 @@ class TestHandling:
 
         assert result["status"] == "pending_release"
         assert called["download"] is False
-        assert updates[-1][1]["status"] == "pending_release"
+        assert scheduled, "the row must be scheduled, not left immediately due"
+        qid, status, next_retry_at, _reason = scheduled[-1]
+        assert (qid, status) == (78, "pending_release")
+        assert next_retry_at, "a NULL next_retry_at re-fetches the row every cycle"
 
     def test_an_expansion_failure_keeps_the_row_pending(self, monkeypatch):
         updates: list[tuple] = []

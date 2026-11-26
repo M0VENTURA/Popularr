@@ -439,7 +439,21 @@ def _search_service_retry_seconds() -> int:
 
 
 def _bump_empty_streak(had_results: bool) -> int:
-    """Update the process-wide empty-search streak; returns the new value."""
+    """Update the process-wide empty-search streak; returns the new value.
+
+    ⚠️ THE STREAK DOES NOT TRIP THE OUTAGE BREAKER.
+
+    It used to, and that is what produced a false "Soulseek search service is
+    unreachable" banner while slskd was demonstrably healthy: searches were
+    returning 250 responses and downloads were completing at 112 KB/s, but a
+    run of zero-result tracks had opened the SAME persisted breaker an actual
+    disconnection uses.
+
+    Empty results are evidence about the TRACKS (hard to find, mistagged,
+    wrong version), not about the connection. The streak therefore only
+    influences how the item is rescheduled — see the caller — and never writes
+    the service-outage state the dashboard renders.
+    """
     global _empty_search_streak, _empty_streak_tripped_at
 
     if had_results:
@@ -451,19 +465,23 @@ def _bump_empty_streak(had_results: bool) -> int:
     _empty_search_streak += 1
     if _empty_search_streak >= _EMPTY_STREAK_LIMIT and _empty_streak_tripped_at is None:
         _empty_streak_tripped_at = time.time()
-        _trip_search_breaker("consecutive empty searches")
+        logger.info(
+            "Consecutive empty searches — parking items, NOT marking the "
+            "service unavailable",
+            empty_streak=_empty_search_streak,
+            limit=_EMPTY_STREAK_LIMIT,
+        )
     return _empty_search_streak
 
 
 def _search_service_looks_down() -> bool:
-    """True while the breaker window is open (or the legacy streak tripped).
+    """True only while the CONNECTION breaker is open.
 
-    A single search is then SKIPPED rather than attempted, so an outage cannot
-    consume retry attempts, stamp a miss date, or produce one log line per item.
+    The empty-search streak deliberately does NOT count here: it means the
+    tracks are hard to find, not that slskd is unreachable. Treating the two as
+    one is what made the dashboard claim an outage during a healthy session.
     """
-    if time.time() < _search_unavailable_until:
-        return True
-    return _empty_search_streak >= _EMPTY_STREAK_LIMIT
+    return time.time() < _search_unavailable_until
 
 
 def reset_empty_search_streak() -> None:
@@ -648,6 +666,49 @@ def _schedule_search_retry(queue_id: int, item: dict, reason: str) -> None:
 #: was immediately claimable again, so every cycle claimed and skipped the
 #: whole batch while slskd was down.
 _DISCONNECTED_RETRY_MINUTES = 5
+
+
+def _park_behind_search_breaker(
+    queue_id: int,
+    artist: str,
+    title: str,
+    *,
+    reason: str,
+    retry_seconds: int | None = None,
+) -> None:
+    """Park one queue item without touching the SERVICE-OUTAGE state.
+
+    Used when the queue should wait but the connection is fine — a run of
+    zero-result searches, for instance. ``search_disconnected`` is the
+    connection-outage variant: it counts an infrastructure failure and can open
+    the breaker that the dashboard renders as "search service unreachable".
+    Conflating the two produced that banner during a healthy session.
+    """
+    wait_seconds = int(
+        retry_seconds
+        if retry_seconds is not None
+        else (_DISCONNECTED_RETRY_MINUTES * 60)
+    )
+    wait_seconds = max(30, wait_seconds)
+    try:
+        update_queue_item(
+            queue_id,
+            status="queued",
+            failure_reason=f"{reason} — search not attempted",
+            next_retry_at=(
+                datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
+            ).isoformat(),
+        )
+    except Exception:
+        pass
+    log_unified(
+        f"[QUEUE] {artist} - {title} → {reason}, retrying in {wait_seconds}s"
+    )
+    _log_queue_event(
+        "queued",
+        f"{artist} - {title} → {reason}, retrying in {wait_seconds}s",
+        queue_id,
+    )
 
 
 def search_disconnected(
@@ -1775,17 +1836,36 @@ def _process_release_request(item: dict[str, Any], queue_id: Any) -> dict[str, A
     ).strip()
 
     if not release_id:
-        update_queue_item(
-            queue_id,
-            status="pending_release",
-            failure_reason=(
+        # ⚠️ PARK IT WITH A REAL RETRY TIME AND COUNT THE ATTEMPT.
+        #
+        # ``update_queue_item(status=...)`` left ``next_retry_at`` NULL, which
+        # the ready query treats as DUE — so this row was re-fetched on every
+        # queue cycle for hours (the log's "Album-typed queue row left
+        # pending_release" every ~35s). Nothing ever incremented its attempt
+        # count either, so it could never reach the retry limit and fail.
+        #
+        # 24h is right for the common cause: an album queued before its
+        # release date has no release MBID yet, and that will not change
+        # between cycles. Once the release is matched, the normal requeue path
+        # picks it up immediately.
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from db.repositories.queue import schedule_queue_retry
+
+        _next = (_dt.now(_tz.utc) + _td(hours=24)).isoformat()
+        _parked = schedule_queue_retry(
+            int(queue_id),
+            "pending_release",
+            _next,
+            reason=(
                 "release request has no MusicBrainz release id — needs a "
                 "release match, not a track search"
             ),
         )
         logger.info(
-            "Album-typed queue row left pending_release (no release MBID)",
+            "Album-typed queue row parked until its release is matched",
             queue_id=queue_id, artist=artist, album=album,
+            next_retry_at=_next,
+            status=(_parked or {}).get("status"),
         )
         return {
             "success": False,
@@ -1937,10 +2017,15 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
 
     # ⭐ SHARED BREAKER GATE, BEFORE ANY SEARCH IS ATTEMPTED.
     #
-    # The breaker is process-wide: once three infrastructure failures (or the
-    # empty-result streak) trip it, every subsequent item parks immediately for
-    # the same window instead of independently re-discovering the outage. After
-    # the window one search runs as the health probe.
+    # The breaker is process-wide: once three infrastructure failures trip it,
+    # every subsequent item parks immediately for the same window instead of
+    # independently re-discovering the outage. After the window one search runs
+    # as the health probe.
+    #
+    # ⚠️ ONLY connection failures trip this. A run of zero-result searches must
+    # NOT route items through ``search_disconnected``: that counts an
+    # infrastructure failure and can open the breaker, which is what made the
+    # dashboard report an outage while slskd was healthy.
     if _search_service_looks_down():
         search_disconnected(
             item, queue_id, expected_artist, expected_title,
@@ -2039,7 +2124,6 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     new_results.append(candidate)
                 all_results.extend(new_results)
                 consecutive_empty = consecutive_empty + 1 if not results else 0
-                _bump_empty_streak(bool(results))
 
                 best = _select_best_result(
                     new_results,
@@ -2106,28 +2190,39 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                 notes="no_results",
             )
 
-            # ⚠️ AN OUTAGE MUST NOT BECOME A MISS.
+            # ⚠️ COUNT ONE EMPTY TRACK, NOT ONE EMPTY QUERY VARIANT.
             #
-            # 34 searches returned nothing in two hours for trivially findable
-            # tracks, and every one was stamped "persistent miss, retrying
-            # Thursday 27 Nov" — a wasted week each, and a retry_count that
-            # pushed them past the backoff tiers. When the streak says the
-            # service is down, wait instead of scheduling a miss: the same shape
-            # as ``search_disconnected``, which deliberately does not count an
-            # attempt.
-            if _search_service_looks_down():
+            # This used to bump the process-wide streak inside the query loop,
+            # so ONE unfindable track consumed the whole allowance: every
+            # fallback variant counted separately ("Adele - One and Only",
+            # "Adele - and Only", "Adele - One Only", ...). Five variants of one
+            # song then tripped a breaker that would have needed five genuinely
+            # empty tracks.
+            #
+            # It also tripped the INFRASTRUCTURE counter, so the dashboard
+            # reported "search service is unreachable" while slskd was serving
+            # 250-response searches and completing downloads at 112 KB/s.
+            _empty_streak = _bump_empty_streak(False)
+
+            # ⚠️ AN OUTAGE MUST NOT BECOME A MISS.
+            # ...but a streak of empty RESULTS is not proof of an outage; it is
+            # evidence that these particular tracks are hard to find. Only the
+            # streak form applies here, and the wording says so.
+            if _empty_streak >= _EMPTY_STREAK_LIMIT:
                 log_unified(
-                    f"[QUEUE] {expected_artist} - {expected_title} → search "
-                    f"service unavailable ({_empty_search_streak} empty in a row), "
-                    "not counted as a miss"
+                    f"[QUEUE] {expected_artist} - {expected_title} → no results "
+                    f"({_empty_streak} in a row), not counted as a miss"
                 )
                 _log_queue_event(
                     "queued",
-                    f"{expected_artist} - {expected_title} → search service "
-                    "unavailable; retry shortly",
+                    f"{expected_artist} - {expected_title} → no results in a "
+                    "row; retrying shortly",
                     queue_id,
                 )
-                search_disconnected(item, queue_id, expected_artist, expected_title)
+                _park_behind_search_breaker(
+                    queue_id, expected_artist, expected_title,
+                    reason="search returned no results repeatedly",
+                )
                 return {"success": False, "status": "search_service_down", "skipped": True}
 
             log_unified(f"[QUEUE] {expected_artist} - {expected_title} → failed: no_results ({elapsed:.0f}s)")

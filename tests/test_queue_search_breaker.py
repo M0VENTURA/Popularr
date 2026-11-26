@@ -62,11 +62,30 @@ class TestTheBreaker:
             pipeline._note_infra_failure("disconnected")
         assert pipeline._search_unavailable_until == first
 
-    def test_an_empty_search_streak_trips_the_same_breaker(self):
+    def test_an_empty_search_streak_does_not_mark_the_service_unavailable(self):
+        """Empty RESULTS are evidence about the tracks, not the connection.
+
+        Reported: the dashboard said "Soulseek search service is unreachable"
+        while slskd was serving 250-response searches and completing a download
+        at 112 KB/s. One unfindable Adele track had burned the whole allowance
+        (each fallback query variant counted) and tripped the SAME persisted
+        breaker a real disconnection uses.
+        """
         for _ in range(pipeline._EMPTY_STREAK_LIMIT):
             pipeline._bump_empty_streak(False)
-        assert pipeline._search_service_looks_down() is True
-        assert pipeline._search_unavailable_until > 0
+
+        assert pipeline._search_service_looks_down() is False, (
+            "a run of zero-result searches must not claim an outage"
+        )
+        assert pipeline._search_unavailable_until == 0
+
+    def test_the_streak_still_counts_and_resets(self):
+        for _ in range(pipeline._EMPTY_STREAK_LIMIT):
+            pipeline._bump_empty_streak(False)
+        assert pipeline._empty_search_streak >= pipeline._EMPTY_STREAK_LIMIT
+
+        pipeline._bump_empty_streak(True)
+        assert pipeline._empty_search_streak == 0
 
 
 class TestTheCandidateBudget:

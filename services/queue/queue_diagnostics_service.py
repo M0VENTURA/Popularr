@@ -242,6 +242,41 @@ def _queue_processor_stats() -> dict[str, int]:
         "downloading": int(counts.get("downloading", 0) or 0),
         "failed": _sum(FAILED_STATUSES),
         "ready": _sum(COMPLETED_QUEUE_STATUSES),
+        "pending_release": int(counts.get("pending_release", 0) or 0),
+        "backed_off": int(counts.get("backed_off", 0) or 0),
+    }
+
+
+def _rejected_download_stats() -> dict[str, Any]:
+    """Why downloads were discarded, for the dashboard's failure alert.
+
+    ``queue_rejections`` is a separate table on purpose: a rejected download is
+    deleted and its row returned to ``queued``, so the reason is overwritten
+    within minutes and a live-queue read can never show it.
+    """
+    try:
+        from db.repositories.queue_rejections import rejection_counts
+
+        counts = rejection_counts() or {}
+    except Exception as exc:
+        logger.debug("Rejection counts unavailable: %s", exc)
+        return {"known": False, "total": 0, "top_reason": "", "top_count": 0}
+
+    # ``rejection_counts`` is {reason: count}. The dashboard needs the total and
+    # the dominant reason, not the whole breakdown.
+    numeric = {
+        str(reason): int(count or 0)
+        for reason, count in counts.items()
+        if str(reason or "").strip()
+    }
+    if not numeric:
+        return {"known": True, "total": 0, "top_reason": "", "top_count": 0}
+    top_reason, top_count = max(numeric.items(), key=lambda kv: kv[1])
+    return {
+        "known": True,
+        "total": sum(numeric.values()),
+        "top_reason": top_reason,
+        "top_count": top_count,
     }
 
 
@@ -367,6 +402,37 @@ def queue_processor_status() -> tuple[dict[str, Any], int]:
             "updated_at": "",
         }
 
+    # ── Whole-scheduler health ────────────────────────────────────────────
+    # The processor verdict above only covers ONE job. If the scheduler itself
+    # stops, every background job stops with it and nothing said so.
+    try:
+        from services.scheduler.scheduler_service import (
+            scheduler_health_snapshot,
+        )
+
+        scheduler = scheduler_health_snapshot()
+    except Exception as exc:
+        logger.debug("Scheduler health unavailable: %s", exc)
+        scheduler = {
+            "available": False, "running": False,
+            "job_count": 0, "jobs": [],
+            "reason": "scheduler health unavailable",
+        }
+
+    # ── Disk space ────────────────────────────────────────────────────────
+    # A full volume corrupts imports and tag writes in ways that look like
+    # unrelated bugs, so it is checked here rather than discovered later.
+    try:
+        from services.infrastructure.disk_space_service import read_disk_space
+
+        disk_space = read_disk_space()
+    except Exception as exc:
+        logger.debug("Disk space unavailable: %s", exc)
+        disk_space = {
+            "known": False, "level": "unknown", "worst_percent": None,
+            "warn_percent": 5.0, "critical_percent": 2.0, "volumes": [],
+        }
+
     return _ok(
         running=running,
         processor_running=running,
@@ -377,6 +443,9 @@ def queue_processor_status() -> tuple[dict[str, Any], int]:
         stale_after_seconds=stale_after,
         schedule=schedule,
         queue_stats=_queue_processor_stats(),
+        rejections=_rejected_download_stats(),
+        scheduler=scheduler,
+        disk_space=disk_space,
         detail=detail,
         message=message,
         auto_restart=auto_restart,

@@ -27,6 +27,23 @@ from services.queue.queue_constraints import COMPLETED_QUEUE_STATUSES
 logger = structlog.get_logger(__name__)
 
 
+def _supports_row_locks() -> bool:
+    """True on PostgreSQL; False on SQLite, which has no ``FOR UPDATE`` syntax.
+
+    SQLite rejects the clause with a syntax error rather than ignoring it, so a
+    query that reads fine in production failed outright in the test suite — and
+    the failure was swallowed into a debug log, silently disabling the feature
+    under test.
+    """
+    try:
+        from db.engine import db_session
+
+        with db_session() as session:
+            return session.bind.dialect.name == "postgresql"
+    except Exception:
+        return False
+
+
 def _as_utc_naive(value: Any) -> Any:
     """Store ``next_retry_at`` as a naive UTC wall clock.
 
@@ -981,9 +998,19 @@ def record_rejected_candidate(
     if not queue_id or not (username or filename):
         return False
     try:
+        # ⚠️ ``FOR UPDATE`` is PostgreSQL-only: SQLite rejects the syntax
+        # outright ("near FOR: syntax error"), which silently disabled this
+        # remember-the-rejection path under the test suite. The lock is an
+        # optimisation against a concurrent writer, not a correctness
+        # requirement — the SELECT+UPDATE below is idempotent (it returns early
+        # when the key is already stored), so it is simply omitted elsewhere.
+        _lock = " FOR UPDATE" if _supports_row_locks() else ""
         with db_session() as session:
             row = session.execute(
-                text("SELECT metadata FROM download_queue WHERE id = :id FOR UPDATE"),
+                text(
+                    "SELECT metadata FROM download_queue WHERE id = :id"
+                    + _lock
+                ),
                 {"id": queue_id},
             ).fetchone()
             if not row:

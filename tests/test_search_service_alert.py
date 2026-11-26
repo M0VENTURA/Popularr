@@ -20,6 +20,8 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "SEARCH_SERVICE_STATE_FILE", str(tmp_path / "search_service_state.json")
     )
+    # No transport in these tests: the liveness probe must fail closed.
+    monkeypatch.setattr(module, "_probe_transport_alive", lambda: False)
     return module
 
 
@@ -36,6 +38,23 @@ class TestTheSharedState:
         assert payload["reason"] == "search service disconnected"
         assert payload["tier"] == 4
         assert 800 <= payload["retry_in_seconds"] <= 900
+
+    def test_a_reachable_transport_overrides_a_stale_unavailable(self, state, monkeypatch):
+        """Reported: the banner said "unreachable" while slskd was healthy.
+
+        A breaker can be left open by evidence unrelated to the connection, and
+        the worker that would clear the file only writes on its next successful
+        search. When slskd answers a probe, the service IS reachable.
+        """
+        state.mark_search_unavailable(
+            "consecutive empty searches", pause_seconds=900, tier=1,
+        )
+        monkeypatch.setattr(state, "_probe_transport_alive", lambda: True)
+
+        payload = state.read_search_service_state()
+
+        assert payload["available"] is True
+        assert payload["reason"] == ""
 
     def test_an_expired_window_is_not_an_outage(self, state, monkeypatch):
         """A stale file must never become a permanent red banner."""

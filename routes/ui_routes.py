@@ -681,8 +681,6 @@ async def dashboard() -> Any:
             scan_running=False,
             perpetual=bool(features.get("perpetual", False)),
             forced=bool(features.get("force", False)),
-            launch_on_startup=bool(features.get("launch_on_startup", False)),
-            first_full_scan_done=True,
         )
     except Exception as exc:
         logger.error("Dashboard error", error=str(exc), exc_info=True)
