@@ -49,40 +49,46 @@ re-derived:
   **0.37 µs/call both ways**, 3.7 ms across 1000 albums. Reverted; pinned by a
   test so it is not "fixed" again.
 
+## Fixed — round 3
+
+| # | Defect | Where | Notes |
+|---|---|---|---|
+| 16 | `_fetch_essential_featured_rows` ran **eighteen leading-wildcard `ILIKE`s** over three columns | `finalise_stage.py` | No index serves `%x%`, so every call seq-scanned `tracks`; eight comparisons per column is also far more work than one. Now six portable `LOWER(col) LIKE` terms (`%feat%`, `%ft%`) — **broader**, which is safe because every row is re-validated in Python by `_track_has_featured_artist`. `LOWER() LIKE` rather than `~*` so it runs on SQLite too. |
+
 ## Found, not fixed (ranked)
 
-1. **`_fetch_essential_featured_rows` uses 14 leading-wildcard `ILIKE`s**
-   (`finalise_stage.py` ~3497) → guaranteed sequential scan, once per scan.
-   *Fix:* normalise "feat" into a boolean column at write time.
-
-2. **`_post_album_stars` runs twice per album** (provisional + reconcile). The
+1. **`_post_album_stars` runs twice per album** (provisional + reconcile). The
    second pass is needed — the global 5★ lock and marking cutoffs are
    artist-wide — but the star UPDATE deliberately rewrites every row on pass 2 to
    flip `stars_reconciled`, so the "unchanged skip" does not save writes.
    *Fix:* reconcile only albums whose inputs changed.
 
-3. **Per-track config getters** (~18-20/track: `resolve_weights`,
+2. **Per-track config getters** (~18-20/track: `resolve_weights`,
    `get_single_boost`, `get_metadata_score_floor`, `get_log_ratio_config`,
    `get_interlude_lb_outlier_config`, `get_genre_track_limit` ×3,
    `get_tagging_config`, `get_metadata_update_config` ×3). Constant per scan.
    *Not measured* — likely small individually.
 
-4. **`_run_full_enrichment` still re-UPDATEs release-extended fields** on every
-   album pass with no "already filled" WHERE (`album_stage.py` ~2016), so it
-   writes identical values. Cheap per row, but unconditional.
+3. **`_run_full_enrichment` re-UPDATEs release-extended fields** on every album
+   pass with no "already filled" WHERE (`album_stage.py` ~2016), so it writes
+   identical values. Cheap per row, but unconditional.
 
-5. **Discogs / Last.fm per-album calls with no cross-album cache:**
+4. **Discogs / Last.fm per-album calls with no cross-album cache:**
    `_fetch_external_genres`' AudioDB artist call and `_record_discogs_album_id`
    are per album even though both are artist-level facts.
 
-6. **`_load_track_artist_scores`** (`scan_stage_runner.py` ~1743) is an uncached
+5. **`_load_track_artist_scores`** (`scan_stage_runner.py` ~1743) is an uncached
    artist-catalogue SELECT per credited artist; its cache lives for one call.
    The artist-catalogue query exists in 4–5 overlapping forms.
 
-7. **`_fetch_essential_vocalist_rows`** selects the whole 4★+ slice once per
+6. **`_fetch_essential_vocalist_rows`** selects the whole 4★+ slice once per
    scan (`finalise_stage.py` ~3997), and
    **`_refresh_all_essential_vocalist_collections`** runs unconditionally when
    results are non-empty. No dirty check.
+
+7. **`_album_curve_star` still rebuilds `valid_album` per track** inside the
+   compiled-pool path when a caller passes a raw (unmarked) list. The scan's own
+   path now passes `_SortedPool`, so this only affects direct callers.
 
 ## What already works well
 

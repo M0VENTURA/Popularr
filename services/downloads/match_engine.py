@@ -218,6 +218,80 @@ def score_folder_match(
     return total_score, details
 
 
+def filename_evidence(
+    file_path: str,
+    queue_item: Dict[str, Any],
+) -> tuple[bool, bool]:
+    """``(filename_matches, title_confirmed_by_filename)`` for a queue item.
+
+    ⚠️ WHY THIS EXISTS AS A SECOND RETURN VALUE. ``filename_matches_queue_item``
+    answers a yes/no, which is what the acceptance path wants. But the METADATA
+    matcher needs to know something finer: when a file's TITLE TAG is wrong, does
+    the FILENAME independently confirm the right song?
+
+    Reported: Adele — "Someone Like You (ESQUIRE vs. OFFbeat remix)" was
+    discarded with *"Different song — the file is titled 'Greatest Hits 2012'"*.
+    The file's title tag was literally the ALBUM name (a mis-tagged rip), while
+    the filename read ``34.Someone Like You [ESQUIRE vs. OFFBeat Remix].mp3`` —
+    an exact match for the queue item. The tag was wrong, the download was right.
+
+    ``title_confirmed_by_filename`` is deliberately STRICTER than an overall
+    filename match: it requires the queue TITLE to be present in the filename
+    (or to score ≥0.85 similarity against it). A folder name matching the album,
+    or a loose artist coincidence, is not evidence about the song.
+    """
+    if not file_path or not queue_item:
+        return False, False
+
+    matches = filename_matches_queue_item(file_path, queue_item)
+    if not matches:
+        return False, False
+
+    title = str(queue_item.get("title") or "").strip()
+    if not title:
+        return True, False
+
+    title_norm = normalize_match_text(strip_brackets(title))
+    path_norm = normalize_core_filename(os.path.basename(file_path))
+    if not title_norm or not path_norm:
+        return True, False
+
+    if _title_token_confirmed(title_norm, path_norm):
+        return True, True
+    score = max(
+        _seq_ratio(title_norm, path_norm),
+        _token_overlap_score(title_norm, path_norm),
+    )
+    return True, score >= 0.85
+
+
+def _title_token_confirmed(title_norm: str, path_norm: str) -> bool:
+    """True when the filename names this title as one COMPLETE word sequence.
+
+    ⚠️ WORD-BOUNDED, NOT A BARE SUBSTRING. A plain ``title in path`` is unsafe for
+    short titles: "One" is a substring of "Someone" and of "One of These Nights".
+    Requiring the match to sit on token boundaries is both safer AND more
+    permissive than a length floor:
+
+    * ``"mama"`` survives — it appears as the whole last token of
+      ``spice girls greatest hits 04 mama`` — which a 5-character minimum
+      wrongly rejected (the reported Spice Girls case);
+    * ``"one"`` does NOT match ``someone like you``, because it is not bounded by
+      separators there.
+    """
+    if not title_norm or not path_norm:
+        return False
+    # Both sides went through normalize_match_text, which turns punctuation into
+    # spaces, so a whitespace-padded comparison is a token-boundary comparison.
+    return f" {title_norm} " in f" {path_norm} "
+
+
+#: A title shorter than this is only accepted on a whole-token match (see
+#: ``_title_token_confirmed``) or a high similarity score — never on a bare
+#: substring. Kept for callers that still want the raw length signal.
+_MIN_FILENAME_TITLE_CHARS = 5
+
+
 def filename_matches_queue_item(
     file_path: str,
     queue_item: Dict[str, Any],

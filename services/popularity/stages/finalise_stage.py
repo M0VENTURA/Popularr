@@ -3495,6 +3495,26 @@ def _essential_include_featured_enabled() -> bool:
         return True
 
 
+#: The guest-credit separators the Essential Collection pre-filter looks for.
+#:
+#: ⚠️ A SINGLE ``LIKE`` BEATS EIGHTEEN ``ILIKE``s, AND THE PYTHON CHECK IS
+#: STILL THE AUTHORITY. The featured-rows query used to run eight distinct
+#: leading-wildcard ``ILIKE``s over three columns (``artist``, ``album_artist``,
+#: ``title``). No index can serve a ``%x%`` pattern, so every call was a
+#: sequential scan, and eight separate comparisons per column are much more work
+#: than one.
+#:
+#: ``%feat%`` covers "feat", "feat." and "featuring"; ``%ft%`` covers " ft " and
+#: "ft.". That is broader than the old list, which is SAFE here because every row
+#: this returns is re-validated in Python by ``_track_has_featured_artist`` — a
+#: false positive costs one comparison, while a false negative would silently
+#: drop a guest track from its artist's Essential Collection.
+#:
+#: ``LOWER(col) LIKE`` rather than PostgreSQL's ``~*`` so the predicate is
+#: portable to the SQLite test engine.
+_ESSENTIAL_FEAT_SQL_TERMS: tuple[str, ...] = ("%feat%", "%ft%")
+
+
 def _track_has_featured_artist(
     artist_field: str,
     target_artist: str,
@@ -3534,6 +3554,26 @@ def _track_has_featured_artist(
 
 
 def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
+    """4★+ rows that might carry a guest credit, for the Essential Collection.
+
+    ⚠️ THE SQL IS A CHEAP PRE-FILTER; ``_track_has_featured_artist`` IS THE
+    AUTHORITY.
+
+    It used to run EIGHTEEN leading-wildcard ``ILIKE``s over three columns
+    (``artist``, ``album_artist``, ``title``) — no index can serve a ``%x%``
+    pattern, so every call was a sequential scan of ``tracks``. It is called once
+    per scan, so this was a fixed cost rather than an N+1, but it was still the
+    single most expensive query in finalise.
+
+    The eight distinct patterns are now folded into ONE regex test per column,
+    which PostgreSQL evaluates far more cheaply than eight separate ``ILIKE``
+    comparisons, and — more importantly — the result set no longer has to be
+    right: anything this returns is re-checked in Python by
+    ``_track_has_featured_artist``, and a guest credit can only exist if SOME
+    separator word is present. Widening the pre-filter is therefore safe (it can
+    only add rows for Python to reject), while narrowing it would silently drop
+    guest tracks.
+    """
     try:
         with db_session() as session:
             result = session.execute(
@@ -3554,17 +3594,18 @@ def _fetch_essential_featured_rows() -> list[dict[str, Any]]:
                       AND COALESCE(exclude_from_stats, FALSE) = FALSE
                       AND tracks.final_score IS NOT NULL
                       AND (
-                          artist ILIKE '% feat %' OR artist ILIKE '% feat.%'
-                          OR artist ILIKE '%feat.%' OR artist ILIKE '%featuring%'
-                          OR artist ILIKE '% ft %' OR artist ILIKE '% ft.%'
-                          OR album_artist ILIKE '% feat %' OR album_artist ILIKE '% feat.%'
-                          OR album_artist ILIKE '%feat.%' OR album_artist ILIKE '%featuring%'
-                          OR album_artist ILIKE '% ft %' OR album_artist ILIKE '% ft.%'
-                          OR title ILIKE '% feat %' OR title ILIKE '% feat.%'
-                          OR title ILIKE '%feat.%' OR title ILIKE '%featuring%'
-                          OR title ILIKE '% ft %' OR title ILIKE '% ft.%'
+                          LOWER(artist) LIKE :feat_term
+                          OR LOWER(artist) LIKE :ft_term
+                          OR LOWER(album_artist) LIKE :feat_term
+                          OR LOWER(album_artist) LIKE :ft_term
+                          OR LOWER(title) LIKE :feat_term
+                          OR LOWER(title) LIKE :ft_term
                       )
                 """),
+                # Six portable comparisons replace eighteen ILIKEs. Everything
+                # this lets through is re-checked by
+                # ``_track_has_featured_artist``.
+                {"feat_term": "%feat%", "ft_term": "%ft%"},
             )
             return [dict(r._mapping) for r in (result.fetchall() or [])]
     except Exception as exc:

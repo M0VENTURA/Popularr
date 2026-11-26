@@ -41,6 +41,19 @@ _config = get_queue_matching_config_v2()
 THRESHOLD = _config["threshold"]
 PARTIAL_MATCH = _config["partial_match"]
 STRICT_DURATION_SEC = _config["strict_duration_sec"]
+
+#: Extra length headroom when the FILENAME independently names the queue's song.
+#:
+#: 5s is the user's own rule — *"a 5 second variance should be ok, as long as the
+#: filename is a match"* — and it exists because two encoders disagree about the
+#: length of the same recording by a few seconds (silence padding, gapless flags,
+#: a slightly different lead-in). A file whose name matches the requested song
+#: exactly is not a different take just because its duration tag is 5s longer.
+#:
+#: ⚠️ It does NOT relax the check for a file we cannot otherwise identify: the
+#: band only widens when ``filename_evidence`` confirmed the TITLE, so a
+#: genuinely different recording still has to pass the configured tolerance.
+_FILENAME_CONFIRMED_LENGTH_TOLERANCE_SECONDS = 5.0
 TOLERANCE_DURATION_SEC = _config["tolerance_duration_sec"]
 
 _SPLIT_CONTRACTION_RE = re.compile(r"\b([a-z]+)\s+(s|t|m|re|ve|ll|d)\b")
@@ -178,6 +191,67 @@ def _metadata_matches_queue_item(
     queue_title = (queue_item.get("title") or "").strip()
     queue_duration = queue_duration_seconds(queue_item.get("duration"))
 
+    # ⚠️ IS THE FILE'S TITLE TAG JUST ITS ALBUM NAME?
+    #
+    # Reported: Adele — "Someone Like You (ESQUIRE vs. OFFbeat remix)" was
+    # discarded as *"Different song — the file is titled 'Greatest Hits 2012'"*.
+    # The title tag was the ALBUM name (a mis-tagged rip), and the filename
+    # ``34.Someone Like You [ESQUIRE vs. OFFBeat Remix].mp3`` was an exact match
+    # for the queue item. The tag was wrong; the download was right.
+    #
+    # A title equal to (or contained in) the album tag carries NO information
+    # about which song this is, so it must never be used to reject — it defers to
+    # the filename, exactly as a missing title does.
+    _title_norm_for_tag = normalize_core_title(file_title)
+    _album_norm_for_tag = normalize_string(file_album)
+    _title_is_album_name = bool(
+        _title_norm_for_tag
+        and _album_norm_for_tag
+        and (
+            _title_norm_for_tag == _album_norm_for_tag
+            or _title_norm_for_tag in _album_norm_for_tag
+        )
+    )
+
+    # ⚠️ IS THE ARTIST TAG ACTUALLY A TITLE?
+    #
+    # Reported: Britney Spears — "Everytime" discarded as *"Wrong artist — the
+    # file is credited to 'Can't Find Electric'"* on
+    # ``everytime/can't find electric - everytime - everytime.mp3``. "Can't Find
+    # Electric" is a SONG TITLE (the release folder is named after it), not a
+    # performer, so the artist tag is junk and cannot evidence a wrong artist.
+    #
+    # Detected by the tag matching the QUEUE TITLE or appearing in the file's own
+    # path — either way it names this song, so it is not an artist.
+    _artist_norm_for_tag = normalize_artist(file_artist or file_album_artist)
+    _queue_title_norm_for_tag = normalize_core_title(queue_title)
+    _artist_tag_is_title = bool(_artist_norm_for_tag) and (
+        (
+            bool(_queue_title_norm_for_tag)
+            and _simple_similarity(_artist_norm_for_tag, _queue_title_norm_for_tag) >= 0.85
+        )
+    )
+
+    # Does the FILENAME independently confirm the queue's song? Only asked when
+    # the tags look untrustworthy, because it is a file-path read + scoring pass
+    # and the common case is a clean tag match.
+    #
+    # ⚠️ Also asked when the EDITION annotations disagree: the filename is what
+    # distinguishes editions of the same track, so it is the deciding evidence
+    # there (see the edition gate below).
+    _edition_disagrees = not edition_annotations_compatible(file_title, queue_title)
+    _filename_confirms_title = False
+    if _title_is_album_name or _artist_tag_is_title or _edition_disagrees:
+        if file_path:
+            try:
+                from services.downloads.match_engine import filename_evidence
+
+                _file_matches, _filename_confirms_title = filename_evidence(
+                    file_path, queue_item
+                )
+            except Exception:
+                _filename_confirms_title = False
+
     # Everything a rejection message needs, recorded up front so each `return`
     # below only has to name its REASON.
     if detail is not None:
@@ -209,7 +283,15 @@ def _metadata_matches_queue_item(
     # Missing data → defer
     # ------------------------------------------------------------------
 
-    if not file_title:
+    # ⚠️ A TITLE TAG THAT IS REALLY THE ALBUM NAME PROVES NOTHING.
+    #
+    # Treated exactly like a missing title: defer to the filename rather than
+    # reject, because the tag is a mis-tagged rip, not a different song. See the
+    # note where ``_title_is_album_name`` is computed.
+    if not file_title or _title_is_album_name:
+        # ...unless the filename ITSELF names a different song. Deferring is
+        # safe (the caller falls through to filename matching, which rejects
+        # then); claiming a match here would not be.
         return None
 
     if not queue_title:
@@ -236,6 +318,24 @@ def _metadata_matches_queue_item(
     # ------------------------------------------------------------------
 
     if not edition_annotations_compatible(file_title, queue_title):
+        # ⚠️ THE FILENAME IS WHAT DISTINGUISHES EDITIONS — SO ASK IT FIRST.
+        #
+        # Reported: Spice Girls — "Mama" discarded as *"Different edition — the
+        # file's edition annotation does not match"*, on
+        # ``music/Spice Girls/Greatest Hits (2007)/Spice Girls - Greatest Hits -
+        # 04 - Mama.mp3``. The file's TITLE TAG carried an edition marker the
+        # queue item did not, but the FILENAME — which is what actually names the
+        # track that was downloaded — says plainly "Mama", and the containing
+        # folder already records the edition. The user's rule: *"the filename
+        # should help discount other editions of the same track"*.
+        #
+        # A hard reject here was the wrong shape: an edition disagreement in the
+        # TAG is not proof of a different recording when the filename agrees with
+        # the request. Deferring lets the filename matcher decide (it applies its
+        # own edition gate), while a file whose NAME really is another edition is
+        # still rejected there.
+        if _filename_confirms_title:
+            return None
         # Record BOTH annotations: the bare "does not match" sentence gave the
         # user nothing to verify the verdict against (see
         # ``_discard_detail_sentence``).
@@ -307,6 +407,15 @@ def _metadata_matches_queue_item(
     file_artist_generic = (
         not file_artist_norm
         or file_artist_norm in _GENERIC_COMPILATION_ARTISTS
+        # ⚠️ A TAG THAT IS ACTUALLY A SONG TITLE IS NOT AN ARTIST EITHER.
+        #
+        # Reported: Britney Spears — "Everytime" discarded as *"Wrong artist —
+        # the file is credited to 'Can't Find Electric'"*. That string is a SONG
+        # title (the release folder is named after it), not a performer, so it
+        # cannot evidence a wrong artist. Folding it in here makes EVERY artist
+        # gate below defer to filename matching, which is exactly what an unknown
+        # artist already does — one rule, no separate branches.
+        or _artist_tag_is_title
     )
     queue_is_compilation = (
         queue_album_artist_norm in _GENERIC_COMPILATION_ARTISTS
@@ -349,13 +458,29 @@ def _metadata_matches_queue_item(
         # "a different version of the recording" while this accepted up to 30s.
         # Read per call rather than captured at import so a Config-page edit
         # takes effect without a restart.
-        if diff > _length_tolerance_seconds():
+        #
+        # ⚠️ A CONFIRMED FILENAME EARNS A WIDER BAND.
+        #
+        # Reported twice: 10 Years — "Scream at the Walls" discarded as *"the file
+        # is 4:03 but the queue item is 3:58"*. That is a 5.0-5.3s gap against a
+        # 5.0s tolerance — right on the boundary, so it rejected for a rounding
+        # difference between two encoders' duration tags. The user's rule: *"a 5
+        # second variance should be ok, as long as the filename is a match"*.
+        #
+        # When the filename independently names this exact song, a small overrun
+        # is measurement noise, not a different recording — and the filename is
+        # what distinguishes editions of the same track, which is precisely what
+        # a length check is trying to do.
+        _tolerance = _length_tolerance_seconds()
+        if _filename_confirms_title:
+            _tolerance = max(_tolerance, _FILENAME_CONFIRMED_LENGTH_TOLERANCE_SECONDS)
+        if diff > _tolerance:
             # The numbers the report asks for: what the file actually is, and
             # what the queue item expected.
             _reject(
                 "wrong_length",
                 length_difference_seconds=round(float(diff), 1),
-                length_tolerance_seconds=_length_tolerance_seconds(),
+                length_tolerance_seconds=_tolerance,
             )
             return False  # strong reject
 
