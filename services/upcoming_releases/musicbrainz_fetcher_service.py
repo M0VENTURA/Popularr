@@ -43,6 +43,17 @@ logger = structlog.get_logger(__name__)
 SOURCE_NAME = "MusicBrainz Daily Collection"
 MBID_SOURCE_NAME = "musicbrainz_daily_scan"
 
+#: ⚠️ GLOBAL FINDINGS USED TO CARRY THE COLLECTION LABEL.
+#:
+#: ``_prepare_release_for_persistence`` hardcoded ``SOURCE_NAME``, so a release
+#: discovered from an artist OUTSIDE the collection was written with the exact
+#: same ``source`` string as a collection pass result. Nothing could tell them
+#: apart: the ``discovered`` filter was reduced to a guess, the Sources dropdown
+#: showed one bucket, and the operator had no way to see that global discovery
+#: had ever run.
+GLOBAL_SOURCE_NAME = "MusicBrainz Discovery"
+GLOBAL_MBID_SOURCE_NAME = "musicbrainz_discovery_scan"
+
 _ALLOWED_PRIMARY_TYPES = frozenset(
     {
         "album",
@@ -60,6 +71,14 @@ _DISQUALIFYING_SECONDARY_TYPES = frozenset(
 )
 
 _MAX_MUSICBRAINZ_QUERY_RESULTS = 100
+
+#: Upper bound for the GLOBAL pass's TOTAL across its three type requests.
+#:
+#: The per-request cap above is MusicBrainz's own limit (100 per query), but the
+#: global pass makes ONE query PER TYPE, so its total may legitimately exceed a
+#: single response. Clamping the total to 100 made the configured limit
+#: meaningless above that — setting 250 in Config silently behaved as 100.
+_MAX_GLOBAL_RESULTS = 300
 _MAX_COLLECTION_ARTISTS = 50_000
 _MAX_DATE_WINDOW_DAYS = 365
 _QUERY_DATE_MARGIN_DAYS = 90
@@ -749,6 +768,62 @@ def _fetch_artist_release_groups(
     return results
 
 
+#: Share of the global budget each primary type receives.
+#:
+#: ⚠️ THE OLD ALLOCATION WAS "album first, everything else gets the leftover".
+#: The loop took ``remaining = limit - len(results)`` per type, so at the
+#: default limit of 50 the album request consumed the entire budget: on a live
+#: check it returned 50 of 17,698 albums and then asked MusicBrainz for
+#: ZERO EPs (7,548 available) and ZERO singles (27,523 available). The pass then
+#: looked like it "found nothing new" while it had silently skipped two
+#: thirds of the catalogue.
+_GLOBAL_TYPE_SHARES: tuple[tuple[str, float], ...] = (
+    ("album", 0.50),
+    ("ep", 0.20),
+    ("single", 0.30),
+)
+
+#: How many results to request per type before the local sort.
+#:
+#: MusicBrainz's release-group SEARCH has no sort parameter — results come back
+#: in relevance order, which is unrelated to the release date. Asking for only
+#: the type's share therefore returns an arbitrary slice of tens of thousands
+#: of rows, and a release next month is as likely as one in 2031. Each type is
+#: fetched at the API maximum and then sorted locally by date, nearest first.
+_GLOBAL_POOL_PER_TYPE = 100
+
+
+def _type_share_counts(limit: int) -> dict[str, int]:
+    """Split ``limit`` across the primary types, largest-remainder style.
+
+    Every type with a non-zero share gets at least ONE slot when the budget
+    allows it: "no EPs at all" was the reported behaviour.
+    """
+    safe_limit = max(1, int(limit))
+    counts: dict[str, int] = {}
+    assigned = 0
+
+    for index, (ptype, share) in enumerate(_GLOBAL_TYPE_SHARES):
+        if index == len(_GLOBAL_TYPE_SHARES) - 1:
+            # The last type absorbs the rounding remainder so the total matches.
+            counts[ptype] = max(0, safe_limit - assigned)
+            break
+        take = int(round(safe_limit * share))
+        counts[ptype] = take
+        assigned += take
+
+    # A tiny budget must still cover every type it can.
+    if safe_limit >= len(_GLOBAL_TYPE_SHARES):
+        for ptype, _share in _GLOBAL_TYPE_SHARES:
+            if counts.get(ptype, 0) <= 0:
+                donor = max(counts, key=lambda k: counts[k])
+                if counts[donor] > 1:
+                    counts[donor] -= 1
+                    counts[ptype] = 1
+
+    return counts
+
+
 def _fetch_global_upcoming_release_groups(
     client: MusicBrainzHttpClient,
     limit: int,
@@ -757,14 +832,16 @@ def _fetch_global_upcoming_release_groups(
 ) -> list[dict[str, Any]]:
     """Fetch globally discovered albums, EPs, and singles.
 
-    Albums are requested first. EPs and singles use any remaining configured
-    capacity. All calls pass through the shared MusicBrainz client.
+    Each primary type gets a fixed share of the budget and its own request.
+    Because MusicBrainz's search cannot be sorted by date, every type is
+    fetched at the API maximum and then sorted locally so the NEAREST releases
+    win the budget rather than whichever ones relevance happened to rank.
     """
     safe_limit = max(
         1,
         min(
             int(limit),
-            _MAX_MUSICBRAINZ_QUERY_RESULTS,
+            _MAX_GLOBAL_RESULTS,
         ),
     )
 
@@ -773,14 +850,12 @@ def _fetch_global_upcoming_release_groups(
         maximum_date,
     )
 
-    results: list[dict[str, Any]] = []
-    seen_mbids: set[str] = set()
+    shares = _type_share_counts(safe_limit)
+    pool: dict[str, list[dict[str, Any]]] = {}
 
-    for primary_type in ("album", "ep", "single"):
-        remaining = safe_limit - len(results)
-
-        if remaining <= 0:
-            break
+    for primary_type, take in shares.items():
+        if take <= 0:
+            continue
 
         query = (
             f"primarytype:{primary_type} "
@@ -789,9 +864,11 @@ def _fetch_global_upcoming_release_groups(
 
         raw_release_groups = client.search_release_groups(
             query,
-            limit=remaining,
+            limit=max(take, _GLOBAL_POOL_PER_TYPE),
         )
 
+        type_items: list[dict[str, Any]] = []
+        seen_in_type: set[str] = set()
         for release_group in raw_release_groups or []:
             item = _serialise_release_group(
                 release_group,
@@ -807,24 +884,36 @@ def _fetch_global_upcoming_release_groups(
                 continue
 
             release_group_mbid = item["id"]
+            if release_group_mbid in seen_in_type:
+                continue
+            seen_in_type.add(release_group_mbid)
+            type_items.append(item)
 
+        # Neatest first. A year-only date ("2026") sorts before a dated release
+        # in the same year so it is not starved by rows with exact days.
+        type_items.sort(
+            key=lambda item: (
+                str(item.get("first_release_date") or ""),
+            )
+        )
+        pool[primary_type] = type_items[:take]
+
+    # Interleave the types in their declared order, dropping cross-type dupes.
+    results: list[dict[str, Any]] = []
+    seen_mbids: set[str] = set()
+    for primary_type, _share in _GLOBAL_TYPE_SHARES:
+        for item in pool.get(primary_type, []):
+            release_group_mbid = item["id"]
             if release_group_mbid in seen_mbids:
                 continue
-
             seen_mbids.add(release_group_mbid)
             results.append(item)
-
             if len(results) >= safe_limit:
                 break
+        if len(results) >= safe_limit:
+            break
 
-    results.sort(
-        key=lambda item: (
-            item.get("first_release_date") or ""
-        ),
-        reverse=True,
-    )
-
-    return results[:safe_limit]
+    return results
 
 
 # =============================================================================
@@ -1228,6 +1317,8 @@ def _prepare_release_for_persistence(
     release: dict[str, Any],
     *,
     artist_in_collection: bool,
+    source_name: str | None = None,
+    mbid_source: str | None = None,
 ) -> dict[str, Any] | None:
     """Sanitise one MusicBrainz release for database persistence."""
     from services.upcoming_releases.matching_service import (
@@ -1277,13 +1368,16 @@ def _prepare_release_for_persistence(
         "release_year": _release_year(
             release_date
         ),
-        "source": SOURCE_NAME,
+        # The pass that found this row, not a hardcoded constant: the global
+        # pass was writing the collection label, so the two were
+        # indistinguishable in the table and in the Sources filter.
+        "source": str(source_name or SOURCE_NAME),
         "primary_type": primary_type,
         "artist_in_collection": bool(
             artist_in_collection
         ),
         "release_group_mbid": release_group_mbid,
-        "mbid_source": MBID_SOURCE_NAME,
+        "mbid_source": str(mbid_source or MBID_SOURCE_NAME),
         "checked_at": checked_at,
     }
 
@@ -1292,6 +1386,9 @@ def _persist_releases(
     release_entries: Iterable[
         tuple[str, dict[str, Any], bool]
     ],
+    *,
+    source_name: str | None = None,
+    mbid_source: str | None = None,
 ) -> tuple[int, int]:
     """Persist collection and global releases through one shared path.
 
@@ -1300,7 +1397,14 @@ def _persist_releases(
         artist name,
         release dictionary,
         artist-in-collection flag
+
+    ``source_name`` / ``mbid_source`` label the rows this pass writes. They
+    default to the COLLECTION labels; the global pass passes its own so the two
+    are distinguishable in the table and the Sources filter.
     """
+    effective_source = str(source_name or SOURCE_NAME)
+    effective_mbid = str(mbid_source or MBID_SOURCE_NAME)
+
     inserted = 0
     updated = 0
 
@@ -1315,6 +1419,8 @@ def _persist_releases(
                     artist,
                     release,
                     artist_in_collection=artist_in_collection,
+                    source_name=effective_source,
+                    mbid_source=effective_mbid,
                 )
 
                 if not values:
@@ -1446,7 +1552,14 @@ def _persist_global_releases(
         collection_keys,
     )
 
-    return _persist_releases(entries)
+    # Its OWN source label: these rows were found from artists OUTSIDE the
+    # collection, and writing them under the collection label is what made
+    # global discovery invisible.
+    return _persist_releases(
+        entries,
+        source_name=GLOBAL_SOURCE_NAME,
+        mbid_source=GLOBAL_MBID_SOURCE_NAME,
+    )
 
 
 # =============================================================================
@@ -1561,6 +1674,7 @@ def fetch_musicbrainz_upcoming_releases(
         "global_candidates": 0,
         "global_inserted": 0,
         "global_updated": 0,
+        "global_by_type": {},
         "aborted": False,
     }
 
@@ -1582,7 +1696,7 @@ def fetch_musicbrainz_upcoming_releases(
     try:
         global_limit = _feature_int(
             "daily_musicbrainz_release_global_limit",
-            50,
+            200,
         )
 
         if global_limit > 0:
@@ -1611,11 +1725,22 @@ def fetch_musicbrainz_upcoming_releases(
             stats["inserted"] += global_inserted
             stats["updated"] += global_updated
 
+            # ⚠️ PER-TYPE COUNTS. "Global discovery found nothing new" was the
+            # report while the pass was actually persisting 50 albums and ZERO
+            # EPs/singles. A single total hid that; these numbers make it
+            # visible in the log and in the refresh status.
+            type_counts: dict[str, int] = {}
+            for item in global_releases:
+                _t = str(item.get("primary_type") or "unknown")
+                type_counts[_t] = type_counts.get(_t, 0) + 1
+            stats["global_by_type"] = type_counts
+
             logger.info(
                 "Global MusicBrainz discovery complete",
                 candidates=len(global_releases),
                 inserted=global_inserted,
                 updated=global_updated,
+                by_type=type_counts,
             )
 
     except Exception as exc:

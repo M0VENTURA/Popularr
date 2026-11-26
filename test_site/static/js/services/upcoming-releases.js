@@ -78,6 +78,11 @@
     items: [],
     filters: { source: 'all', page: 1, limit: DEFAULT_LIMIT },
     total: 0,
+    // Stored releases the display window excludes (see the route's
+    // ``outside_window``): the count that makes "discovery found nothing" and
+    // "discovery found plenty but you are looking at a 6-week slice" different
+    // statements.
+    outsideWindow: 0,
     hasMore: false,
   };
 
@@ -181,6 +186,7 @@
 
     state.items = data.releases || [];
     state.total = data.total || 0;
+    state.outsideWindow = Number(data.outside_window) || 0;
     state.hasMore = !!data.has_more;
     state.filters = filters;
     return data;
@@ -237,7 +243,15 @@
       return `<span class="source-key-badge" title="Scraper rule: ${esc(sourceKey)}">` +
         `<i class="bi bi-wikipedia"></i> ${esc(sourceKey)}</span>`;
     }
-    const isMusicBrainz = String(release.source || '').toLowerCase().includes('musicbrainz');
+    const source = String(release.source || '');
+    // ⚠️ DISCOVERY IS ITS OWN SOURCE. The global pass used to stamp its rows
+    // with the collection label, so a release from an artist you do NOT own
+    // was indistinguishable from one you do. Naming it here is what makes
+    // "new releases from other artists" visible at all.
+    if (source.toLowerCase().includes('discovery')) {
+      return '<span class="badge bg-success"><i class="bi bi-stars"></i> Discovered</span>';
+    }
+    const isMusicBrainz = source.toLowerCase().includes('musicbrainz');
     return isMusicBrainz
       ? '<span class="badge bg-info"><i class="bi bi-hexagon-fill"></i> MusicBrainz</span>'
       : '<span class="badge bg-secondary"><i class="bi bi-wikipedia"></i> Wikipedia</span>';
@@ -432,6 +446,21 @@
 
     const months = Object.keys(grouped).sort();
     const todayMonth = new Date().toISOString().slice(0, 7);
+    // ⚠️ UPCOMING FIRST, THEN THE PAST — the server already orders rows that
+    // way, and this regrouped them back into month-ascending order, which put
+    // October (the start of the 28-day lookback) above the current month. The
+    // current month, then every future month soonest-first, then past months
+    // most-recent-first.
+    const monthDepth = (m) => (m === 'Unknown' || m === 'Unknown Date' ? 3 : 0);
+    months.sort((a, b) => {
+      const da = monthDepth(a);
+      const db = monthDepth(b);
+      if (da !== db) return da - db;
+      const aFuture = a >= todayMonth;
+      const bFuture = b >= todayMonth;
+      if (aFuture !== bFuture) return aFuture ? -1 : 1;
+      return aFuture ? a.localeCompare(b) : b.localeCompare(a);
+    });
     const defaultOpen = months.indexOf(todayMonth) >= 0 ? todayMonth : months[0];
 
     const sections = months.map((month, idx) => {

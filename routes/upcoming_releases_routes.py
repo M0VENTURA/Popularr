@@ -19,7 +19,11 @@ from api_clients.musicbrainz_http import MusicBrainzHttpClient, escape_lucene_sp
 from db.engine import db_session
 from helpers.config_helpers import get_api_integration
 from services.upcoming_releases.matching_service import match_to_musicbrainz
-from services.upcoming_releases.musicbrainz_fetcher_service import get_refresh_status, start_musicbrainz_refresh
+from services.upcoming_releases.musicbrainz_fetcher_service import (
+    GLOBAL_SOURCE_NAME,
+    get_refresh_status,
+    start_musicbrainz_refresh,
+)
 from services.upcoming_releases.wikipedia_scraper_service import get_release_window, scrape
 
 logger = structlog.get_logger(__name__)
@@ -190,6 +194,9 @@ def api_upcoming_releases() -> Any:
             params["win7_end_year"] = str((_today + timedelta(days=window_days)).year)
 
         if hide_in_library:
+            # Keyed on ARTIST+ALBUM, which is the right test: a NEW album by an
+            # artist you own does not match (its album name is new), so it still
+            # shows. Only the exact album you already have is hidden.
             _lib_clause = """NOT EXISTS (
                 SELECT 1 FROM (
                     SELECT DISTINCT
@@ -213,30 +220,70 @@ def api_upcoming_releases() -> Any:
         total_where_sql = where_sql
         count_params = dict(params)
 
+        # ⚠️ HOW MUCH IS STORED BUT OUTSIDE THE DISPLAY WINDOW.
+        #
+        # The display window (28 back / 14 forward by default) is NARROWER than
+        # what the MusicBrainz fetch persists (42 / 120). Without this count the
+        # extra rows were silent: "it only pulls upcoming releases for artists
+        # that already exist" is what a user concludes when discovery has stored
+        # hundreds of releases and the table shows a couple of dozen.
+        outside_window = 0
+
+        # ⚠️ "UPCOMING" MUST MEAN SOONEST-FIRST, NOT OLDEST-FIRST.
+        #
+        # Reported: "it's late November and it shows October and one week of
+        # November". The display window opens 28 days BACK, and the query
+        # ordered purely ascending from that start — so page 1 (limit 50) was
+        # filled by the OLDEST rows in the window, i.e. releases that had
+        # already come out. Nothing genuinely upcoming ever reached the top.
+        #
+        # Sorting is therefore: releases dated TODAY OR LATER first, soonest
+        # first; then the past, most recent first. A year-only date ("2026") is
+        # a TEXT prefix and would otherwise sort before every dated release of
+        # that year, so those come after the dated rows.
+        _today_iso = datetime.now().date().isoformat()
+        _upcoming_order = (
+            "ORDER BY "
+            "CASE WHEN release_date IS NULL THEN 3 "
+            "     WHEN LENGTH(release_date) = 4 THEN 2 "
+            "     WHEN release_date >= :today_iso THEN 0 "
+            "     ELSE 1 END ASC, "
+            "CASE WHEN release_date >= :today_iso "
+            "     THEN release_date END ASC NULLS LAST, "
+            "CASE WHEN release_date < :today_iso "
+            "     THEN release_date END DESC NULLS LAST, "
+            "release_date ASC NULLS LAST, "
+            "id ASC "
+            "LIMIT :limit OFFSET :offset"
+        )
+
         with db_session() as session:
             total = session.execute(
                 text(f"SELECT COUNT(*) FROM upcoming_releases{total_where_sql}"),
                 count_params,
             ).scalar() or 0
+
+            # Stored rows that the date window excludes — the ones that make
+            # discovery look like it only covers collection artists.
+            try:
+                _all_total = int(
+                    session.execute(
+                        text("SELECT COUNT(*) FROM upcoming_releases")
+                    ).scalar()
+                    or 0
+                )
+                outside_window = max(0, _all_total - int(total))
+            except Exception:
+                outside_window = 0
+
             result = session.execute(
-                text(
-                    f"SELECT * FROM upcoming_releases{where_sql} "
-                    # ⚠️ A year-only date ("2026") is a TEXT prefix, so plain
-                    # ``release_date ASC`` sorts it BEFORE every dated release
-                    # of that year ("2026" < "2026-01-01"). A page of 40
-                    # year-only rows then fills the first page and hides the
-                    # near-term months entirely ("no November, only early
-                    # October"). Sort by YEAR first, then dated releases
-                    # chronologically, then the year-only/TBA rows at the END
-                    # of their year.
-                    "ORDER BY "
-                    "SUBSTR(release_date, 1, 4) ASC NULLS LAST, "
-                    "CASE WHEN LENGTH(release_date) = 4 THEN 1 ELSE 0 END ASC, "
-                    "release_date ASC NULLS LAST, "
-                    "id ASC "
-                    "LIMIT :limit OFFSET :offset"
-                ),
-                {**params, "limit": limit + 1, "offset": (page - 1) * limit},
+                text(f"SELECT * FROM upcoming_releases{where_sql} {_upcoming_order}"),
+                {
+                    **params,
+                    "today_iso": _today_iso,
+                    "limit": limit + 1,
+                    "offset": (page - 1) * limit,
+                },
             )
             rows = result.fetchall()
 
@@ -245,7 +292,16 @@ def api_upcoming_releases() -> Any:
         releases = [dict(r._mapping) for r in rows]
 
         if release_filter == "discovered":
-            releases = [r for r in releases if (r.get("source") or "") != "MusicBrainz Daily Collection"]
+            # ⚠️ THIS WAS INVERTED. It EXCLUDED "MusicBrainz Daily Collection"
+            # and kept everything else — but the global pass used to write its
+            # rows under that exact label, so "Discovered" showed collection
+            # rows and hid the discovered ones. The global pass now labels its
+            # own rows, and this keeps only those.
+            releases = [
+                r for r in releases
+                if (r.get("source") or "") == GLOBAL_SOURCE_NAME
+                or not r.get("artist_in_collection")
+            ]
 
         artist_names = list({r.get("artist_name", "") or "" for r in releases if r.get("artist_name")})
 
@@ -350,6 +406,7 @@ def api_upcoming_releases() -> Any:
             "success": True,
             "releases": releases,
             "total": total,
+            "outside_window": outside_window,
             "page": page,
             "limit": limit,
             "has_more": has_more,
@@ -361,18 +418,31 @@ def api_upcoming_releases() -> Any:
 
 @upcoming_bp.route("/sources", methods=["GET"])
 def api_upcoming_sources() -> Any:
-    """Distinct release sources with counts, for the Source filter dropdown."""
+    """Distinct release sources with counts, for the Source filter dropdown.
+
+    ⚠️ The global pass used to write the COLLECTION label, so this dropdown
+    showed a single MusicBrainz bucket and the two passes could not be told
+    apart — the "Discovered" filter could never match anything. Discovery rows
+    now carry their own label and get their own key here.
+    """
     try:
         with db_session() as session:
             rows = session.execute(
                 text("""
                     SELECT
                         CASE
-                            WHEN source = 'MusicBrainz Daily Collection' THEN 'musicbrainz_daily_collection'
+                            WHEN source = 'MusicBrainz Daily Collection'
+                                THEN 'musicbrainz_daily_collection'
+                            WHEN source = 'MusicBrainz Discovery'
+                                THEN 'musicbrainz_discovery'
                             ELSE COALESCE(source_key, source)
                         END AS key,
                         CASE
-                            WHEN source = 'MusicBrainz Daily Collection' THEN 'MusicBrainz Daily Collection'
+                            WHEN source IN (
+                                'MusicBrainz Daily Collection',
+                                'MusicBrainz Discovery'
+                            )
+                                THEN source
                             ELSE COALESCE(source_key, source)
                         END AS label,
                         COUNT(*) AS count

@@ -1087,6 +1087,12 @@ def get_release_window() -> tuple[datetime, datetime]:
     ``loadUpcomingReleasesTable()`` sends no ``window`` parameter, so the
     separate "tight" clause in ``upcoming_releases_routes`` (``window_days > 0``)
     never applies — this function alone governs what the dashboard shows.
+
+    ⚠️ IT IS NARROWER THAN WHAT THE FETCH STORES (42 back / 120 forward). That is
+    intentional — 4 weeks back is the point — but it means most discovered
+    releases are stored and not displayed. The Upcoming page therefore shows a
+    "N discovered outside this window" notice (see ``/?include_outside_window``)
+    instead of silently dropping them.
     """
     lookback_days = _window_days(
         "upcoming_releases_lookback_days",
