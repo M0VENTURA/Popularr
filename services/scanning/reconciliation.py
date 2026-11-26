@@ -811,21 +811,43 @@ def find_adoptable_track_id(
     album_artist: str = "",
     by_path: dict[str, list[str]],
     by_mbid: dict[str, list[dict[str, Any]]],
+    live_ids: set[str] | None = None,
 ) -> tuple[str, str] | None:
     """Return ``(old_id, match_reason)`` for the same logical track, or None.
 
     Path is the strongest evidence. MBID is accepted only when the title and
     artist corroborate — a Work/recording ID alone must not merge a live,
     cover, remix, acoustic or re-recorded version.
+
+    ⭐ ``live_ids`` — THE IDS NAVI DROME STILL SERVES FOR THIS ALBUM.
+
+    Reported: *"the imports don't seem to be happening if a track with the same
+    artist, album and track name exists, even though the filename is different."*
+
+    Adoption exists for a file that MOVED or was RENAMED: Navidrome hands it a
+    new song id, and renaming the existing row preserves every Popularr-owned
+    column (stars, genres, manual edits) instead of orphaning them. But it must
+    never fire when the OLD file is STILL PRESENT — that is a second, genuinely
+    distinct file on disk, and adopting collapses the two into one row (the
+    duplicate is "not imported", and the original's row is repointed at it).
+
+    The old id being in ``live_ids`` is exactly that evidence: the song it names
+    is still in Navidrome, so the new file is a DUPLICATE, not a successor.
+    ``None`` keeps the old behaviour for callers that have no live set.
     """
     new_id = _text(track.get("id"))
     if not new_id:
         return None
 
+    live = live_ids or set()
+
+    def _is_live(old_id: str) -> bool:
+        return bool(old_id) and old_id in live
+
     path_matches: set[str] = set()
     for key in path_keys(track.get("path") or track.get("file_path")):
         for old_id in by_path.get(key, []):
-            if old_id and old_id != new_id:
+            if old_id and old_id != new_id and not _is_live(old_id):
                 path_matches.add(old_id)
     if len(path_matches) == 1:
         return next(iter(path_matches)), "file_path"
@@ -846,7 +868,9 @@ def find_adoptable_track_id(
         return None
     candidates = [
         row for row in by_mbid.get(mbid, [])
-        if _text(row.get("id")) and _text(row.get("id")) != new_id
+        if _text(row.get("id"))
+        and _text(row.get("id")) != new_id
+        and not _is_live(_text(row.get("id")))
     ]
     if not candidates:
         return None

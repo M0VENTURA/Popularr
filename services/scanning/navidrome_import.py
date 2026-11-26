@@ -1086,6 +1086,22 @@ def scan_artist_to_db(
                 f"Navidrome Import - {album_artist_value} - Album "
                 f"{album_index}/{len(albums)}: {album_name}"
             )
+            # ⭐ THE IDS NAVI DROME STILL SERVES FOR THIS ALBUM. A duplicate file
+            # (same artist/album/title, different name) has its own id in this
+            # list, so the id of the file it might "adopt" is ALSO here — and
+            # adoption must be refused in that case (see
+            # ``find_adoptable_track_id``).
+            #
+            # ⚠️ DELIBERATELY ALBUM-SCOPED, not the run-wide
+            # ``navidrome_track_ids``: that set is seeded with DB ids from
+            # skipped/renamed albums, so a row this album legitimately MOVED
+            # would look "live" and lose its adoption (orphaning its stars and
+            # genres). The current album's live list is the precise signal, and
+            # the reported case — a duplicate with the same artist, album and
+            # title — lives in the same album.
+            _live_navidrome_ids = {
+                str(_t.get("id")) for _t in tracks if _t.get("id")
+            }
             for track in tracks:
                 new_id = str(track.get("id") or "").strip()
                 if not new_id or new_id in existing_track_ids:
@@ -1096,6 +1112,7 @@ def scan_artist_to_db(
                     album_artist=album_artist_value,
                     by_path=existing_by_path,
                     by_mbid=existing_by_mbid,
+                    live_ids=_live_navidrome_ids,
                 )
                 if not match:
                     # If several existing rows share this exact file path, do

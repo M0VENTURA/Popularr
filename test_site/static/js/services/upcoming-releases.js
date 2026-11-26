@@ -232,7 +232,12 @@
   /** Queue a released album (album-typed download_queue item). */
   async function queueDownload(id) {
     const data = await global.api.postJson(QUEUE_ENDPOINT, { upcoming_release_id: id });
-    if (!data.success) throw new Error(data.error || 'Queue failed');
+    // ``needs_manual_search`` is a POSITIVE outcome the caller acts on, not an
+    // error: the server tried to match the release and could not, so the user
+    // must pick one. Letting it throw would surface it as a red error toast.
+    if (!data.success && !data.needs_manual_search) {
+      throw new Error(data.error || 'Queue failed');
+    }
     return data;
   }
 
@@ -683,9 +688,34 @@
 
   async function queueById(releaseId, button, title) {
     if (!releaseId) return;
-    return global.buttonState.withBusy(button, '', async () => {
+    // "Matching…" while the server runs the MusicBrainz match, then the queue.
+    return global.buttonState.withBusy(button, 'Matching…', async () => {
       try {
         const result = await queueDownload(releaseId);
+
+        // ⭐ THE SERVER COULD NOT MATCH A RELEASE — ASK THE USER TO PICK ONE.
+        //
+        // Reported: *"I added Tyr by pressing queue, but it just added the album
+        // name, not each track."* An unmatched release used to become a single
+        // dead album row. Now the server tries to match first and, failing that,
+        // hands back this signal; the manual search opens pre-filled so the user
+        // can choose the release (and each track then queues).
+        if (result.needs_manual_search) {
+          const artist = result.artist || '';
+          const album = result.album || title || '';
+          if (typeof global.openGlobalMbSearch === 'function') {
+            global.toast.info
+              ? global.toast.info(result.error || 'Choose the matching release.')
+              : global.toast.warning(result.error || 'Choose the matching release.');
+            global.openGlobalMbSearch(artist, album, function () {
+              if (onRefresh) onRefresh();
+            });
+          } else {
+            notifyError(result.error || 'No MusicBrainz release matched.');
+          }
+          return;
+        }
+
         if (result.already_queued) {
           global.toast.warning(`Already in queue${title ? ` — "${title}"` : ''}`);
         } else {
@@ -695,7 +725,15 @@
           if (global.buttonState.setDone) {
             global.buttonState.setDone(button, { label: 'Queued', icon: 'check-lg' });
           }
-          global.toast.queued(title || 'Release');
+          // ``queue_shape: 'album'`` = a single album row, not a per-track queue.
+          // Say so rather than implying every song is downloading.
+          if (result.queue_shape === 'album') {
+            global.toast.warning(
+              result.message || 'Queued as a single album item — no tracklist was available.'
+            );
+          } else {
+            global.toast.queued(title || 'Release');
+          }
         }
         if (onRefresh) onRefresh();
       } catch (error) {

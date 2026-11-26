@@ -94,6 +94,39 @@ TERMINAL_QUEUE_STATUSES: frozenset[str] = frozenset({
     "deleted",
 })
 
+#: Statuses shown in the "In your download queue" picker on the folder-match
+#: screen (``GET /api/downloads/queue/albums``).
+#:
+#: Reported: *"when searching for a release, it shows all files in the download
+#: queue including items already imported."*
+#:
+#: The endpoint used a hand-written list that INCLUDED ``imported`` and
+#: ``in_collection`` — exactly the rows that are already in the library, so the
+#: picker offered to match a folder to something already imported. A QUEUE picker
+#: must show only work still in flight.
+#:
+#: ⚠️ ``completed`` IS kept: in this codebase it means "downloaded, awaiting
+#: organization", which is still queue work. Only the already-imported and the
+#: gone/tombstoned statuses are excluded.
+QUEUE_ALBUM_PICKER_STATUSES: frozenset[str] = frozenset({
+    "queued",
+    "searching",
+    "downloading",
+    "processing",
+    "moving",
+    "matched",
+    "completed",
+    "backed_off",
+    "pending_release",
+    "pending_match",
+    "possible_duplicate",
+    "duplicate",
+    "queried",
+    "copy_recommended",
+    "awaiting_selection",
+    "discovered",
+})
+
 # ⚠️ Statuses the QUEUE PAGE displays — and therefore the set both its count
 # pills and its list must be derived from.
 #

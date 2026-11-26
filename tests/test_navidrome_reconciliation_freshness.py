@@ -148,7 +148,57 @@ class TestIdAdoption:
         assert match is None
 
 
-class TestLocalAuthority:
+class TestALiveDuplicateIsNotAdopted:
+    """A second file with the same tags must be IMPORTED, not merged away.
+
+    REPORTED: *"the imports don't seem to be happening if a track with the same
+    artist, album and track name exist, even though the filename is different."*
+
+    Adoption exists for a file that MOVED. When the old file is still served by
+    Navidrome its id is in ``live_ids`` — so the new file is a duplicate on disk,
+    and adopting collapses both into one row (the old row's ``file_path`` is
+    repointed at the new file, and no second row is ever inserted).
+    """
+
+    def test_mbid_adoption_is_refused_when_the_old_file_is_live(self):
+        by_path, by_mbid = rec.build_existing_indexes([_db_row(id="old-1")])
+        match = rec.find_adoptable_track_id(
+            _navidrome_track(id="new-1", path="/music/Artist/Album/01 - Song.mp3"),
+            album_name="Album", album_artist="Artist",
+            by_path=by_path, by_mbid=by_mbid,
+            live_ids={"old-1", "new-1"},
+        )
+        assert match is None, "a live duplicate must not be adopted (it would collapse two files)"
+
+    def test_mbid_adoption_still_fires_when_the_old_id_is_gone(self):
+        """CONTROL: a genuine MOVE (old id no longer served) still adopts."""
+        by_path, by_mbid = rec.build_existing_indexes([_db_row(id="old-1")])
+        match = rec.find_adoptable_track_id(
+            _navidrome_track(id="new-1", path="/music/Artist/Album/renamed.mp3"),
+            album_name="Album", album_artist="Artist",
+            by_path=by_path, by_mbid=by_mbid,
+            live_ids={"new-1"},  # old-1 is NOT live → it moved
+        )
+        assert match == ("old-1", "recording_mbid")
+
+    def test_path_adoption_is_refused_when_the_old_id_is_live(self):
+        by_path, by_mbid = rec.build_existing_indexes([_db_row(id="old-1")])
+        match = rec.find_adoptable_track_id(
+            _navidrome_track(id="new-1"), album_name="Album",
+            album_artist="Artist", by_path=by_path, by_mbid=by_mbid,
+            live_ids={"old-1", "new-1"},
+        )
+        assert match is None
+
+    def test_no_live_set_keeps_the_old_behaviour(self):
+        """CONTROL: callers without a live set are unaffected."""
+        by_path, by_mbid = rec.build_existing_indexes([_db_row(id="old-1")])
+        match = rec.find_adoptable_track_id(
+            _navidrome_track(id="new-1", path="/music/Artist/Album/renamed.mp3"),
+            album_name="Album", album_artist="Artist",
+            by_path=by_path, by_mbid=by_mbid,
+        )
+        assert match == ("old-1", "recording_mbid")
     def test_matching_payload_clears_dirty(self):
         assert rec.local_authority_values_match(
             _db_row(title="Corrected"),

@@ -41,10 +41,14 @@ MB_QUEUE_JS = REPO_ROOT / "test_site/static/js/services/musicbrainz-queue.js"
 
 
 class TestTheQueueRouteResolvesTheGroupToARelease:
+    #: The handler grew when the on-demand match step was added; the window is a
+    #: convenience for reading, not a contract, so keep it generous.
+    _WINDOW = 12000
+
     def test_it_resolves_before_queueing(self) -> None:
         src = QUEUE_ROUTE.read_text(encoding="utf-8")
         start = src.index("async def api_queue_upcoming")
-        body = src[start:start + 6000]
+        body = src[start:start + self._WINDOW]
         assert "resolve_release_id" in body, (
             "the route queues the stored id directly; a release-GROUP id has no "
             "tracklist, so nothing can be queued per track"
@@ -54,7 +58,7 @@ class TestTheQueueRouteResolvesTheGroupToARelease:
     def test_it_prefers_the_concrete_release(self) -> None:
         src = QUEUE_ROUTE.read_text(encoding="utf-8")
         start = src.index("async def api_queue_upcoming")
-        body = src[start:start + 6000]
+        body = src[start:start + self._WINDOW]
         assert "concrete_release_id or release_mbid" in body, (
             "the group id must only be used when no concrete release resolved"
         )

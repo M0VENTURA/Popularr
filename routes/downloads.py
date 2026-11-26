@@ -128,12 +128,12 @@ def api_queue_albums() -> Any:
     release id) had to be found again by hand. The monitor shows these first,
     with the search underneath for anything else.
     """
-    statuses = [
-        "queued", "searching", "downloading", "processing", "moving",
-        "matched", "completed", "imported", "in_collection", "backed_off",
-        "pending_release", "pending_match", "possible_duplicate", "duplicate",
-        "queried", "copy_recommended",
-    ]
+    # ⚠️ EXCLUDE ALREADY-IMPORTED ROWS. A picker offering to match a folder to an
+    # album that is already in the library is noise at best and misleading at
+    # worst. See ``QUEUE_ALBUM_PICKER_STATUSES`` for why ``completed`` stays in.
+    from services.queue.queue_constraints import QUEUE_ALBUM_PICKER_STATUSES
+
+    statuses = sorted(QUEUE_ALBUM_PICKER_STATUSES)
     try:
         from sqlalchemy import bindparam
 
@@ -632,6 +632,79 @@ async def api_queue_upcoming() -> Any:
 
         year = int(rel_date[:4]) if len(rel_date) >= 4 and rel_date[:4].isdigit() else None
         release_mbid = (release.get("release_group_mbid") or "").strip() or None
+
+        # ⭐ NO MATCHED RELEASE YET → TRY TO MATCH IT NOW, BEFORE QUEUEING.
+        #
+        # Reported: *"I added Tyr by pressing the queue button, but it just added
+        # the album name, not each track. When I used the search, I was able to
+        # find it with the same release date in MusicBrainz."*
+        #
+        # Only a MATCHED release had a release-group id, so an unmatched/candidate
+        # row skipped the per-track path entirely and fell through to a single
+        # album-typed row — which the queue then parks forever as
+        # ``pending_release`` because it has no tracklist to expand.
+        #
+        # Running the same matcher the "match" endpoint uses closes that gap. Only
+        # a HIGH-confidence match is used automatically; a mere candidate is left
+        # for the user to confirm, and "no match" opens the manual search.
+        match_attempted = False
+        if not release_mbid:
+            match_attempted = True
+            try:
+                from services.upcoming_releases.matching_service import (
+                    match_to_musicbrainz,
+                )
+
+                _match = match_to_musicbrainz(artist, album, rel_date or None)
+                _match_status = str((_match or {}).get("status") or "")
+                _match_mbid = str((_match or {}).get("mbid") or "").strip()
+                if _match_status == "matched" and _match_mbid:
+                    release_mbid = _match_mbid
+                    try:
+                        from routes.upcoming_releases_routes import (
+                            _persist_match_result,
+                        )
+
+                        _persist_match_result(release_id, _match)
+                    except Exception as _persist_exc:
+                        logger.debug(
+                            "Could not persist the on-demand upcoming match",
+                            release_id=release_id, error=str(_persist_exc),
+                        )
+                    logger.info(
+                        "Upcoming release matched to MusicBrainz on demand; "
+                        "queueing per track",
+                        release_id=release_id, album=album, release_group_mbid=_match_mbid,
+                    )
+                else:
+                    logger.info(
+                        "Upcoming release did not match MusicBrainz on demand "
+                        "— manual search required",
+                        release_id=release_id, album=album,
+                        match_status=_match_status,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "On-demand MusicBrainz match failed — manual search required",
+                    release_id=release_id, album=album, error=str(exc),
+                )
+
+        if not release_mbid:
+            # ⚠️ DO NOT insert a dead album row. It has no tracklist, so the
+            # queue parks it as ``pending_release`` forever and the user sees an
+            # "album" that never downloads. Hand the caller a manual-search signal
+            # instead, with the artist/album pre-filled.
+            return jsonify({
+                "success": False,
+                "needs_manual_search": True,
+                "match_attempted": match_attempted,
+                "artist": artist,
+                "album": album,
+                "error": (
+                    f"No MusicBrainz release could be matched for "
+                    f"'{artist} — {album}'. Choose the release manually."
+                ),
+            })
 
         # ⚠️ THE STORED ID IS A RELEASE-GROUP ID, NOT A RELEASE ID.
         #

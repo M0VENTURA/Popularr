@@ -133,6 +133,44 @@ class TestQueueAlbumsEndpoint:
         data = await resp.get_json()
         assert data["albums"] == []
 
+    async def test_already_imported_albums_are_not_offered(self, client):
+        """REPORTED: the picker listed files that had already been imported.
+
+        A folder-match picker must show work still in flight, not albums that are
+        already in the library. ``imported`` and ``in_collection`` are exactly
+        that, and the endpoint used to include both.
+        """
+        _queue_row(album="Still Queued", artist="Artist", release_mbid="rel-1")
+        _queue_row(
+            album="Already Imported", artist="Artist",
+            status="imported", release_mbid="rel-2",
+        )
+        _queue_row(
+            album="In Collection", artist="Artist",
+            status="in_collection", release_mbid="rel-3",
+        )
+        # Tombstones were never offered and must stay out.
+        for gone in ("removed", "cancelled", "deleted"):
+            _queue_row(
+                album=f"{gone.title()} Album", artist="Artist",
+                status=gone, release_mbid=f"rel-{gone}",
+            )
+
+        resp = await client.get("/api/downloads/queue/albums")
+        data = await resp.get_json()
+        names = [a["album"] for a in data["albums"]]
+        assert names == ["Still Queued"], names
+
+    async def test_a_completed_row_is_still_offered(self, client):
+        """CONTROL: ``completed`` = downloaded but not yet organized."""
+        _queue_row(
+            album="Awaiting Organize", artist="Artist",
+            status="completed", release_mbid="rel-1",
+        )
+        resp = await client.get("/api/downloads/queue/albums")
+        data = await resp.get_json()
+        assert [a["album"] for a in data["albums"]] == ["Awaiting Organize"]
+
 
 class TestFolderRowLayout:
     def test_the_row_wraps_actions_below_the_text(self):

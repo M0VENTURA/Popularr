@@ -825,6 +825,10 @@ class TestTheActivityFeed:
 
 class TestQueueFeedback:
 
+    #: ``queueById`` grew when the "needs manual search" branch was added, so the
+    #: source window must be generous enough to reach ``setDone``/``catch``.
+    _QUEUE_BODY_WINDOW = 3200
+
     def test_the_tick_is_shown_before_the_refresh(self, releases_js: str) -> None:
         """⭐ Order matters: `onRefresh()` re-renders the list.
 
@@ -832,17 +836,20 @@ class TestQueueFeedback:
         confirmation the brief asks for would never appear.
         """
         idx = releases_js.index("async function queueById(")
-        body = releases_js[idx: idx + 1200]
+        body = releases_js[idx: idx + self._QUEUE_BODY_WINDOW]
         assert "setDone" in body, "the toggled tick is the requested feedback"
         assert "Queued" in body
-        assert body.index("setDone") < body.index("onRefresh"), (
+        # ⚠️ THE LAST ``onRefresh`` — the manual-search branch earlier in the
+        # function also refreshes from a callback, and a plain ``index`` matched
+        # that one instead of the final re-render.
+        assert body.index("setDone") < body.rindex("onRefresh"), (
             "the tick must be set before the refresh replaces the button"
         )
 
     def test_a_failure_leaves_the_action_available(self, releases_js: str) -> None:
         """The brief: on failure retain the action and show the error."""
         idx = releases_js.index("async function queueById(")
-        body = releases_js[idx: idx + 1200]
+        body = releases_js[idx: idx + self._QUEUE_BODY_WINDOW]
         assert "catch" in body
         assert "notifyError" in body
 
