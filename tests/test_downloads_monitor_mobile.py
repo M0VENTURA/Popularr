@@ -67,6 +67,11 @@ MONITOR_JS = (
     TS / "static" / "js" / "pages" / "monitor.js",
 )
 
+MONITOR_HTML = (
+    LIVE / "test_site" / "templates" / "Pages" / "downloads" / "monitor.html",
+    TS / "templates" / "Pages" / "downloads" / "monitor.html",
+)
+
 QUEUE_JS = (
     LIVE / "test_site" / "static" / "js" / "pages/download-queue.js",
     TS / "static" / "js" / "pages" / "download-queue.js",
@@ -531,81 +536,43 @@ class TestTheEventLogStopsRepeatingItsOwnColumns:
 # 4. The monitor's upcoming table
 # ===========================================================================
 
-class TestTheMonitorUpcomingTableStacksOnPhones:
-    """Four columns do not fit a phone: Album got a third of the row and the
-    Date wrapped mid-value."""
+class TestTheMonitorNoLongerDuplicatesUpcoming:
+    """The monitor rendered its OWN copy of the upcoming table.
 
-    def test_the_columns_are_classed(self):
-        """⚠️ Asserted on the `<th>` TAGS, not on the file.
+    REMOVED 2026-11-26: /downloads/discover/upcoming is the dedicated page for
+    exactly that list, and the monitor carried a second implementation — its own
+    fetch, its own "Library only" filter, its own markup, and its own phone CSS.
+    The header links to the dedicated page instead.
 
-        Every one of these tokens is ALSO on the row's `<td>`, so a whole-file
-        substring check stays true when the header class is changed to
-        `col-ur-XX` — and the header is what the phone block hides. The oracle
-        caught exactly that.
-        """
+    These assertions used to pin that table's phone layout. They now pin its
+    ABSENCE, so a future copy cannot quietly reappear and drift from the real
+    page (which is exactly how the two diverged before).
+    """
+
+    def test_the_upcoming_table_is_gone_from_the_monitor(self):
         for path in MONITOR_JS:
             body = _read(path)
-
-            headers = re.findall(r"<th\b[^>]*>", body)
-            assert headers, f"{path.name}: no table headers"
-            header_html = " ".join(headers)
-
-            for token in ("col-ur-artist", "col-ur-date", "col-ur-action"):
-                assert token in header_html, (
-                    f"{path.name}: no header carries `{token}`, so the phone block "
-                    "cannot hide or size that column"
+            for token in (
+                "upcoming-monitor-table",
+                "upcoming-inline-meta",
+                "upcoming-search-btn",
+            ):
+                assert token not in body, (
+                    f"{path.name}: `{token}` is back — the monitor is rendering "
+                    "its own upcoming table again instead of linking to the page"
                 )
-            assert "upcoming-monitor-table" in body, (
-                f"{path.name}: the table has no hook for the phone block"
+
+    def test_the_template_links_to_the_dedicated_page(self):
+        for template_path in MONITOR_HTML:
+            template = _read(template_path)
+            assert 'href="/downloads/discover/upcoming"' in template, (
+                f"{template_path.name}: the monitor lost its link to the upcoming "
+                "releases page"
             )
-
-    def test_the_artist_and_date_are_repeated_under_the_album(self):
-        """⭐ The values move, they are not duplicated-and-hidden.
-
-        `d-none`-ing the standalone columns would leave the artist and date
-        NOWHERE, and rendering both copies with `d-none` would put the text in
-        the DOM twice for a screen reader. The inline copy is the phone's only
-        source for them.
-        """
-        for path in MONITOR_JS:
-            body = _read(path)
-            assert "upcoming-inline-meta" in body, (
-                f"{path.name}: nothing carries the artist/date on a phone"
+            assert 'id="upcomingReleasesSection"' not in template, (
+                f"{template_path.name}: the in-page upcoming section is back"
             )
-
-    @pytest.mark.parametrize("css_path", DOWNLOADS_CSS, ids=lambda p: p.parent.parent.name)
-    def test_the_phone_block_hides_the_two_columns(self, css_path):
-        css = _read(css_path)
-        tree = css_path.parent.parent.name
-
-        # ⚠️ The VALUE, not just the property: `display: block` here would double
-        # every desktop row, and a `_declares` check cannot tell it from `none`.
-        assert _value(_rule(css, ".upcoming-inline-meta"), "display") == "none", (
-            f"{tree}: the inline meta must default to hidden, or it doubles every "
-            "row on desktop"
-        )
-        block = _phone_block(css, ".upcoming-inline-meta")
-        for selector in (
-            ".upcoming-monitor-table .col-ur-artist,",
-            ".upcoming-monitor-table .col-ur-date",
-        ):
-            assert selector in block, f"{tree}: `{selector}` is not hidden on a phone"
-        assert "display: none" in block, f"{tree}: the hidden columns are not hidden"
-
-    def test_the_search_label_hides_below_md(self):
-        """The suggested fix: the button becomes icon-only."""
-        for path in MONITOR_JS:
-            body = _read(path)
-            assert re.search(r'bi-search"></i><span class="d-none d-md-inline"', body), (
-                f"{path.name}: the Search button keeps its label on a phone, so it "
-                "still crowds the row"
-            )
-
-    def test_a_row_that_fits_gets_the_fade_controls(self):
-        """CONTROL: the four desktop columns must all still be rendered."""
-        body = _read(MONITOR_JS[1])
-        for header in (">Artist<", ">Album<", ">Date<", ">Action<"):
-            assert header in body, f"the {header.strip('<>')} header is gone"
+            assert 'id="upcomingReleasesMonitor"' not in template
 
 
 # ===========================================================================

@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -221,6 +222,66 @@ def _read_audio_metadata(folder_path: str, file_name: str) -> dict[str, str]:
     except Exception as exc:
         logger.debug("Metadata read failed", folder=folder_path, file=file_name, error=str(exc))
         return {"artist": "", "album": "", "title": ""}
+
+
+#: ⚠️ A TAG READ IS THE EXPENSIVE PART OF THE FOLDERS ENDPOINT.
+#:
+#: Reported: "Matched & Unmatched folders is showing Could not load folders:
+#: Request timed out after 30s". ``get_unmatched_folders`` opened EVERY audio
+#: file in EVERY folder with mutagen to derive the artist/album group — on a
+#: downloads root with several hundred files that is hundreds of full tag reads
+#: per poll, and the monitor re-polls.
+#:
+#: Two bounds, both invisible to callers:
+#:   * a per-call DEADLINE — once it passes, remaining files are grouped from
+#:     the folder/file NAME instead of their tags, so the endpoint always
+#:     answers inside the client's timeout;
+#:   * a small (path, mtime, size) CACHE, because a completed download's tags do
+#:     not change while the user is looking at the list.
+_METADATA_READ_BUDGET_SECONDS = 6.0
+_METADATA_CACHE_MAX = 4000
+_metadata_cache: dict[tuple[str, float, int], dict[str, str]] = {}
+_metadata_cache_lock = threading.Lock()
+
+
+def _cached_audio_metadata(folder_path: str, file_name: str) -> dict[str, str]:
+    """Tag metadata for one file, cached by (path, mtime, size)."""
+    full = os.path.join(folder_path, file_name)
+    try:
+        stat = os.stat(full)
+        key = (full, float(stat.st_mtime), int(stat.st_size))
+    except Exception:
+        return _read_audio_metadata(folder_path, file_name)
+
+    with _metadata_cache_lock:
+        cached = _metadata_cache.get(key)
+    if cached is not None:
+        return cached
+
+    value = _read_audio_metadata(folder_path, file_name)
+    with _metadata_cache_lock:
+        if len(_metadata_cache) >= _METADATA_CACHE_MAX:
+            # Cheap eviction: drop an arbitrary tenth rather than track LRU
+            # order. The cache is a speed-up, not a source of truth.
+            for stale in list(_metadata_cache)[: _METADATA_CACHE_MAX // 10]:
+                _metadata_cache.pop(stale, None)
+        _metadata_cache[key] = value
+    return value
+
+
+def _metadata_from_name(file_name: str) -> dict[str, str]:
+    """Best-effort artist/title from a filename, used when the budget is spent.
+
+    Deliberately leaves ``album`` empty: a filename does not carry it, and
+    guessing one would feed a WRONG album into folder matching.
+    """
+    stem = os.path.splitext(str(file_name or ""))[0]
+    stem = re.sub(r"^\s*\d{1,3}\s*[-._)\]]\s*", "", stem)
+    for sep in (" - ", " – ", " — "):
+        if sep in stem:
+            artist, title = stem.split(sep, 1)
+            return {"artist": artist.strip(), "album": "", "title": title.strip()}
+    return {"artist": "", "album": "", "title": stem.strip()}
 
 
 def _derive_folder_group(folder_name: str, files: list[dict[str, Any]]) -> dict[str, str]:
@@ -518,6 +579,10 @@ def get_unmatched_folders() -> dict[str, Any]:
             match_rows = {}
 
         folders = []
+        # Deadline for tag reading — see _METADATA_READ_BUDGET_SECONDS. Past it,
+        # files are grouped from their NAMES so the endpoint always answers.
+        _metadata_deadline = time.monotonic() + _METADATA_READ_BUDGET_SECONDS
+        _tags_truncated = False
         for full, entry in _iter_matched_folder_candidates(downloads_dir, archive_dir):
             _norm_full = os.path.normpath(full)
             _tracked_release = tracked_releases.get(_norm_full)
@@ -526,7 +591,11 @@ def get_unmatched_folders() -> dict[str, Any]:
             files = _get_files_in_folder(full)
             for f in files:
                 if f.get("is_audio"):
-                    f.update(_read_audio_metadata(full, f.get("name") or ""))
+                    if time.monotonic() < _metadata_deadline:
+                        f.update(_cached_audio_metadata(full, f.get("name") or ""))
+                    else:
+                        _tags_truncated = True
+                        f.update(_metadata_from_name(f.get("name") or ""))
                     f["imported"] = bool(
                         os.path.normpath(os.path.join(full, f.get("name") or "")) in imported
                     )
@@ -583,7 +652,15 @@ def get_unmatched_folders() -> dict[str, Any]:
             )
         )
 
-        return {"success": True, "count": len(folders), "folders": folders}
+        return {
+            "success": True,
+            "count": len(folders),
+            "folders": folders,
+            # True when the tag-reading budget ran out: the folders are still
+            # correct, but any group derived from a NAME rather than tags may be
+            # approximate. The UI says so instead of presenting a guess as fact.
+            "tags_truncated": _tags_truncated,
+        }
     except Exception as exc:
         logger.error("Error getting unmatched folders", error=str(exc), exc_info=True)
         return {"success": False, "error": str(exc), "folders": []}

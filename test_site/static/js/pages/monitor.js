@@ -564,6 +564,25 @@
 
         const folders = data.folders || [];
 
+        // ⚠️ TAGS WERE ONLY PARTLY READ.
+        //
+        // The endpoint has a tag-reading budget so it can answer inside the
+        // client's timeout (a full tag read of every file in every folder is
+        // what made this fail with "Request timed out after 30s"). When the
+        // budget runs out the remaining files are grouped from their NAMES, so
+        // an artist/album here may be approximate. Say so rather than
+        // presenting a guess as a tag-derived fact.
+        const notice = document.getElementById('unmatchedFoldersNotice');
+        if (notice) {
+          notice.innerHTML = data.tags_truncated
+            ? '<div class="list-group-item small text-warning-emphasis bg-dark">'
+              + '<i class="bi bi-info-circle me-1"></i>'
+              + 'Files were matched faster than their tags could be read, so some '
+              + 'artist/album names come from filenames. Refresh to re-read them.'
+              + '</div>'
+            : '';
+        }
+
         if (!folders.length) {
           section.style.display = 'none';
           list.innerHTML = '';
@@ -829,92 +848,17 @@
   }
 
   // ── Upcoming releases ───────────────────────────────────────────────────
+  //
+  // REMOVED 2026-11-26. This page rendered its OWN copy of the upcoming
+  // releases table — its own fetch, its own "Library only" filter, its own
+  // markup — duplicating /downloads/discover/upcoming. The header now links to
+  // that page instead. What is left is the small refresh hook other modules
+  // still name; it forwards to the dedicated page's service when present.
 
   async function refreshUpcomingReleases() {
-    const container = document.getElementById('upcomingReleasesMonitor');
-    if (!container) return;
-
-    const filterCollection =
-      document.getElementById('upcomingFilterCollectionMonitor')?.checked || false;
-
-    container.innerHTML =
-      '<div class="text-center py-4"><div class="spinner-border text-primary spinner-border-sm" role="status"></div>' +
-      '<p class="mt-2 small mb-0">Loading upcoming releases…</p></div>';
-
-    try {
-      const data = await global.api.getJson(
-        `/api/upcoming-releases?include_queue=true${filterCollection ? '&collection=true' : ''}`
-      );
-      const releases = data.releases || [];
-
-      if (!releases.length) {
-        container.innerHTML =
-          '<div class="text-center py-4"><p class="text-muted mb-0">No upcoming releases found.</p></div>';
-        return;
-      }
-
-      // data-* rather than an onclick carrying encodeURIComponent output —
-      // URI encoding does not escape a single quote, so an artist name
-      // containing one broke the generated attribute.
-      //
-      // ⚠️ THE TABLE IS FOUR COLUMNS ON DESKTOP AND TWO ON A PHONE.
-      //
-      // On a 360px screen the four columns left the Album name — the only cell
-      // carrying information — about a third of the row, and the Date column
-      // wrapped mid-value ("2026-" / "09-18"). Artist and Date therefore have
-      // their own `col-ur-*` classes that the phone block hides, and the Artist
-      // cell is repeated INSIDE the Album cell as `.upcoming-inline-meta`
-      // ("Artist • Date"), which is the app's established pattern for this —
-      // see `.track-inline-duration` in popularr.css. The values are rendered
-      // ONCE per layout, not shown/hidden with `d-none`, because duplicating the
-      // text would also duplicate it for a screen reader.
-      const row = (r) => `
-                <tr>
-                  <td class="col-ur-artist">${esc(r.artist_name)}</td>
-                  <td>
-                    <strong>${esc(r.album_name)}</strong>
-                    <span class="upcoming-inline-meta">${esc(r.artist_name)} • ${esc(r.release_date || 'TBA')}</span>
-                  </td>
-                  <td class="col-ur-date"><small>${esc(r.release_date || 'TBA')}</small></td>
-                  <td class="col-ur-action">
-                    <button class="btn btn-sm btn-outline-primary upcoming-search-btn"
-                            data-artist="${esc(r.artist_name)}"
-                            data-album="${esc(r.album_name)}"
-                            title="Search / Download on MusicBrainz"
-                            aria-label="Search / Download on MusicBrainz">
-                      <i class="bi bi-search"></i><span class="d-none d-md-inline"> Search</span>
-                    </button>
-                  </td>
-                </tr>`;
-
-      container.innerHTML = `
-        <div class="table-responsive">
-          <table class="table table-sm table-dark table-hover mb-0 upcoming-monitor-table">
-            <thead>
-              <tr>
-                <th class="col-ur-artist">Artist</th>
-                <th>Album</th>
-                <th class="col-ur-date">Date</th>
-                <th class="col-ur-action">Action</th>
-              </tr>
-            </thead>
-            <tbody>${releases.map(row).join('')}</tbody>
-          </table>
-        </div>`;
-
-      container.querySelectorAll('.upcoming-search-btn').forEach((btn) => {
-        btn.addEventListener('click', function () {
-          if (typeof global.searchMusicBrainzRelease === 'function') {
-            global.searchMusicBrainzRelease(null, this.dataset.artist, this.dataset.album);
-          }
-        });
-      });
-    } catch (error) {
-      container.innerHTML =
-        '<div class="text-center py-4"><p class="text-danger mb-2">' +
-        `<i class="bi bi-exclamation-triangle"></i> Error loading upcoming releases: ${esc(error.message)}` +
-        '</p></div>';
-    }
+    // The section is gone, so there is nothing here to render. The dedicated
+    // page owns the list and updates itself.
+    return;
   }
 
   async function checkForUpdates() {
@@ -923,33 +867,15 @@
     } catch (e) {
       /* private browsing */
     }
-    await refreshUpcomingReleases();
   }
 
   // ── Page chrome ─────────────────────────────────────────────────────────
 
-  /**
-   * "Upcoming Releases" button in the page header.
-   *
-   * This was `onclick="jumpToUpcomingReleases()"` in the template, with the
-   * function defined in that template's own inline <script>. Moving it here
-   * means templates/Pages/downloads/monitor.html ships with no JavaScript at
-   * all, and the scroll-then-navigate fallback has one definition instead of
-   * being duplicated in the queue template (which referenced the function
-   * without defining it — a ReferenceError on every click until it was
-   * reduced to a plain link).
-   */
-  function jumpToUpcomingReleases() {
-    const section = document.getElementById('upcomingReleasesSection');
-    if (section) {
-      section.scrollIntoView({ behavior: 'smooth' });
-      return;
-    }
-    global.location.href = '/downloads/discover/upcoming';
-  }
-
   const ACTIONS = {
-    'jump-to-upcoming': jumpToUpcomingReleases,
+    // Re-read the downloads folder without waiting for the poll interval.
+    'refresh-folders': function () {
+      renderUnmatchedFolders({ force: true });
+    },
   };
 
   function bindActions() {
@@ -982,10 +908,6 @@
         onTick: renderUnmatchedFolders,
       });
       unmatchedPoller.start();
-    }
-
-    if (document.getElementById('upcomingReleasesMonitor')) {
-      refreshUpcomingReleases();
     }
   });
 

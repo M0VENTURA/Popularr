@@ -17,15 +17,17 @@
     {% include 'components/_downloads_header.html' %}
     <div class="d-flex gap-2 flex-shrink-0 ms-auto">
       {#
-        Upcoming Releases — scrolls to the section on this page. The action is
-        bound by js/pages/monitor.js (its ACTIONS map handles
-        data-action="jump-to-upcoming" and scrolls to #upcomingReleasesSection,
-        falling back to /downloads/discover/upcoming when the section is
-        absent). keep this attribute: the page ships with no inline script.
+        Upcoming Releases is a LINK, not an in-page jump.
+
+        This page used to render its own "Upcoming Releases" section (a second
+        copy of the table, its own "Library only" filter and its own fetch).
+        /downloads/discover/upcoming is the dedicated page for exactly that, so
+        the duplicate section was removed: one place to look, one source of
+        truth, and this page is shorter.
       #}
-      <button type="button" class="btn btn-sm btn-outline-success flex-shrink-0" data-action="jump-to-upcoming" title="Jump to upcoming releases">
-        <i class="bi bi-arrow-down-circle"></i> <span class="d-none d-sm-inline">Upcoming Releases</span>
-      </button>
+      <a href="/downloads/discover/upcoming" class="btn btn-sm btn-outline-success flex-shrink-0" title="View upcoming releases">
+        <i class="bi bi-calendar-event"></i> <span class="d-none d-sm-inline">Upcoming Releases</span>
+      </a>
       <a href="/downloads/banned-words" class="btn btn-sm btn-outline-danger flex-shrink-0" title="Manage banned words">
         <i class="bi bi-slash-circle"></i> <span class="d-none d-sm-inline">Banned Words</span>
       </a>
@@ -79,33 +81,18 @@
 
       {# Matched & Unmatched Folders — rendered by js/pages/monitor.js #}
       <div class="card shadow-sm mt-4" id="unmatchedFoldersSection" style="display: none;">
-        <div class="card-header bg-dark border-secondary d-flex align-items-center justify-content-between py-3">
+        <div class="card-header bg-dark border-secondary d-flex align-items-center justify-content-between py-3 gap-2 flex-wrap">
           <h5 class="card-title mb-0 fw-bold"><i class="bi bi-folder-exclamation text-warning me-2"></i>Matched &amp; Unmatched Folders</h5>
-          <span class="badge bg-warning text-dark" id="unmatchedFoldersBadge">0 items</span>
+          <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-warning text-dark" id="unmatchedFoldersBadge">0 items</span>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" data-action="refresh-folders" title="Re-scan the downloads folder">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+          </div>
         </div>
         <div class="card-body p-0">
+          <div id="unmatchedFoldersNotice"></div>
           <div id="unmatchedFoldersList"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  {# Upcoming Releases Section — rendered by js/pages/monitor.js #}
-  <div class="card shadow-sm mt-5" id="upcomingReleasesSection">
-    <div class="card-header bg-dark border-secondary d-flex align-items-center justify-content-between py-3">
-      <h5 class="card-title mb-0 fw-bold">
-        <i class="bi bi-calendar-event text-success me-2"></i>Upcoming Releases
-        <label class="ms-3 form-check form-check-inline small" title="Only releases by artists in your library">
-          <input class="form-check-input" type="checkbox" id="upcomingFilterCollectionMonitor">
-          <span class="form-check-label">Library only</span>
-        </label>
-      </h5>
-      <a href="/downloads/discover/upcoming" class="btn btn-sm btn-outline-secondary">View All</a>
-    </div>
-    <div class="card-body">
-      <div id="upcomingReleasesMonitor">
-        <div class="text-center py-4 text-muted">
-          <span class="spinner-border spinner-border-sm me-2"></span>Loading upcoming releases...
         </div>
       </div>
     </div>

@@ -54,11 +54,11 @@
       handled by one delegated listener, and NOTHING is exported onto window.
 
    ── CROSS-PAGE NOTE ───────────────────────────────────────────────────────
-   `checkForUpdates` exists here AND in pages/monitor.js (as
-   checkForUpdatesMonitor) AND as a dashboard action. They are deliberately
-   separate: each refreshes a different container. Do not "deduplicate" them
-   into one global — the monitor card and this page render into different DOM
-   ids and one of the two would silently stop updating.
+   `checkForUpdates` exists here AND as a dashboard action (they refresh
+   different containers). It USED to also exist in pages/monitor.js as
+   `checkForUpdatesMonitor`; that copy is gone (2026-11-26) along with the
+   monitor's duplicate upcoming table — this page is now the only place the
+   list is rendered, and the monitor links here.
    ========================================================================== */
 
 (function (global) {
