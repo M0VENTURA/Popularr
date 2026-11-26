@@ -253,6 +253,11 @@ def _rejected_download_stats() -> dict[str, Any]:
     ``queue_rejections`` is a separate table on purpose: a rejected download is
     deleted and its row returned to ``queued``, so the reason is overwritten
     within minutes and a live-queue read can never show it.
+
+    ⚠️ ``items_affected`` AND the per-reason breakdown are the actionable part.
+    "283 files discarded" is alarming; "283 files across 41 queue items, 221 of
+    them a title mismatch" says where to look — a systematic matcher or
+    mis-tagged-release problem rather than 283 separate bad candidates.
     """
     try:
         from db.repositories.queue_rejections import rejection_counts
@@ -260,23 +265,57 @@ def _rejected_download_stats() -> dict[str, Any]:
         counts = rejection_counts() or {}
     except Exception as exc:
         logger.debug("Rejection counts unavailable: %s", exc)
-        return {"known": False, "total": 0, "top_reason": "", "top_count": 0}
+        return {
+            "known": False, "total": 0, "top_reason": "", "top_count": 0,
+            "items_affected": 0, "reasons": [],
+        }
 
-    # ``rejection_counts`` is {reason: count}. The dashboard needs the total and
-    # the dominant reason, not the whole breakdown.
     numeric = {
         str(reason): int(count or 0)
         for reason, count in counts.items()
         if str(reason or "").strip()
     }
     if not numeric:
-        return {"known": True, "total": 0, "top_reason": "", "top_count": 0}
+        return {
+            "known": True, "total": 0, "top_reason": "", "top_count": 0,
+            "items_affected": 0, "reasons": [],
+        }
+
     top_reason, top_count = max(numeric.items(), key=lambda kv: kv[1])
+
+    # How many DISTINCT queue rows were affected — the number that says "this is
+    # one bad album" rather than "this is 283 unrelated rejects".
+    items_affected = 0
+    try:
+        from db.engine import db_session
+        from sqlalchemy import text
+
+        with db_session() as session:
+            items_affected = int(
+                session.execute(
+                    text(
+                        "SELECT COUNT(DISTINCT queue_id) FROM queue_rejections "
+                        "WHERE queue_id IS NOT NULL"
+                    )
+                ).scalar()
+                or 0
+            )
+    except Exception as exc:
+        logger.debug("Rejection item count unavailable: %s", exc)
+
     return {
         "known": True,
         "total": sum(numeric.values()),
         "top_reason": top_reason,
         "top_count": top_count,
+        "items_affected": items_affected,
+        # Top three, for the alert body. An unbounded list would not fit.
+        "reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                numeric.items(), key=lambda kv: kv[1], reverse=True
+            )[:3]
+        ],
     }
 
 

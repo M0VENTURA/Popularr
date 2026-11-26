@@ -146,6 +146,17 @@ def api_upcoming_releases() -> Any:
         limit = max(1, min(request.args.get("limit", 50, type=int), 1000))
         hide_in_library = request.args.get("hide_in_library", "1").strip().lower() != "0"
         window_days = max(0, request.args.get("window", 0, type=int))
+        # ⚠️ ``split=recent`` INTERLEAVES RECENT-PAST AND UPCOMING.
+        #
+        # The dashboard's card is 50 rows. Ordering strictly "future first" is
+        # right for a dedicated Upcoming page, but on a card it meant the last
+        # few weeks — releases that came out days ago, which the user still
+        # wants to see and still might not have — never appeared at all
+        # (reported: "it's not showing the last 3 weeks"). ``split`` keeps both
+        # halves on one page by fetching each side and merging them.
+        split_mode = (request.args.get("split") or "").strip().lower()
+        if split_mode not in ("", "recent"):
+            split_mode = ""
 
         where_sql = ""
         params: dict[str, Any] = {}
@@ -257,6 +268,8 @@ def api_upcoming_releases() -> Any:
             "LIMIT :limit OFFSET :offset"
         )
 
+        _order_clause = _upcoming_order
+
         with db_session() as session:
             total = session.execute(
                 text(f"SELECT COUNT(*) FROM upcoming_releases{total_where_sql}"),
@@ -277,7 +290,7 @@ def api_upcoming_releases() -> Any:
                 outside_window = 0
 
             result = session.execute(
-                text(f"SELECT * FROM upcoming_releases{where_sql} {_upcoming_order}"),
+                text(f"SELECT * FROM upcoming_releases{where_sql} {_order_clause}"),
                 {
                     **params,
                     "today_iso": _today_iso,
@@ -285,7 +298,35 @@ def api_upcoming_releases() -> Any:
                     "offset": (page - 1) * limit,
                 },
             )
-            rows = result.fetchall()
+            rows = list(result.fetchall())
+
+            if split_mode == "recent" and page == 1:
+                # ⚠️ FUTURE FIRST, BUT NOT FUTURE ONLY.
+                #
+                # A 50-row card ordered strictly future-first shows months of
+                # upcoming releases and NOTHING from the last few weeks —
+                # reported as "it's not showing the last 3 weeks". Fetch the two
+                # halves with their own LIMITs (so neither can crowd the other
+                # out) and merge: upcoming soonest-first, then the recently
+                # released most-recent-first.
+                _half = max(1, limit // 2)
+                _past_rows = session.execute(
+                    text(
+                        f"SELECT * FROM upcoming_releases{total_where_sql} "
+                        "AND release_date IS NOT NULL "
+                        "AND LENGTH(release_date) = 10 "
+                        "AND release_date < :today_iso "
+                        "ORDER BY release_date DESC, id ASC "
+                        "LIMIT :limit OFFSET 0"
+                    ),
+                    {**params, "today_iso": _today_iso, "limit": _half},
+                ).fetchall()
+
+                _seen = {r._mapping["id"] for r in _past_rows}
+                _future_rows = [
+                    r for r in rows if r._mapping["id"] not in _seen
+                ][: max(1, limit - len(_past_rows))]
+                rows = _future_rows + list(_past_rows)
 
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -407,6 +448,7 @@ def api_upcoming_releases() -> Any:
             "releases": releases,
             "total": total,
             "outside_window": outside_window,
+            "split": split_mode or "upcoming",
             "page": page,
             "limit": limit,
             "has_more": has_more,

@@ -745,6 +745,10 @@
         include_queue: true,
         limit: 50,
         page: 1,
+        // ⚠️ The card is 50 rows. Future-first alone showed months of upcoming
+        // releases and NOTHING from the last few weeks ("it's not showing the
+        // last 3 weeks"), so the card asks for both halves.
+        split: 'recent',
       });
       const opts = { emptyMessage: 'No upcoming releases found.' };
       // TWO presentations of ONE fetch: a sortable table at lg+, and a
@@ -991,9 +995,18 @@
 
     const topReason = String(rejections.top_reason || '').replace(/_/g, ' ');
     const topCount = Number(rejections.top_count) || 0;
-    const breakdown = topReason && topCount
-      ? `Most common reason: ${esc(topReason)} (${topCount}).`
+    const items = Number(rejections.items_affected) || 0;
+
+    // "283 files" alone is alarming but not actionable. The queue-item count
+    // says whether this is one bad album or hundreds of unrelated rejects.
+    const scope = items > 0
+      ? ` across ${items} queue item${items === 1 ? '' : 's'}`
       : '';
+
+    const reasons = Array.isArray(rejections.reasons) ? rejections.reasons : [];
+    const breakdown = reasons.length
+      ? reasons.map((r) => `${String(r.reason || '').replace(/_/g, ' ')} (${Number(r.count) || 0})`).join(' · ')
+      : (topReason && topCount ? `${topReason} (${topCount})` : '');
 
     host.classList.remove('d-none');
     host.innerHTML = `
@@ -1002,14 +1015,14 @@
         <button type="button" class="btn-close js-dismiss-alert float-end ms-2"
                 aria-label="Dismiss"></button>
         <div class="fw-semibold">
-          <i class="bi bi-x-octagon me-1"></i>${total} downloaded file${total === 1 ? '' : 's'} discarded
+          <i class="bi bi-x-octagon me-1"></i>${total} downloaded file${total === 1 ? '' : 's'} discarded${scope}
         </div>
         <div class="small mt-1">
-          These were deleted after verification failed, so the queue row was not marked failed.
-          ${breakdown}
+          Deleted after verification failed, so the queue row was not marked failed.
+          ${breakdown ? esc(breakdown) : ''}
         </div>
         <div class="mt-2">
-          <a class="btn btn-sm btn-outline-secondary py-0 px-2" href="/downloads/monitor">
+          <a class="btn btn-sm btn-outline-secondary py-0 px-2" href="/downloads">
             Review discards
           </a>
         </div>

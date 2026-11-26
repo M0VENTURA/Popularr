@@ -179,6 +179,7 @@
     if (filters.source && filters.source !== 'all') qs.set('source', filters.source);
     if (filters.include_queue) qs.set('include_queue', 'true');
     if (filters.window) qs.set('window', filters.window);
+    if (filters.split) qs.set('split', filters.split);
     qs.set('page', String(filters.page || 1));
     qs.set('limit', String(filters.limit || DEFAULT_LIMIT));
 
