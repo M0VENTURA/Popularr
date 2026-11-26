@@ -1244,6 +1244,9 @@
         genre_playlists_create_threshold: parseInt(getValue('playlists_genre_create_threshold', '100'), 10) || 100,
         genre_playlists_delete_threshold: parseInt(getValue('playlists_genre_delete_threshold', '80'), 10) || 80,
         genre_playlists_min_stars: parseInt(getValue('playlists_genre_min_stars', '4'), 10) || 4,
+        // ⭐ Also pool each track into its BASE genre (Metalcore -> Metal). Leaf
+        // playlists are kept. Default ON, matching the backend getter.
+        genre_playlists_parent_rollups: getChecked('playlists_genre_parent_rollups', true),
         genre_playlists_max_genres: parseInt(getValue('playlists_genre_max_genres', '3'), 10) || 3,
       // ⚠️ 0 means "no cap", so a `|| 300` guard would make it impossible to
       // express — mirror the max_per_artist collector below.

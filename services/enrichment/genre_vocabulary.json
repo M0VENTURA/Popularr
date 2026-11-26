@@ -268,7 +268,7 @@
     {
       "id": "emo",
       "display": "Emo",
-      "parent": "alternative_rock",
+      "parent": "punk",
       "specificity": 2,
       "aliases": [
         "emo rock",
@@ -1409,6 +1409,17 @@
       "specificity": 3,
       "aliases": [
         "street punk"
+      ]
+    },
+    {
+      "id": "crust_punk",
+      "display": "Crust Punk",
+      "parent": "punk",
+      "specificity": 3,
+      "aliases": [
+        "crust",
+        "crustcore",
+        "stenchcore"
       ]
     },
     {
@@ -3072,7 +3083,7 @@
     {
       "id": "ska",
       "display": "Ska",
-      "parent": "reggae",
+      "parent": "punk",
       "specificity": 2
     },
     {

@@ -432,6 +432,32 @@ def iter_genre_tokens(genres: Any) -> list[str]:
         if not tokens:
             tokens = [g for g in re.split(r"[,;/\\|]+", raw) if g]
 
+    # ⚠️ SPLIT A COMPOSITE ENTRY THE SAME WAY THE REST OF THE APP DOES.
+    #
+    # A LIST entry (or a parsed-JSON entry) was passed through verbatim, so a tag
+    # stored as ONE genre value — "Emo / Screamo", "Metalcore / Post-Hardcore",
+    # "Crust Punk" — stayed a single token, matched no vocabulary entry, and
+    # ``deciding_family`` answered "" (no main genre at all). Only the raw-STRING
+    # branch split on those delimiters, and it did so BLINDLY, which is the
+    # opposite error: ``death/doom``, ``drum & bass`` and ``r&b`` are real single
+    # genres that a blind split destroys.
+    #
+    # ``split_genre_value`` already encodes the rule that resolves both: safe
+    # separators always split, while ``/`` and ``&`` are applied ONLY to a part
+    # the vocabulary does not recognise whole. Reusing it means this tokenizer and
+    # the artist-side one cannot disagree.
+    try:
+        from services.enrichment.genre_normalization import split_genre_value
+
+        expanded: list[str] = []
+        for token in tokens:
+            parts = split_genre_value(token)
+            expanded.extend(parts or [token])
+        tokens = expanded
+    except Exception:
+        # A normaliser failure must not lose the genres outright.
+        pass
+
     out: list[str] = []
     for token in tokens:
         # ⚠️ THIS USED TO BE A THIRD, PRIVATE NORMALISER —

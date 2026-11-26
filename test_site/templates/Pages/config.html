@@ -3918,6 +3918,17 @@
         </div>
         <div class="setting-card mb-2">
           <div class="setting-info">
+            <label class="setting-title" for="playlists_genre_parent_rollups">Also Build Parent-Genre Playlists</label>
+            <p class="setting-description">Each track is added to its <strong>base</strong> genre too, alongside the specific one: Metalcore is also in Metal, Grunge in Rock, Emo and Ska in Punk. Leaf playlists are kept; nothing is replaced.</p>
+          </div>
+          <div class="setting-control">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="playlists_genre_parent_rollups" {% if config.get('playlists', {}).get('genre_playlists_parent_rollups', True) %}checked{% endif %}>
+            </div>
+          </div>
+        </div>
+        <div class="setting-card mb-2">
+          <div class="setting-info">
             <label class="setting-title" for="playlists_genre_delete_enabled">Delete Genre Playlists Below Threshold</label>
             <p class="setting-description">Removes a genre playlist once its qualifying count drops below the Delete Threshold (and cleans stale files from name-template changes).</p>
           </div>

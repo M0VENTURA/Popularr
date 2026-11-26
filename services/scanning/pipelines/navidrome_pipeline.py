@@ -216,6 +216,30 @@ def sync_remote_navidrome_before_import(
                         "(no metadata changes pending)"
                     )
                     return True
+                if status.get("scanning"):
+                    # ⚠️ A RUNNING SCAN IS NOT A REASON TO GIVE UP.
+                    #
+                    # Reported: *"the Navidrome import doesn't seem to be
+                    # happening while another scan is happening anymore."*
+                    #
+                    # This branch used to fall through to the deferral below,
+                    # which aborted the ENTIRE import whenever Navidrome reported
+                    # ``scanning``. A popularity/full scan requests a rescan at
+                    # the end and holds a 300 s cooldown, so Navidrome was almost
+                    # always still scanning — and the import then deferred, every
+                    # time, without importing anything.
+                    #
+                    # ``trigger_and_wait_for_scan`` below already DRAINS a running
+                    # scan (its Phase 1 waits for ``scanning == False`` before
+                    # requesting its own), so the correct behaviour is to let the
+                    # import continue and wait, not to abandon it.
+                    logger.info(
+                        "Navidrome is scanning — the import will wait for it to finish"
+                    )
+                    log_unified(
+                        "Navidrome Import - Navidrome is scanning; waiting for it to "
+                        "finish before importing (not deferring)"
+                    )
                 if stale_vs_local_write and not status.get("scanning"):
                     # Idle but behind our newest write: scan instead of reading
                     # stale metadata. Falls through to the verified scan below.
@@ -229,16 +253,6 @@ def sync_remote_navidrome_before_import(
                         "Navidrome Import - Navidrome has not scanned the latest "
                         "local tag writes; scanning before import"
                     )
-                else:
-                    log_unified(
-                        "⚠️ Navidrome Import deferred — Navidrome is still scanning or "
-                        "its state cannot be verified"
-                    )
-                    logger.warning(
-                        "Navidrome import deferred — freshness cannot be verified",
-                        error=status.get("error"),
-                    )
-                    return False
             consume_rescan_required()
         except Exception as exc:
             logger.warning(

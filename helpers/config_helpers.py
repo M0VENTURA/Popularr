@@ -1804,6 +1804,14 @@ def get_playlists_config() -> dict[str, Any]:
             p.get("genre_playlists_name_template") or "{genre} - Top Tracks"
         ),
         "genre_playlists_min_stars": max(1, int(p.get("genre_playlists_min_stars", 4) or 4)),
+        # ⭐ Also pool each track into its MAIN (root) genre, alongside the leaf
+        # playlist it already joins: Metalcore -> Metal, Grunge -> Rock,
+        # Emo -> Punk. Default ON because the rollup is what makes "Metal",
+        # "Punk" and "Rock" lists complete; turning it off restores the
+        # leaf-only behaviour exactly.
+        "genre_playlists_parent_rollups": bool(
+            p.get("genre_playlists_parent_rollups", True)
+        ),
         # ⚠️ DEFAULTS TO THE TRACK LIMIT, not a hardcoded 3.
         #
         # This is how many of a track's FINAL genres may pool into a playlist.

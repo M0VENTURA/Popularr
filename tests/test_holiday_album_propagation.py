@@ -395,12 +395,22 @@ class TestTheBlendDoesNotSpreadOneTracksHoliday:
 # ---------------------------------------------------------------------------
 
 class TestThePoolIsMarkerMatched:
-    """A "Holiday" pool would dodge the exclusion, which keys on the marker."""
+    """The seasonal pool must be MATCHED by the exclusion marker.
+
+    ⚠️ THE DISPLAY IS NOW "Christmas", NOT "Holiday". There used to be two
+    catch-all seasonal lists — "Holiday - Top Tracks" and "Christmas - Top
+    Tracks" — and which one a track landed in depended on whether its genre was
+    literally "Christmas" or it was only recognised from its title. The display
+    also has to keep the marker word, because ``_playlist_allows_christmas``
+    matches it as a SUBSTRING of the playlist NAME: a bare "Holiday" name was
+    never recognised as seasonal, which is precisely the dodge this test's own
+    docstring warns about.
+    """
 
     def _pool_constants(self):
         from services.popularity.stages import finalise_stage
 
-        return finalise_stage._HOLIDAY_POOL_KEY, finalise_stage._HOLIDAY_POOL_DISPLAY
+        return finalise_stage._CHRISTMAS_POOL_KEY, finalise_stage._CHRISTMAS_POOL_DISPLAY
 
     def test_the_pool_key_contains_the_default_marker(self):
         from services.popularity.stages.finalise_stage import (
@@ -415,15 +425,28 @@ class TestThePoolIsMarkerMatched:
 
     def test_the_pool_display_names_the_umbrella(self):
         _key, display = self._pool_constants()
-        assert display == "Holiday"
+        assert display == "Christmas"
+
+    def test_the_display_carries_the_marker(self):
+        """The NAME is built from the display, so it is what the policy sees."""
+        from services.popularity.stages.finalise_stage import (
+            _genre_playlist_name,
+            _playlist_allows_christmas,
+        )
+
+        _key, display = self._pool_constants()
+        name = _genre_playlist_name(display)
+        assert _playlist_allows_christmas(name), (
+            f"{name!r} is not recognised as seasonal, so Christmas tracks would "
+            "be filtered out of the Christmas playlist"
+        )
 
     def test_a_holiday_tagged_track_maps_to_the_canonical_pool(self):
-        from services.popularity.stages.finalise_stage import _HOLIDAY_POOL_KEY
+        from services.popularity.stages.finalise_stage import _CHRISTMAS_POOL_KEY
 
-        row = {"genres": "rock, holiday"}
         assert is_holiday_family_token("holiday"), (
             "precondition: the tag is recognised as seasonal"
         )
         # The builder's own intercept is exercised in
         # test_christmas_playlist_exclusion.py; here we pin the constant it uses.
-        assert _HOLIDAY_POOL_KEY.casefold().startswith("christmas")
+        assert _CHRISTMAS_POOL_KEY.casefold().startswith("christmas")

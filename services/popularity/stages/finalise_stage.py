@@ -3304,8 +3304,20 @@ def _playlist_sync_succeeded(result: dict[str, Any] | None) -> bool:
 # Seasonal (holiday) exclusion policy
 # ---------------------------------------------------------------------------
 
-_HOLIDAY_POOL_KEY = "christmas holiday"
-_HOLIDAY_POOL_DISPLAY = "Holiday"
+#: The catch-all Christmas pool key and display.
+#:
+#: ⚠️ ONE LIST, NOT TWO. There used to be a separate "Holiday" pool alongside
+#: the "Christmas" one, so a seasonal track whose GENRE was "Christmas" landed in
+#: "Holiday - Top Tracks" while one identified only by its title landed in
+#: "Christmas - Top Tracks" — two lists for one job, and a user could not tell
+#: why a song was in one and not the other.
+#:
+#: The display keeps the word "Christmas" because the exclusion policy
+#: (``_playlist_allows_christmas``) matches the marker as a SUBSTRING of the
+#: playlist name — a bare "Holiday" name would no longer be recognised as
+#: seasonal, and the policy would keep the list out of nothing.
+_CHRISTMAS_POOL_KEY = "christmas holiday"
+_CHRISTMAS_POOL_DISPLAY = "Christmas"
 
 
 def _christmas_exclusion_enabled() -> bool:
@@ -5609,6 +5621,76 @@ def _genre_refresh_config() -> tuple[int, int]:
     return min_stars, _playlist_pool_genre_limit(_cfg)
 
 
+def _classify_main(genre_key: str, display: str) -> str:
+    """The MAIN (root) genre display for one leaf genre, or "" when unresolved.
+
+    Used by the Christmas branch so a seasonal playlist is filed by base genre —
+    "Christmas Metal - Top Tracks" — rather than by leaf, the same rule
+    ``_create_genre_covers_playlists`` uses.
+    """
+    key = str(genre_key or "").strip().casefold()
+    if not key:
+        return ""
+    # ⚠️ THE MEMO IS SCOPED TO THE VOCABULARY OBJECT, not the process.
+    # ``get_vocabulary`` re-reads when the file changes (a Config-page save takes
+    # effect without a restart), returning a NEW object. Holding a reference to
+    # it here means identity detects the reload — and keeps the object alive, so
+    # its id cannot be reused by a later one, which a bare ``id()`` key would
+    # silently confuse.
+    global _MAIN_GENRE_CACHE_VOCAB
+    try:
+        from services.enrichment.genre_vocabulary import get_vocabulary
+
+        vocab = get_vocabulary()
+    except Exception:  # pragma: no cover - vocabulary unreadable
+        vocab = None
+    if vocab is not _MAIN_GENRE_CACHE_VOCAB:
+        _MAIN_GENRE_CACHE.clear()
+        _MAIN_GENRE_CACHE_VOCAB = vocab
+    cached = _MAIN_GENRE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    resolved = ""
+    try:
+        from services.playlists.main_genres import classify_main_genre
+
+        main = classify_main_genre([display or genre_key])
+        if main:
+            resolved = str(main.get("display") or "").strip()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Main-genre classification failed", genre=display, error=str(exc))
+        resolved = ""
+    _MAIN_GENRE_CACHE[key] = resolved
+    return resolved
+
+
+#: leaf genre key -> main genre display, memoised for one VOCABULARY object.
+_MAIN_GENRE_CACHE: dict[str, str] = {}
+#: The vocabulary the memo was built against; see ``_classify_main``.
+_MAIN_GENRE_CACHE_VOCAB: Any = None
+
+
+def _parent_rollups_enabled() -> bool:
+    """Whether tracks also pool into their MAIN genre's playlist.
+
+    ``playlists.genre_playlists_parent_rollups`` (default True). Off, the builder
+    produces one playlist per LEAF genre exactly as before; on, each track is also
+    added to its root genre (Metalcore -> Metal, Grunge -> Rock, Emo -> Punk).
+
+    Deliberately a live config read rather than a module constant, matching the
+    other ``genre_playlists_*`` knobs, so toggling it takes effect on the next
+    playlist rebuild without a restart.
+    """
+    try:
+        from helpers.config_helpers import get_config
+
+        cfg = (get_config() or {}).get("playlists") or {}
+        return bool(cfg.get("genre_playlists_parent_rollups", True))
+    except Exception:
+        # Fail OPEN: a config read failure must not silently remove rollups.
+        return True
+
+
 def refresh_genre_playlists_for_album(
     artist: str,
     album: str,
@@ -6109,14 +6191,18 @@ def _create_genre_top_track_playlists(
             genres=row.get("genres"),
         )
 
-        # ⭐ A seasonal track with no musical genre still belongs in the holiday
-        # pool. ``playlist_pool_genres`` drops the Christmas/Holiday tokens
-        # (they are extras, not pool keys), so a track whose ONLY genre was
-        # "Christmas" would otherwise vanish from every playlist. The pool key
-        # below is the holiday key, which is where the seasonal branch would
-        # have put it anyway.
+        # ⭐ A seasonal track with no musical genre still belongs in a Christmas
+        # pool. ``playlist_pool_genres`` drops the Christmas/Holiday tokens (they
+        # are extras, not pool keys), so a track whose ONLY genre was "Christmas"
+        # would otherwise vanish from every playlist.
+        #
+        # ⚠️ IT USES THE UNIFIED CHRISTMAS KEY, not the separate "Holiday" pool.
+        # There used to be TWO catch-all lists for the same thing — "Holiday -
+        # Top Tracks" and "Christmas - Top Tracks" — so a seasonal track whose
+        # genre WAS "Christmas" landed in one and a track identified only by its
+        # title landed in the other, for no reason a user could see.
         if not track_genres and is_christmas:
-            track_genres = [_HOLIDAY_POOL_DISPLAY]
+            track_genres = [_CHRISTMAS_POOL_DISPLAY]
 
         for genre in track_genres:
             # ⭐ ONE KEY PER GENRE, NOT ONE PER SPELLING.
@@ -6127,11 +6213,32 @@ def _create_genre_top_track_playlists(
                 continue
 
             if is_christmas and not is_christmas_genre_token(norm_key):
-                target_norm_key = f"christmas {norm_key}"
-                target_display = f"Christmas {genre.title()}"
+                # ⭐ CHRISTMAS POOLS BY BASE GENRE, not by leaf genre.
+                #
+                # Requested: *"Christmas playlists should follow the same rules as
+                # the covers playlist, where they are just created by base
+                # genre."* The covers builder groups on
+                # ``classify_main_genre`` (root vocabulary genre), so a track is
+                # filed under "Metal"/"Rock", never "Nu Metal". This branch used
+                # to prefix the LEAF genre, producing "Christmas Nu Metal - Top
+                # Tracks" and "Christmas Metalcore - Top Tracks" as separate
+                # lists for one family.
+                #
+                # The leaf genre is kept as the fallback: a seasonal track whose
+                # genres the vocabulary cannot resolve to a root still gets a
+                # Christmas list rather than vanishing.
+                _main = _classify_main(norm_key, genre)
+                if _main:
+                    target_norm_key = f"christmas {_main.lower()}"
+                    target_display = f"Christmas {_main}"
+                else:
+                    target_norm_key = f"christmas {norm_key}"
+                    target_display = f"Christmas {genre.title()}"
             elif is_christmas:
-                target_norm_key = _HOLIDAY_POOL_KEY
-                target_display = _HOLIDAY_POOL_DISPLAY
+                # The marker token itself ("Christmas"/"Xmas"/"Holiday") — the
+                # catch-all list, now sharing the same key as the bare case above.
+                target_norm_key = _CHRISTMAS_POOL_KEY
+                target_display = _CHRISTMAS_POOL_DISPLAY
             else:
                 target_norm_key = norm_key
                 target_display = genre
@@ -6178,11 +6285,89 @@ def _create_genre_top_track_playlists(
                 "album_artist": str(row.get("album_artist") or ""),
                 "is_live": int(row.get("is_live") or 0),
                 "is_compilation": int(row.get("is_compilation") or 0),
+                # ⭐ Carried so the PARENT-ROLLUP pass can tell a seasonal track
+                # from an ordinary one. ``genres`` above has already had the
+                # Christmas/Holiday MARKER stripped by ``playlist_pool_genres``
+                # (it is an extra, not a pool key), so re-detecting from that list
+                # answered "not seasonal" and let Christmas songs leak into the
+                # ordinary Metal/Rock rollups.
+                "_seasonal": bool(is_christmas),
             })
             genre_freq[target_display] += 1
             current_top = genre_display.get(target_norm_key)
             if not current_top or genre_freq[target_display] > genre_freq[current_top]:
                 genre_display[target_norm_key] = target_display
+
+    # ⭐⭐ PARENT-GENRE ROLLUPS — "Metal", "Punk", "Rock" ALONGSIDE the leaf lists.
+    #
+    # Requested: *"Metal genre should include all metal and metalcore based genres;
+    # Punk should include all punk based genres such as emo, ska, etc; Rock should
+    # include all rock based genres such as grunge."*
+    #
+    # Each track is added to ITS MAIN GENRE's pool IN ADDITION to the leaf pool it
+    # already joined, so "Metalcore - Top Tracks" keeps existing and a track also
+    # appears in "Metal - Top Tracks". Nothing is removed and no leaf list loses a
+    # member — the only cost is that a track can appear in two playlists, which is
+    # exactly what a rollup means.
+    #
+    # ``classify_main_genre`` is the SAME authority the per-genre Great Covers
+    # builder uses: it folds every subgenre to its vocabulary ROOT via the
+    # deciding-family rule, so "Nu Metal" lands in Metal and "Grunge" in Rock
+    # without any mapping table here.
+    #
+    # ⚠️ SKIPPED FOR SEASONAL POOLS. A Christmas track is already routed into its
+    # own "Christmas …" pool; folding it into a parent as well would put
+    # Christmas songs in the ordinary Metal/Rock lists, which the Christmas
+    # exclusion policy exists to prevent.
+    if _parent_rollups_enabled():
+        try:
+            from services.playlists.main_genres import classify_main_genre
+
+            # Snapshot the leaf pools first: we are adding to ``pools`` while
+            # reading it, and a rollup key can collide with a leaf key (the
+            # "Metal" leaf pool IS the metal root pool).
+            _leaf_snapshot = {
+                key: list(entries) for key, entries in pools.items()
+            }
+            for _leaf_key, _entries in _leaf_snapshot.items():
+                if is_christmas_genre_token(_leaf_key):
+                    continue
+                for _entry in _entries:
+                    # ⚠️ SEASONAL TRACKS NEVER JOIN A PARENT ROLLUP.
+                    #
+                    # The Christmas exclusion policy exists so seasonal songs do
+                    # not appear in the ordinary lists; a rollup is an ordinary
+                    # list, so folding a Christmas track into "Metal" would leak
+                    # exactly what the policy prevents. It already has its own
+                    # "Christmas Metal" pool.
+                    #
+                    # The flag is carried on the entry (``_seasonal``) because the
+                    # genre list here has already lost the Christmas marker.
+                    if _entry.get("_seasonal"):
+                        continue
+                    _main = classify_main_genre(_entry.get("genres") or [])
+                    if not _main:
+                        continue
+                    _display = str(_main.get("display") or _main.get("id") or "").strip()
+                    # ⚠️ KEY IT THROUGH ``_pool_genre_key``, THE SAME NORMALISER
+                    # THE LEAF POOLS USE. ``normalize_main_genre_key`` produces
+                    # underscores ("hip_hop") while pool keys use spaces
+                    # ("hip hop"), so using it here would make a multi-word root
+                    # a SECOND pool and write a duplicate "Hip Hop - Top Tracks".
+                    _main_key = _pool_genre_key(_display)
+                    if not _main_key:
+                        continue
+                    # The root's own leaf pool already IS the rollup.
+                    if _main_key == _leaf_key:
+                        continue
+                    pools[_main_key].append(_entry)
+                    genre_freq[_display] += 1
+                    _current = genre_display.get(_main_key)
+                    if not _current or genre_freq[_display] > genre_freq[_current]:
+                        genre_display[_main_key] = _display
+        except Exception as exc:
+            # A taxonomy failure must not lose the leaf playlists.
+            logger.debug("Parent-genre rollups skipped", error=str(exc))
 
     def _tiebreak(item: dict[str, Any]) -> tuple:
         return (
@@ -8508,6 +8693,37 @@ def _verify_genre_playlist(
     # playlist. Any component the pool was built from is acceptable.
     _wanted = _pool_genre_key(genre)
     _wanted_parts = [p for p in _wanted.split() if p and p != "christmas"]
+    # ⭐ A ROLLUP ACCEPTS ANY SUBGENRE THAT FOLDS INTO IT.
+    #
+    # "Metal - Top Tracks" now holds "Metalcore" and "Nu Metal" tracks (that is
+    # the point of a rollup), whose own genres never say "metal". An exact match
+    # therefore flagged every non-leaf member as a mismatch — a check that fires
+    # on correct data carries no information.
+    #
+    # The SAME applies to a "Christmas <root>" pool: it is a base-genre list too,
+    # so "Christmas Metal" must accept a "Metalcore" seasonal track. The musical
+    # part (the key minus a leading christmas marker) is what is compared, so a
+    # leaf pool ("Metalcore", "Christmas Metalcore") still demands an exact match.
+    _target_main = ""
+    _is_rollup = False
+    if _wanted:
+        try:
+            from services.playlists.main_genres import (
+                classify_main_genre,
+                normalize_main_genre_key,
+            )
+
+            _base_key = " ".join(_wanted_parts) or _wanted
+            _base_main = classify_main_genre([_base_key])
+            if _base_main:
+                _target_main = normalize_main_genre_key(_base_main.get("id"))
+            _is_rollup = bool(
+                _target_main
+                and normalize_main_genre_key(_base_key) == _target_main
+            )
+        except Exception:
+            _target_main = ""
+            _is_rollup = False
     if _wanted:
         for row in winners:
             _own = {_pool_genre_key(g) for g in (row.get("genres") or [])}
@@ -8519,6 +8735,23 @@ def _verify_genre_playlist(
                 continue
             if _wanted_parts and any(p in _own for p in _wanted_parts):
                 continue
+            if _is_rollup and _target_main:
+                # Membership of a ROLLUP is "this track's main genre is the
+                # rollup" — Metalcore legitimately belongs in Metal, and a
+                # seasonal Metalcore track in Christmas Metal.
+                try:
+                    from services.playlists.main_genres import (
+                        classify_main_genre,
+                        normalize_main_genre_key,
+                    )
+
+                    _row_main = classify_main_genre(list(_own))
+                    if _row_main and normalize_main_genre_key(
+                        _row_main.get("id")
+                    ) == _target_main:
+                        continue
+                except Exception:
+                    pass
             problems.append(
                 f"GENRE_MISMATCH: {row.get('title')!r} lacks {genre!r}"
             )

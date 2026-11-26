@@ -182,13 +182,29 @@ class TestTheChristmasPoolStillExists:
     def test_a_purely_seasonal_track_lands_in_the_holiday_pool(self) -> None:
         """Markers are not pool keys, so the seasonal branch needs its own fill."""
         source = inspect.getsource(fs()._create_genre_top_track_playlists)
-        assert "_HOLIDAY_POOL_DISPLAY" in source
+        assert "_CHRISTMAS_POOL_DISPLAY" in source
         assert "if not track_genres and is_christmas" in source
 
     def test_a_seasonal_track_pools_under_a_christmas_prefix(self) -> None:
         """A Christmas rock track belongs in "Christmas Rock", not "Rock"."""
         source = inspect.getsource(fs()._create_genre_top_track_playlists)
-        assert 'f"christmas {norm_key}"' in source
+        # The BASE-genre form ("Christmas Metal"), with the leaf as the fallback.
+        assert 'f"christmas {' in source
+        assert "_classify_main(" in source
+
+    def test_the_christmas_prefix_uses_the_base_genre(self) -> None:
+        """Requested: Christmas playlists are created by BASE genre.
+
+        The covers builder groups on ``classify_main_genre``, so a seasonal
+        "Nu Metal" track files under "Christmas Metal", never
+        "Christmas Nu Metal".
+        """
+        from services.popularity.stages.finalise_stage import _classify_main
+
+        assert _classify_main("nu metal", "Nu Metal") == "Metal"
+        assert _classify_main("metalcore", "Metalcore") == "Metal"
+        assert _classify_main("grunge", "Grunge") == "Rock"
+        assert _classify_main("emo", "Emo") == "Punk"
 
 
 # ---------------------------------------------------------------------------
@@ -303,17 +319,36 @@ class TestSeveralGenresAreWritten:
     def test_the_aggregator_appends_markers_on_top_of_the_limit(self) -> None:
         """Filter tags are EXTRAS — the count is a ceiling on musical genres.
 
-        ⚠️ Three UNRELATED genres are used on purpose. "Punk Rock" and "Rock"
-        are parent/child in the vocabulary and get condensed into one, so a
-        nested fixture would measure condensation rather than the limit.
+        ⚠️ Three UNRELATED genres are used on purpose, so the fixture measures the
+        LIMIT rather than condensation.
+
+        ⚠️ IT USED TO BE ("Punk Rock", "Ska", "Hardcore"). ``ska`` is now a CHILD
+        OF PUNK in the vocabulary (it was re-parented from ``reggae`` so the Punk
+        playlist rolls up emo and ska as asked), which makes ``Punk Rock`` a
+        generic parent that the selector legitimately condenses away — leaving two
+        genres. ``Reggae`` replaces it; it is still unrelated to punk, so the
+        fixture tests what it claims to.
         """
+        result = gas().aggregate_genres(
+            {"musicbrainz@track": ["Punk Rock", "Reggae", "Hardcore"]},
+            max_genres=3,
+            context_title="Song",
+        )
+        musical = [g for g in result if not gas().is_track_affiliation_tag(g)]
+        assert len(musical) == 3
+
+    def test_sku_under_punk_condenses_its_punk_parent(self) -> None:
+        """The documented consequence of re-parenting ``ska`` under ``punk``."""
         result = gas().aggregate_genres(
             {"musicbrainz@track": ["Punk Rock", "Ska", "Hardcore"]},
             max_genres=3,
             context_title="Song",
         )
         musical = [g for g in result if not gas().is_track_affiliation_tag(g)]
-        assert len(musical) == 3
+        assert "Ska" in musical
+        assert not any(g.casefold() in ("punk", "punk rock") for g in musical), (
+            "Punk Rock is now a generic parent of Ska and is condensed away"
+        )
 
     def test_a_cover_track_keeps_its_marker_beyond_the_limit(self) -> None:
         result = gas().aggregate_genres(
