@@ -683,6 +683,118 @@ def get_similar_artists(artist: str, args: Any) -> tuple[dict[str, Any], int]:
         return {"success": False, "error": str(exc)}, 500
 
 
+def get_library_similar_artists(limit: int = 100) -> tuple[dict[str, Any], int]:
+    """Aggregate the similar-artist lists of EVERY artist in the collection.
+
+    ⚠️ RESTORED 2026-11-26. This backs ``/api/library/artists/similar``, which
+    the Downloads ▸ Similar Artists page calls — and that endpoint existed ONLY
+    in the retired ``old_system/app.py``. It was never ported, so the page
+    rendered an error or an empty grid forever.
+
+    Unlike ``get_similar_artists`` (ONE artist's cache), this answers "who do my
+    artists collectively recommend that I do not own yet?" — the page's actual
+    question. An artist recommended by six of your artists is a stronger
+    suggestion than one recommended once, hence the sort by ``count``.
+
+    ``in_collection`` uses ``_norm_artist_key`` (punctuation/"The"-tolerant), so
+    a recommendation that is already in the library under a slightly different
+    spelling is correctly filtered out instead of being re-suggested.
+    """
+    import json
+
+    aggregated: dict[str, dict[str, Any]] = {}
+
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT name, similar_artists_lastfm, similar_artists_listenbrainz "
+                    "FROM artists "
+                    "WHERE similar_artists_lastfm IS NOT NULL "
+                    "   OR similar_artists_listenbrainz IS NOT NULL"
+                )
+            ).fetchall() or []
+    except Exception as exc:
+        logger.error("Library similar-artists aggregation failed", error=str(exc))
+        return {"success": False, "error": str(exc), "similar_artists": []}, 500
+
+    for row in rows:
+        mapping = getattr(row, "_mapping", None)
+        entry = dict(mapping) if mapping else {}
+        source_artist = str(entry.get("name") or "").strip() if entry else str(row[0] or "").strip()
+        raw_values = (
+            (entry.get("similar_artists_lastfm"), entry.get("similar_artists_listenbrainz"))
+            if entry
+            else (row[1], row[2])
+        )
+
+        for raw in raw_values:
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                continue
+            if not isinstance(parsed, list):
+                continue
+
+            for item in parsed:
+                if isinstance(item, str):
+                    name, match = item.strip(), 0.0
+                elif isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    try:
+                        match = float(item.get("match") or 0.0)
+                    except (TypeError, ValueError):
+                        match = 0.0
+                else:
+                    continue
+                if not name or name.casefold() == source_artist.casefold():
+                    continue
+
+                bucket = aggregated.setdefault(
+                    name.casefold(),
+                    {"name": name, "count": 0, "match_total": 0.0, "from": set()},
+                )
+                bucket["count"] += 1
+                bucket["match_total"] += match
+                if source_artist:
+                    bucket["from"].add(source_artist)
+
+    # ``_catalogue_artist_names`` returns lowercase EXACT library names.
+    # Normalise them the same way the recommendation names are normalised, so a
+    # punctuation difference ("Beatles, The" vs "The Beatles") cannot let an
+    # owned artist slip through as a suggestion.
+    owned_keys = {
+        _norm_artist_key(name)
+        for name in _catalogue_artist_names(None, [b["name"] for b in aggregated.values()])
+    }
+
+    results: list[dict[str, Any]] = []
+    for bucket in aggregated.values():
+        count = int(bucket["count"])
+        results.append(
+            {
+                "name": bucket["name"],
+                "count": count,
+                "match": (bucket["match_total"] / count) if count else 0.0,
+                "from_artists": sorted(bucket["from"]),
+                "in_collection": _norm_artist_key(bucket["name"]) in owned_keys,
+            }
+        )
+
+    # Most-recommended first, then by average match strength.
+    results.sort(key=lambda item: (-item["count"], -item["match"], item["name"].casefold()))
+    return (
+        {
+            "success": True,
+            "similar_artists": results[: max(1, int(limit))],
+            "total_similar": min(len(results), max(1, int(limit))),
+        },
+        200,
+    )
+
+
 def get_compilations(artist: str) -> tuple[dict[str, Any], int]:
     """Get compilation appearances for an artist."""
     try:

@@ -1,32 +1,40 @@
 /* ==========================================================================
    static/js/pages/monitor.js
-   Monitor page — CSV inline import, unmatched folders, disk discovery,
-   upcoming releases.
+   Monitor page — unmatched folders, disk discovery, disk actions.
 
    Requires: utils/dom.js, utils/api.js, ui/toast.js, ui/confirm.js,
              ui/button-state.js, ui/status-badge.js
    Still relies on downloads.js for queue rendering (`loadQueueStatus`) and
    on the shared MusicBrainz search component (`openGlobalMbSearch`).
 
-   ── CHANGES FROM THE PREVIOUS VERSION ─────────────────────────────────────
-   1. PROGRESS PERCENTAGE WAS NEVER ROUNDED — FIXED BUG.
-          csvSetProgress((processedCount / items.length) * 100, …)
-      With, say, 3 of 7 batches done that produced
-          style="width: 42.857142857142854%"
-          textContent "42.857142857142854%"
-      so the label showed a 17-digit number mid-import. Rounded once, inside
-      csvSetProgress, so every caller benefits.
+   ── REMOVED 2026-11-26: THE CSV INLINE IMPORT ─────────────────────────────
+   This file carried a whole second CSV importer (csvSetProgress,
+   csvInlineReset, buildCsvResultStats, csvInlineImport — ~140 lines) that
+   targeted #csvInlineForm / #csvInlineFile / #csvInlineProgress and friends.
+   NONE of those ids exist in the current tree; they survive only in
+   old_system/templates/downloads_monitor.html. So the block was unreachable
+   from every page, and the Playlists tab it was written for actually renders
+   components/search/_playlists.html, whose form calls `importPlaylistFromCSV`
+   from features/csv-import.js.
 
-   2. `deleteAllEmptyFolders` SWALLOWED EVERY FAILURE.
+   That is the bug this removal closes: /downloads/monitor rendered the
+   Playlist Downloads tab WITHOUT loading the three modules it needs
+   (state/import-state.js, features/csv-import.js, pages/playlist.js), so the
+   tab's upload button threw ReferenceError: importPlaylistFromCSV is not
+   defined. The template now loads them; this file no longer pretends to
+   import CSVs.
+
+   ── CHANGES FROM THE PREVIOUS VERSION ─────────────────────────────────────
+   1. `deleteAllEmptyFolders` SWALLOWED EVERY FAILURE.
           try { await fetchJsonOrThrow(...) } catch (e) {}
       An empty catch on a delete loop meant a folder that failed to delete
       was reported as pruned. It now counts failures and reports them.
 
-   3. The delete loop also left `btn.disabled = true` if anything threw
+   2. The delete loop also left `btn.disabled = true` if anything threw
       before the final assignment. Now ui/button-state.js, which restores in
       a `finally`.
 
-   4. `escapeHtml` and `fetchJsonOrThrow` were borrowed from downloads.js.
+   3. `escapeHtml` and `fetchJsonOrThrow` were borrowed from downloads.js.
       Now from utils/dom.js and utils/api.js, so this file no longer depends
       on downloads.js having parsed first.
 
@@ -59,149 +67,6 @@
 
   function esc(value) {
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
-  }
-
-  // ── CSV inline import ───────────────────────────────────────────────────
-
-  function csvSetProgress(pct, label, sub) {
-    // Rounded here so no caller can emit a fractional width or label.
-    const rounded = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
-    const bar = document.getElementById('csvInlineProgressBar');
-    if (bar) {
-      bar.style.width = rounded + '%';
-      bar.setAttribute('aria-valuenow', String(rounded));
-    }
-    const pctEl = document.getElementById('csvInlineProgressPct');
-    if (pctEl) pctEl.textContent = rounded + '%';
-    if (label !== undefined) {
-      const el = document.getElementById('csvInlineProgressLabel');
-      if (el) el.textContent = label;
-    }
-    if (sub !== undefined) {
-      const el = document.getElementById('csvInlineProgressSub');
-      if (el) el.textContent = sub;
-    }
-  }
-
-  function csvInlineReset() {
-    document.getElementById('csvInlineForm').style.display = '';
-    document.getElementById('csvInlineProgress').style.display = 'none';
-    document.getElementById('csvInlineResult').style.display = 'none';
-    document.getElementById('csvInlineFormEl').reset();
-  }
-
-  function buildCsvResultStats(total, added, skipped) {
-    const tile = (value, label, variant) => `
-      <div class="col-6 col-md-4">
-        <div class="card text-center bg-${variant} bg-opacity-10 border-${variant} h-100">
-          <div class="card-body py-3">
-            <div class="h3 text-${variant} mb-1">${esc(value)}</div>
-            <div class="small text-secondary">${esc(label)}</div>
-          </div>
-        </div>
-      </div>`;
-    return tile(total, 'Total Tracks', 'info')
-      + tile(added, 'Added to Queue', 'success')
-      + tile(skipped, 'Already Queued', 'secondary');
-  }
-
-  async function csvInlineImport(event) {
-    event.preventDefault();
-
-    const fileInput = document.getElementById('csvInlineFile');
-    const importName = document.getElementById('csvInlineName').value.trim();
-    if (!fileInput.files.length || !importName) return;
-
-    document.getElementById('csvInlineForm').style.display = 'none';
-    document.getElementById('csvInlineProgress').style.display = '';
-    document.getElementById('csvInlineResult').style.display = 'none';
-    csvSetProgress(5, 'Parsing CSV…', 'Reading track metadata from the file.');
-
-    try {
-      const formData = new FormData();
-      formData.append('file', fileInput.files[0]);
-      formData.append('playlist_name', importName);
-      formData.append('skip_matching', 'true');
-
-      // FormData must not carry an explicit Content-Type — the browser sets
-      // the multipart boundary — so this uses fetch + parseJsonResponse
-      // rather than api.postJson.
-      const response = await fetch('/api/playlist/import/csv', {
-        method: 'POST',
-        body: formData,
-      });
-      const parsed = await global.api.parseJsonResponse(response, 'CSV import');
-
-      const allTracks = parsed.all_tracks || [];
-      if (!allTracks.length) throw new Error('No tracks found in CSV');
-
-      const nameSlug = importName.replace(/\s+/g, '_').substring(0, 80);
-      const currentYear = String(new Date().getFullYear());
-
-      const items = allTracks.map((track, index) => ({
-        artist: track.artist,
-        title: track.title,
-        album: importName,
-        album_artist: 'Various Artists',
-        year: currentYear,
-        track_number: index + 1,
-        duration: track.duration_s || null,
-        genres: track.genres || null,
-        isrc: track.isrc || null,
-      }));
-
-      let totalAdded = 0;
-      let totalSkipped = 0;
-      let totalFailed = 0;
-      let processed = 0;
-
-      csvSetProgress(2, 'Adding to queue…', `Sending ${items.length} track(s) to the queue.`);
-
-      for (let i = 0; i < items.length; i += CSV_BATCH_SIZE) {
-        const batch = items.slice(i, i + CSV_BATCH_SIZE);
-        try {
-          const data = await global.api.postJson('/api/queue/add-batch', {
-            items: batch,
-            import_group: nameSlug,
-            import_type: 'playlist',
-            source: 'soulseek',
-          });
-          totalAdded += data.added || 0;
-          totalSkipped += data.skipped || 0;
-          totalFailed += data.failed || 0;
-        } catch (batchError) {
-          console.error('Batch failed:', batchError);
-          totalFailed += batch.length;
-        }
-
-        processed += batch.length;
-        csvSetProgress(
-          (processed / items.length) * 100,
-          'Adding to queue…',
-          `Processed ${processed} of ${items.length}`
-        );
-      }
-
-      csvSetProgress(100, 'Done', `${totalAdded} track(s) added to the queue.`);
-      document.getElementById('csvInlineProgress').style.display = 'none';
-      document.getElementById('csvInlineResult').style.display = '';
-      document.getElementById('csvInlineResultStats').innerHTML =
-        buildCsvResultStats(allTracks.length, totalAdded, totalSkipped);
-
-      // The old version computed `queueOk` and never used it, so a partial
-      // failure looked identical to a clean import.
-      if (totalFailed > 0) {
-        global.toast.warning(
-          `${totalFailed} track(s) could not be queued.`,
-          'Import finished with errors'
-        );
-      }
-    } catch (error) {
-      csvSetProgress(0, 'Error', error.message);
-      document.getElementById('csvInlineProgress').style.display = 'none';
-      document.getElementById('csvInlineForm').style.display = '';
-      global.toast.error('Import failed: ' + error.message);
-    }
   }
 
   // ── Unmatched folders ───────────────────────────────────────────────────
@@ -559,6 +424,7 @@
             + 'Could not read the downloads folder: '
             + esc(String(data.error || 'unknown error'))
             + '</div>';
+          honorFolderAnchor();
           return;
         }
 
@@ -622,6 +488,7 @@
         attachFolderActions(list);
         bindMatchedTracklistToggles(list);
         restoreOpenTracklists(list);
+        honorFolderAnchor();
       } catch (error) {
         // Same reasoning as the ``success: false`` branch: a transport failure
         // (timeout, 500, gateway HTML) is NOT "no folders". Keep the card
@@ -636,6 +503,7 @@
             + 'Could not load folders: '
             + esc(String((error && error.message) || error || 'unknown error'))
             + '</div>';
+          honorFolderAnchor();
         } catch (_ignore) { /* never let the error path throw */ }
       } finally {
         unmatchedInFlight = false;
@@ -715,9 +583,30 @@
     });
   }
 
+  /**
+   * Scroll to the folders card when the URL asked for it.
+   *
+   * ⚠️ The navbar's Downloads link is /downloads/monitor#unmatchedFoldersSection.
+   * The card starts `display: none` (it is revealed only when folders exist), so
+   * the browser's initial hash scroll finds nothing to scroll to and never
+   * retries. Clicking Downloads therefore landed on the page top — the very
+   * complaint that put the card in its own tab.
+   *
+   * Runs once per page load, after the card is actually visible.
+   */
+  let folderAnchorHonored = false;
+
+  function honorFolderAnchor() {
+    if (folderAnchorHonored) return;
+    if (!global.location || global.location.hash !== '#unmatchedFoldersSection') return;
+    const section = document.getElementById('unmatchedFoldersSection');
+    if (!section || section.style.display === 'none') return;
+    folderAnchorHonored = true;
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
   function attachFolderActions(listEl) {
     if (!listEl) return;
-
     // Same selector -> handler table shape as download-queue.js, bound through
     // services/item-groups.js. The confirm and delete handlers keep their
     // button-busy wrapper, which restores the button in a `finally` — the
@@ -911,8 +800,6 @@
     }
   });
 
-  global.csvInlineReset = csvInlineReset;
-  global.csvInlineImport = csvInlineImport;
   global.renderUnmatchedFolders = renderUnmatchedFolders;
   global.discoverFiles = discoverFiles;
   global.processAlbums = processAlbums;

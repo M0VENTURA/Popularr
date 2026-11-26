@@ -37,10 +37,27 @@
   {#
     nav-segmented (popularr.css) replaces the old `bg-secondary p-1 rounded`
     combination — same convention as Pages/downloads/queue.html.
+
+    ⚠️ "Matched & Unmatched Folders" IS THE FIRST TAB, and it is the default.
+
+    It used to live inside the third tab ("Active Queue & Monitor"), which made
+    the page's main working surface invisible until you clicked through — and
+    the navbar's Downloads link points straight at
+    /downloads/monitor#unmatchedFoldersSection, so the app's main Downloads
+    destination landed on a HIDDEN panel. A browser cannot scroll to a section
+    inside a `display: none` tab, so the anchor silently did nothing.
+
+    The folders are the reason to open this page: they are the list of things
+    waiting for a decision. Searching is the incidental job, so it follows.
   #}
   <ul class="nav nav-pills nav-segmented nav-fill mb-4 shadow-sm" id="searchTabs" role="tablist">
     <li class="nav-item" role="presentation">
-      <button class="nav-link active py-2" id="soulseek-tab" data-bs-toggle="tab" data-bs-target="#soulseek" type="button" role="tab" aria-selected="true">
+      <button class="nav-link active py-2" id="folders-tab" data-bs-toggle="tab" data-bs-target="#folders" type="button" role="tab" aria-selected="true">
+        <i class="bi bi-folder-exclamation me-1"></i> Folders &amp; Queue
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link py-2" id="soulseek-tab" data-bs-toggle="tab" data-bs-target="#soulseek" type="button" role="tab" aria-selected="false">
         <i class="bi bi-music-note-beamed me-1"></i> Soulseek Search
       </button>
     </li>
@@ -49,26 +66,11 @@
         <i class="bi bi-collection-play me-1"></i> Playlist Downloads
       </button>
     </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link py-2" id="queue-tab" data-bs-toggle="tab" data-bs-target="#queueMonitor" type="button" role="tab" aria-selected="false">
-        <i class="bi bi-list-task me-1"></i> Active Queue &amp; Monitor
-      </button>
-    </li>
   </ul>
 
   <div class="tab-content mb-5" id="searchTabsContent">
-    {# Tab 1: Soulseek Search & Download Manager #}
-    <div class="tab-pane fade show active" id="soulseek" role="tabpanel" aria-labelledby="soulseek-tab">
-      {% include 'components/search/_soulseek.html' %}
-    </div>
-
-    {# Tab 2: Playlist Batch Downloads #}
-    <div class="tab-pane fade" id="playlists" role="tabpanel" aria-labelledby="playlists-tab">
-      {% include 'components/search/_playlists.html' %}
-    </div>
-
-    {# Tab 3: Active Queue & Stats #}
-    <div class="tab-pane fade" id="queueMonitor" role="tabpanel" aria-labelledby="queue-tab">
+    {# Tab 1: Folders & Queue — the page's main working surface #}
+    <div class="tab-pane fade show active" id="folders" role="tabpanel" aria-labelledby="folders-tab">
       {#
         Suppress the Completed queue card here: "Matched & Unmatched Folders"
         below is the single place finished folders are handled, and it is the
@@ -95,6 +97,16 @@
           <div id="unmatchedFoldersList"></div>
         </div>
       </div>
+    </div>
+
+    {# Tab 2: Soulseek Search #}
+    <div class="tab-pane fade" id="soulseek" role="tabpanel" aria-labelledby="soulseek-tab">
+      {% include 'components/search/_soulseek.html' %}
+    </div>
+
+    {# Tab 3: Playlist Batch Downloads #}
+    <div class="tab-pane fade" id="playlists" role="tabpanel" aria-labelledby="playlists-tab">
+      {% include 'components/search/_playlists.html' %}
     </div>
   </div>
 </div>
@@ -123,11 +135,11 @@
   main.js, ui/search-flyout.js) is NOT repeated here. This page additionally
   needs the SAME modules as Pages/downloads/queue.html (Soulseek search,
   playlist downloads and the active queue) PLUS js/pages/monitor.js, which
-  adds the unmatched-folders, disk-scan and upcoming-releases sections:
+  adds the unmatched-folders section and the disk actions:
 
     js/pages/download-queue.js  Provides loadQueueStatus(), which renders
                                 components/search/_queue_status.html's Active
-                                Queue tab + the processor card.
+                                Queue panel + the processor card.
     ui/status-badge.js          download-queue.js calls global.statusBadge
                                 directly; base.html does not load this globally.
     services/item-groups.js     shared folder/album row renderer. Required by
@@ -139,10 +151,26 @@
                                 / #slskdSearchBtn / #slskdDownloadSelected, the
                                 search session + poll loop via global.slskd).
     js/pages/monitor.js         THIS page's controller: unmatched folders
-                                (#unmatchedFoldersSection), upcoming releases
-                                (#upcomingReleasesSection), the jump-to-upcoming
+                                (#unmatchedFoldersSection), the refresh
                                 action, and the disk actions
                                 (global.discoverFiles / global.processAlbums).
+
+  ⚠️ THE PLAYLIST TAB'S THREE MODULES WERE MISSING.
+
+  components/search/_playlists.html is included by the Playlist Downloads tab,
+  and its form submits to `importPlaylistFromCSV`. That function lives in
+  features/csv-import.js, which this page never loaded — so clicking Upload
+  threw `ReferenceError: importPlaylistFromCSV is not defined`. The page used
+  to carry its OWN CSV importer in monitor.js targeting #csvInlineForm and
+  friends; those ids exist nowhere in this tree (only in old_system), so that
+  copy was dead and the real partial was left with no controller. The dead
+  copy is gone and the actual modules are loaded below.
+
+  state/import-state.js MUST come before features/csv-import.js AND before
+  pages/playlist.js: all three touch currentImportData /
+  missingTracksForSearch, and when two of them declared those with `let` the
+  second file to load threw "Identifier has already been declared" at PARSE
+  time and defined nothing. import-state.js owns both names.
 
   ORDER: item-groups.js before download-queue.js AND before monitor.js — both
   call global.itemGroups at render time.
@@ -152,5 +180,8 @@
 <script src="{{ versioned_static('js/services/slskd.js') }}"></script>
 <script src="{{ versioned_static('js/pages/soulseek-search.js') }}"></script>
 <script src="{{ versioned_static('js/pages/download-queue.js') }}"></script>
+<script src="{{ versioned_static('js/state/import-state.js') }}"></script>
+<script src="{{ versioned_static('js/features/csv-import.js') }}"></script>
+<script src="{{ versioned_static('js/pages/playlist.js') }}"></script>
 <script src="{{ versioned_static('js/pages/monitor.js') }}"></script>
 {% endblock %}

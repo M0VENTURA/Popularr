@@ -636,6 +636,23 @@ def api_get_similar_artists(artist: str) -> Any:
     return jsonify(data), code
 
 
+@artist_bp.route("/api/library/artists/similar")
+def api_library_similar_artists() -> Any:
+    """Artists your collection recommends that you do not own yet.
+
+    ⚠️ This route lived only in the retired ``old_system/app.py`` and was never
+    ported, so the Downloads ▸ Similar Artists page called a URL that matched
+    nothing and could never render its grid. Restored here so the page has a
+    backend again.
+    """
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    data, code = metadata.get_library_similar_artists(limit=limit)
+    return jsonify(data), code
+
+
 @artist_bp.route("/api/artist/compilations")
 def api_artist_compilations() -> Any:
     artist = request.args.get("name", "")

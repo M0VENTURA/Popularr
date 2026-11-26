@@ -305,14 +305,16 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     ("downloads/monitor.html", "saveEditedTrack"): (
         "Same _track_edit.html sharing problem as downloads/queue.html."
     ),
-    ("downloads/monitor.html", "createPlaylist"): (
-        "_playlists.html is shared with downloads/search.html, which DOES load "
-        "features/csv-import.js / pages/playlist.js. Loading them here would "
-        "pull in those whole pages."
-    ),
-    ("downloads/monitor.html", "importPlaylistFromCSV"): (
-        "Same _playlists.html sharing problem as downloads/queue.html."
-    ),
+    # ✅ REMOVED 2026-11-26: createPlaylist / importPlaylistFromCSV.
+    #
+    # These were registered as unreachable on the monitor page with the excuse
+    # "loading them here would pull in those whole pages". That excuse was the
+    # BUG: the Playlist Downloads tab renders _playlists.html, whose form
+    # submits to importPlaylistFromCSV, so leaving the controllers out meant the
+    # Upload button threw ReferenceError. The page now loads
+    # state/import-state.js + features/csv-import.js + pages/playlist.js and
+    # both handlers resolve. `_playlists.html` is small; the "whole page" cost
+    # was the price of a working tab.
 
     # ── shared partials whose buttons need their controllers ────────────────
     ("downloads/queue.html", "saveEditedTrack"): (
