@@ -59,6 +59,8 @@ because the tag writers treat an empty value as "delete this frame".
 
 from __future__ import annotations
 
+import os
+from collections import Counter
 from typing import Any
 
 import structlog
@@ -120,7 +122,176 @@ def _release_mbid(item: dict[str, Any]) -> str:
     return str(item.get("release_mbid") or item.get("release_id") or "").strip()
 
 
-def _reference_identity(item: dict[str, Any]) -> dict[str, Any]:
+def _release_group_of(item: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    """The release GROUP this queue row / its tracks are about, if known."""
+    group = str(item.get("musicbrainz_releasegroupid") or "").strip()
+    if group:
+        return group
+    for row in rows:
+        value = str(row.get("musicbrainz_releasegroupid") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _is_group_id(value: str, group: str) -> bool:
+    return bool(value) and bool(group) and value.strip().casefold() == group.strip().casefold()
+
+
+def _resolve_target_release(
+    item: dict[str, Any], rows: list[dict[str, Any]]
+) -> str:
+    """The REAL release this row may be healed toward — or "" when there is none.
+
+    ⚠️ WHY THIS EXISTS. Reported twice on Korn — *Untouchables*, the second time
+    with the file's own tags: the album was merged, held for ~8 hours, then
+    reverted. The logs name the culprit:
+
+        13:04:49 [HEAL] Korn - Untouchables: aligned 1 track(s) to release
+                 2606ffe5-… (barcode, catalognumber, media, musicbrainz_album_mbid, …)
+        13:04:55 [HEAL] Korn - Untouchables: aligned 1 track(s) to release
+                 4041334a-… (musicbrainz_album_mbid)
+
+    ``4041334a`` is the album's RELEASE GROUP id. ``_release_mbid`` accepts
+    ``release_id`` blindly, and older queue rows stored the GROUP there — so the
+    heal took the group id as "the release the user chose", MusicBrainz could
+    not resolve it (a group is not a release), and the fallback stamped the
+    group id straight into ``musicbrainz_album_mbid`` and onto the file. That is
+    the exact fallback the album-identity rules forbid, and it re-split an album
+    the unifier had just merged.
+
+    So: a group id is never a target. When a row names only its group, resolve a
+    real release from it — preferring the album's own consensus, then the
+    edition whose track count matches the folder (the same evidence the unifier
+    uses). If neither answers, the row has no authority and is skipped; guessing
+    is what this module exists to repair.
+    """
+    requested = _release_mbid(item)
+    group = _release_group_of(item, rows)
+
+    if requested and not _is_group_id(requested, group):
+        return requested
+
+    # 1. What the album already agrees on (a real release, never the group).
+    consensus = Counter(
+        str(row.get("musicbrainz_album_mbid") or "").strip()
+        for row in rows
+        if str(row.get("musicbrainz_album_mbid") or "").strip()
+        and not _is_group_id(str(row.get("musicbrainz_album_mbid") or ""), group)
+    )
+    if len(consensus) == 1:
+        return next(iter(consensus))
+
+    # 2. The edition whose track count matches this folder.
+    if group:
+        try:
+            from services.metadata.album_release_unify_service import (
+                _choose_by_track_count,
+            )
+
+            positions = {
+                (_norm(row.get("disc_number")), _norm(row.get("track_number")))
+                for row in rows
+                if _norm(row.get("track_number"))
+            }
+            local_count = len(positions) or len(rows)
+            exact = _choose_by_track_count(group, local_count)
+            if exact:
+                return exact[0]
+        except Exception as exc:  # pragma: no cover - network/import guard
+            logger.debug("[HEAL] Release-group resolution failed", error=str(exc))
+
+    return ""
+
+
+def _dir_key(path: Any) -> str:
+    """The directory of *path*, normalised so both separators compare equal."""
+    directory = os.path.dirname(str(path or "").strip())
+    if not directory:
+        return ""
+    return os.path.normpath(directory).replace("\\", "/").casefold()
+
+
+def _load_folder_index() -> dict[str, list[dict[str, Any]]]:
+    """Every library row's folder → its release identity.
+
+    ONE query for the whole library: the alternative (a LIKE-prefix query per
+    release) would run per correction and has to escape ``%``/``_`` in paths to
+    stay portable between Postgres and SQLite.
+    """
+    from sqlalchemy import text
+
+    from db.engine import db_session
+
+    try:
+        with db_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT id, file_path, musicbrainz_album_mbid, "
+                    "  musicbrainz_releasegroupid "
+                    "FROM tracks "
+                    "WHERE COALESCE(file_path, '') <> ''"
+                )
+            ).fetchall() or []
+    except Exception as exc:
+        logger.debug("[HEAL] Folder index unavailable", error=str(exc))
+        return {}
+
+    index: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        mapping = getattr(row, "_mapping", None)
+        entry = dict(mapping) if mapping else dict(row)
+        key = _dir_key(entry.get("file_path"))
+        if key:
+            index.setdefault(key, []).append(entry)
+    return index
+
+
+def _folder_split_conflict(
+    rows: list[dict[str, Any]],
+    target: str,
+    folder_index: dict[str, list[dict[str, Any]]],
+) -> tuple[str, str]:
+    """``(folder, sibling_release)`` when *target* would SPLIT an album folder.
+
+    ⚠️ ONE ALBUM DIRECTORY = ONE RELEASE ID. That invariant is the whole reason
+    the album was split in Navidrome in the first place, and this heal is
+    release-scoped by design (it only repairs the tracks a queue row produced).
+    Those two facts collide whenever ONE queue row produced ONE track of an
+    album whose other files are already unified: writing that track's release
+    would leave two release ids in one folder — the reported bug.
+
+    The heal only rewrites an album's identity when it is correcting the WHOLE
+    folder. If a sibling that it is not touching already carries a different
+    release, the album-level unifier owns that decision, not this repair.
+    """
+    target_key = _norm(target)
+    if not target_key:
+        return "", ""
+
+    affected = {str(row.get("id")) for row in rows if row.get("id") is not None}
+
+    for row in rows:
+        key = _dir_key(row.get("file_path"))
+        if not key:
+            continue
+        for sibling in folder_index.get(key, []):
+            if str(sibling.get("id")) in affected:
+                continue
+            release = str(sibling.get("musicbrainz_album_mbid") or "").strip()
+            if not release:
+                continue
+            group = str(sibling.get("musicbrainz_releasegroupid") or "").strip()
+            if _is_group_id(release, group):
+                continue
+            if _norm(release) != target_key:
+                return os.path.dirname(str(row.get("file_path") or "")), release
+    return "", ""
+
+
+def _reference_identity(
+    item: dict[str, Any], release_mbid: str | None = None
+) -> dict[str, Any]:
     """The identity the library row should have, from the row and MusicBrainz.
 
     MBID-first: the release the row names is fetched from MusicBrainz and wins
@@ -179,7 +350,7 @@ def _reference_identity(item: dict[str, Any]) -> dict[str, Any]:
     if edition_year:
         reference["release_year"] = edition_year
 
-    release_mbid = _release_mbid(item)
+    release_mbid = (release_mbid or "").strip() or _release_mbid(item)
     if release_mbid:
         reference["musicbrainz_album_mbid"] = release_mbid
 
@@ -508,13 +679,11 @@ def heal_queue_metadata(
             by_release.setdefault(mbid.casefold(), []).append(item)
     summary["releases"] = len(by_release)
 
-    for items in by_release.values():
-        reference = _reference_identity(items[0])
-        if not any(str(reference.get(c) or "").strip() for c in _IDENTITY_COLUMNS):
-            # Nothing authoritative to heal toward.
-            summary["skipped"] += len(items)
-            continue
+    # Built on first use: the album-folder guard below is the only consumer, and
+    # a run where nothing drifts should not pay for a library-wide read.
+    folder_index: dict[str, list[dict[str, Any]]] | None = None
 
+    for items in by_release.values():
         # ⚠️ ONLY the tracks these rows produced. Not every track that shares
         # the album name — see the module docstring for why that distinction
         # is the difference between repairing the library and corrupting it.
@@ -534,6 +703,23 @@ def heal_queue_metadata(
             summary["skipped"] += len(landed)
             continue
 
+        # ⚠️ Resolve the TARGET against the landed rows. A queue row can name
+        # its release GROUP (older rows stored it in ``release_id``), and
+        # writing that as an album id is the forbidden fallback — see
+        # ``_resolve_target_release``.
+        target = _resolve_target_release(items[0], rows)
+        if not target:
+            # No release authority at all (only a group id, and nothing to
+            # resolve it from). Guessing by name is the fault being repaired.
+            summary["skipped"] += len(landed)
+            continue
+
+        reference = _reference_identity(items[0], release_mbid=target)
+        if not any(str(reference.get(c) or "").strip() for c in _IDENTITY_COLUMNS):
+            # Nothing authoritative to heal toward.
+            summary["skipped"] += len(landed)
+            continue
+
         # A row already correct contributes nothing; a correction one track
         # needs still applies to its siblings, because album identity is
         # album-scoped and these tracks are all from the same release.
@@ -545,12 +731,31 @@ def heal_queue_metadata(
         if not corrections:
             continue
 
+        # ⚠️ ONE ALBUM DIRECTORY = ONE RELEASE ID. This heal is release-scoped,
+        # so a single queue row can name one track of an album whose other
+        # files are already unified. Writing that track's release would leave
+        # two ids in one folder — the split this whole area exists to prevent.
+        if {"musicbrainz_album_mbid", "musicbrainz_releasegroupid"} & set(corrections):
+            if folder_index is None:
+                folder_index = _load_folder_index()
+            folder, sibling = _folder_split_conflict(rows, target, folder_index)
+            if sibling:
+                summary["skipped"] += len(landed)
+                logger.info(
+                    "[HEAL] Skipped a release-id correction that would split an "
+                    "album folder",
+                    release=target,
+                    sibling_release=sibling,
+                    folder=folder,
+                )
+                continue
+
         summary["drifted"] += 1
 
         entry: dict[str, Any] = {
             "artist": items[0].get("album_artist") or items[0].get("artist"),
             "album": items[0].get("album"),
-            "release_mbid": reference.get("musicbrainz_album_mbid") or _release_mbid(items[0]),
+            "release_mbid": target,
             "queue_rows": len(items),
             "tracks": len(rows),
             "fields": sorted(corrections),
@@ -567,6 +772,16 @@ def heal_queue_metadata(
         written, failed = _apply_file_corrections(
             [str(r.get("file_path") or "") for r in rows], corrections
         )
+
+        # Keep the folder index truthful: a later release in this run may share
+        # a directory with these rows, and it must see the values just written
+        # rather than the pre-heal ones.
+        if folder_index is not None:
+            touched = {str(r.get("id")) for r in rows if r.get("id") is not None}
+            for row in rows:
+                for entry_row in folder_index.get(_dir_key(row.get("file_path")), []):
+                    if str(entry_row.get("id")) in touched:
+                        entry_row.update(corrections)
 
         summary["tracks_updated"] += tracks_updated
         summary["files_written"] += written

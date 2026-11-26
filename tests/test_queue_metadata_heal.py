@@ -286,20 +286,30 @@ def _add_queue_row(
     title: str,
     file_path: str,
     release_mbid: str | None = RELEASE_A,
+    release_id: str | None = None,
+    group: str | None = None,
     status: str = "imported",
     metadata: str = "{}",
 ) -> None:
+    """A queue row. ``release_id``/``group`` default to ``release_mbid``.
+
+    ⚠️ ``release_id`` is separately settable because OLDER rows stored the
+    release GROUP there (see ``test_a_release_group_id_is_never_written_as_the_
+    album_id``) — that is the shape the real queue had when the Korn split was
+    reported, and it cannot be reproduced through a shared column.
+    """
     with db_session() as session:
         session.execute(
             text(
                 """
                 INSERT INTO download_queue (
                     id, artist, album, album_artist, title, status,
-                    release_id, release_mbid, recording_mbid, music_file_path,
+                    release_id, release_mbid, musicbrainz_releasegroupid,
+                    recording_mbid, music_file_path,
                     year, release_year, metadata
                 ) VALUES (
                     :id, 'Portishead', 'Dummy', 'Portishead', :title, :status,
-                    :release_mbid, :release_mbid, :rec, :file_path,
+                    :release_id, :release_mbid, :group, :rec, :file_path,
                     '1994', 1994, :metadata
                 )
                 """
@@ -309,6 +319,8 @@ def _add_queue_row(
                 "title": title,
                 "status": status,
                 "release_mbid": release_mbid,
+                "release_id": release_id if release_id is not None else release_mbid,
+                "group": group,
                 "rec": f"rec-t{queue_id - 1}",
                 "file_path": file_path,
                 "metadata": metadata,
@@ -411,9 +423,16 @@ def test_a_different_release_sharing_the_album_name_is_left_alone(mb, tag_writes
     queue row produced it. Healing by album name would drag it onto release A and
     make the two editions indistinguishable — the fault this whole area is
     fixing, in reverse.
+
+    ⚠️ It lives in its OWN directory, because that is what "two editions" means:
+    one album directory is one release (see
+    ``test_one_folder_is_never_split_across_releases`` for the same-directory
+    case, which is refused for the opposite reason).
     """
     _add_track(track_id="t1", title="Mysterons", file_path="/music/Dummy/01.mp3")
-    _add_track(track_id="t-other", title="Roads", file_path="/music/Dummy/09.mp3")
+    _add_track(
+        track_id="t-other", title="Roads", file_path="/music/Dummy (Remastered)/09.mp3"
+    )
     _add_queue_row(queue_id=1, title="Mysterons", file_path="/music/Dummy/01.mp3")
 
     _heal()
@@ -522,9 +541,15 @@ def test_limit_caps_the_rows_examined(mb, tag_writes) -> None:
 
 
 def test_queue_ids_restricts_the_run(mb, tag_writes) -> None:
+    # ⚠️ SEPARATE DIRECTORIES. Two tracks in ONE folder are one album, and the
+    # heal refuses to give them different release ids (see
+    # ``test_one_folder_is_never_split_across_releases``). Scoping is what this
+    # test is about, so the tracks must be distinguishable albums.
     for idx in (1, 2):
-        _add_track(track_id=f"t{idx}", title=f"T{idx}", file_path=f"/music/Dummy/0{idx}.mp3")
-        _add_queue_row(queue_id=idx, title=f"T{idx}", file_path=f"/music/Dummy/0{idx}.mp3")
+        _add_track(track_id=f"t{idx}", title=f"T{idx}", file_path=f"/music/Album{idx}/0{idx}.mp3")
+        _add_queue_row(
+            queue_id=idx, title=f"T{idx}", file_path=f"/music/Album{idx}/0{idx}.mp3"
+        )
 
     result = _heal(queue_ids=[2])
 
@@ -601,3 +626,154 @@ def test_an_unreachable_musicbrainz_never_relabels_the_original_year(
     assert str(tags.get("originalyear") or "") != "1994", (
         "the ORIGINALYEAR tag must not be given the edition year"
     )
+
+
+# ---------------------------------------------------------------------------
+# Album identity invariants (Korn — Untouchables regression)
+# ---------------------------------------------------------------------------
+
+def test_a_release_group_id_is_never_written_as_the_album_id(
+    mb, tag_writes, monkeypatch
+) -> None:
+    """⚠️ THE KORN REVERT.
+
+    Reported twice, the second time with the file's own tags: *Untouchables*
+    merged, held ~8 hours, reverted. The unified log showed the heal doing this,
+    six seconds apart:
+
+        aligned 1 track(s) to release 2606ffe5-… (Japan edition)
+        aligned 1 track(s) to release 4041334a-… (musicbrainz_album_mbid)
+
+    ``4041334a`` is the album's RELEASE GROUP. An older queue row stored the
+    group in ``release_id``, ``_release_mbid`` returned it verbatim, MusicBrainz
+    could not resolve it (a group is not a release), and the row-value fallback
+    stamped the group id onto the track AND its file — the exact fallback the
+    album-identity rules forbid.
+
+    A group id must never reach ``musicbrainz_album_mbid``. With no real release
+    to resolve from, the row is skipped outright.
+    """
+    _add_track(track_id="t1", title="Mysterons", file_path="/music/Dummy/01.mp3")
+    # The queue row names the GROUP in release_id, as the old queue writer did.
+    _add_queue_row(
+        queue_id=1,
+        title="Mysterons",
+        file_path="/music/Dummy/01.mp3",
+        release_mbid=None,
+        release_id=GROUP_B,
+        group=GROUP_B,
+    )
+
+    result = _heal()
+
+    row = _track("t1")
+    assert row["musicbrainz_album_mbid"] == RELEASE_B, (
+        "the release group id was written as the album release id"
+    )
+    assert row["musicbrainz_album_mbid"] != GROUP_B
+
+    # The identity columns are NOT part of the correction. (Other album-scoped
+    # fields may legitimately drift — the edition-year mapping does exactly
+    # that here — but the release id must never move.)
+    for entry in result["albums"]:
+        assert "musicbrainz_album_mbid" not in entry["fields"], entry
+
+    written_keys = {key for _path, tags in tag_writes for key in tags}
+    assert not (written_keys & {"musicbrainz_albumid", "musicbrainz_album_mbid"}), (
+        f"an album id was written to a file: {sorted(written_keys)}"
+    )
+
+
+def test_a_group_id_is_resolved_to_a_real_release(
+    monkeypatch, tag_writes
+) -> None:
+    """A group id is not authority, but it IS a lead: resolve a real edition.
+
+    The album's own consensus wins first, so a folder that already agrees on a
+    release is healed toward that rather than re-resolved from MusicBrainz.
+    """
+    _add_track(
+        track_id="t1",
+        title="Mysterons",
+        file_path="/music/Dummy/01.mp3",
+        release_mbid=RELEASE_A,
+        group=GROUP_A,
+    )
+    _add_queue_row(
+        queue_id=1,
+        title="Mysterons",
+        file_path="/music/Dummy/01.mp3",
+        release_mbid=None,
+        release_id=GROUP_A,
+        group=GROUP_A,
+    )
+
+    import services.enrichment.musicbrainz_service as mbs
+
+    def _fake_fetch(release_mbid: str):
+        return dict(MB_RELEASE_A) if release_mbid == RELEASE_A else None
+
+    monkeypatch.setattr(mbs, "fetch_musicbrainz_release_metadata", _fake_fetch)
+
+    result = _heal()
+
+    row = _track("t1")
+    assert row["musicbrainz_album_mbid"] == RELEASE_A
+    assert row["musicbrainz_album_mbid"] != GROUP_A, "never the group id"
+    assert result["healed"] == 1 or result["drifted"] == 0
+
+
+def test_one_folder_is_never_split_across_releases(mb, tag_writes) -> None:
+    """⚠️ ONE ALBUM DIRECTORY = ONE RELEASE ID.
+
+    The heal is release-scoped: a single queue row can produce ONE track of an
+    album whose other files already carry a DIFFERENT release. Aligning that
+    track to the release the queue named would leave two release ids in one
+    folder — the split reported in Navidrome.
+
+    The album-level unifier owns that decision when the folder is not being
+    corrected as a whole, so the heal refuses.
+    """
+    RELEASE_C = "cccccccc-3333-4333-8333-cccccccccccc"
+    GROUP_C = "cccc3333-3333-4333-8333-cccc33333333"
+
+    # Two files of ONE album, sitting on two different releases (already split).
+    _add_track(track_id="t1", title="Here to Stay", file_path="/music/Dummy/01.mp3")
+    _add_track(
+        track_id="t15",
+        title="Here to Stay (T Ray's mix)",
+        file_path="/music/Dummy/15.mp3",
+        release_mbid=RELEASE_C,
+        group=GROUP_C,
+    )
+    # Only the bonus track was produced by a queue row, and it names release A.
+    _add_queue_row(
+        queue_id=1, title="Here to Stay (T Ray's mix)", file_path="/music/Dummy/15.mp3"
+    )
+
+    result = _heal()
+
+    assert _track("t1")["musicbrainz_album_mbid"] == RELEASE_B
+    assert _track("t15")["musicbrainz_album_mbid"] == RELEASE_C, (
+        "the heal must not re-align one track of an album it is not correcting"
+    )
+    assert result["healed"] == 0
+    written_keys = {key for _path, tags in tag_writes for key in tags}
+    assert not (written_keys & {"musicbrainz_albumid", "musicbrainz_album_mbid"})
+
+
+def test_a_folder_is_healed_when_the_whole_album_is_in_scope(mb, tag_writes) -> None:
+    """CONTROL: the split guard must not stop a genuine whole-album repair."""
+    for idx in (1, 2):
+        _add_track(
+            track_id=f"t{idx}", title=f"T{idx}", file_path=f"/music/Dummy/0{idx}.mp3"
+        )
+        _add_queue_row(
+            queue_id=idx, title=f"T{idx}", file_path=f"/music/Dummy/0{idx}.mp3"
+        )
+
+    result = _heal()
+
+    assert result["healed"] == 1, "every file in the folder was produced by the queue"
+    assert _track("t1")["musicbrainz_album_mbid"] == RELEASE_A
+    assert _track("t2")["musicbrainz_album_mbid"] == RELEASE_A
