@@ -298,6 +298,14 @@ class TestAlbumMbidsComeFromTheLibrary:
         item["metadata"]["writer"] = "A Writer"
         item["metadata"]["composer"] = "A Composer"
         item["metadata"]["lyricist"] = "A Lyricist"
+        # ⭐ AND the release-TRACK id. It is per-release, so it is one of the
+        # fields the import now resolves from the release tracklist (a track
+        # copied from another album would otherwise keep the source release's
+        # position). A row that omits it is NOT fully resolved, so leaving it out
+        # here made this control assert the opposite of its own premise.
+        item["metadata"]["musicbrainz_releasetrackid"] = (
+            "00000000-0000-0000-0000-00000000t001"
+        )
 
         meta = run_import(item)
         assert meta["musicbrainz_releasegroupid"] == "stored-rg"

@@ -119,6 +119,64 @@ def normalize_isrc(value: Any) -> str:
     return compact
 
 
+#: ⚠️ LOOK-ALIKE CHARACTERS THAT MAKE A NAME UNMATCHABLE.
+#:
+#: Reported from the discard list: *"Wrong artist — the file is credited to
+#: 'KoЯn'"*. ``normalize_string`` lowercases and strips diacritics, but ``Я``
+#: (U+042F, Cyrillic Capital Letter Ya) is a LETTER, not an accent, so it
+#: survived — ``"KoЯn"`` normalised to ``"koяn"`` while ``"Korn"`` gave
+#: ``"korn"``. ``_simple_similarity`` scored that 0.0 and the download was
+#: deleted as a wrong artist, even though it was exactly the requested track.
+#:
+#: Deliberately a SHORT, curated map of characters that are visually identical
+#: to a Latin letter and are commonly used as stylisation in band names. It is
+#: NOT a general transliteration: mapping real Cyrillic/Greek text to Latin would
+#: make genuinely different names collide, which is worse than a missed match.
+#: Only applied when the character sits in an otherwise-Latin string (see
+#: ``fold_confusables``).
+_CONFUSABLE_CHARS = str.maketrans({
+    "\u042f": "R",  # Я CYRILLIC CAPITAL LETTER YA
+    "\u044f": "r",  # я CYRILLIC SMALL LETTER YA
+    "\u0410": "A", "\u0430": "a",  # А а
+    "\u0412": "B", "\u0432": "b",  # В в
+    "\u0415": "E", "\u0435": "e",  # Е е
+    "\u041a": "K", "\u043a": "k",  # К к
+    "\u041c": "M", "\u043c": "m",  # М м
+    "\u041d": "H", "\u043d": "h",  # Н н
+    "\u041e": "O", "\u043e": "o",  # О о
+    "\u0420": "P", "\u0440": "p",  # Р р
+    "\u0421": "C", "\u0441": "c",  # С с
+    "\u0422": "T", "\u0442": "t",  # Т т
+    "\u0425": "X", "\u0445": "x",  # Х х
+    "\u0406": "I", "\u0456": "i",  # І і
+    "\u0391": "A", "\u03b1": "a",  # Α α
+    "\u039f": "O", "\u03bf": "o",  # Ο ο
+    "\u03a1": "P", "\u03c1": "p",  # Ρ ρ
+    "\u03a5": "Y", "\u03c5": "u",  # Υ υ
+    "\u017f": "s",  # ſ LATIN SMALL LETTER LONG S
+    "\u0131": "i",  # ı DOTLESS I
+})
+
+#: True when the string is predominantly Latin script. A Cyrillic or Greek TITLE
+#: must not be folded — only a Latin name wearing a look-alike letter.
+_LATIN_MOSTLY_RE = re.compile(r"[A-Za-z]")
+
+
+def fold_confusables(value: str) -> str:
+    """Fold Latin-look-alike letters in an otherwise-Latin string.
+
+    ``"KoЯn"`` → ``"Korn"``. Only applied when the string already contains Latin
+    letters: a genuinely Cyrillic or Greek name ("Кино", "Σαββόπουλος") is left
+    alone, because folding it would collide it with unrelated Latin names.
+    """
+    if not value:
+        return ""
+    text = str(value)
+    if not _LATIN_MOSTLY_RE.search(text):
+        return text
+    return text.translate(_CONFUSABLE_CHARS)
+
+
 def strip_diacritics(value: str) -> str:
     """Fold accented characters to their ASCII base letters.
 
@@ -150,6 +208,10 @@ def normalize_string(value: str) -> str:
         return ""
 
     value = value.lower().strip()
+    # Fold Latin look-alikes BEFORE anything else, so "KoЯn" and "Korn" reach the
+    # same key. Lowercased first, which is why the map only needs the small
+    # (post-lower) forms to be reachable — but both cases are listed above.
+    value = fold_confusables(value)
     value = normalize_unicode_punctuation(value)
 
     value = strip_diacritics(value)
@@ -2357,15 +2419,33 @@ def clean_discogs_biography(text: str) -> str:
 
 
 def normalize_core_title(value: str) -> str:
-    """Strict title normalization for matching."""
-    return normalize_string(
-        clean_title(
-            value,
-            remove_brackets=True,
-            remove_single_release=False,
-            remove_remaster=False,
-        )
+    """Strict title normalization for matching.
+
+    ⚠️ A TITLE THAT IS ENTIRELY PARENTHESISED MUST NOT NORMALISE TO "".
+
+    Reported from the discard list: *"(Dust)"* and *"(I Died)"*. Both queue item
+    and file carry the same title, yet every one was discarded as "Different
+    song". ``clean_title(remove_brackets=True)`` deleted the WHOLE title —
+    ``"(Dust)"`` → ``""`` — and ``_simple_similarity("", "")`` returns 0.0, so a
+    file could not match ITSELF. The bracket is punctuation around the real
+    title here, not a removable annotation.
+
+    So when stripping the brackets would leave nothing, the bracketed content IS
+    the title. Only the no-content case falls through (a title that genuinely
+    was nothing but an empty pair of brackets).
+    """
+    cleaned = clean_title(
+        value,
+        remove_brackets=True,
+        remove_single_release=False,
+        remove_remaster=False,
     )
+    if not cleaned.strip():
+        # Recover the text INSIDE the brackets rather than losing the title.
+        bracketed = re.findall(r"[\(\[]([^\)\]]+)[\)\]]", str(value or ""))
+        if bracketed:
+            cleaned = " ".join(part.strip() for part in bracketed if part.strip())
+    return normalize_string(cleaned)
 
 
 def normalize_core_filename(value: str) -> str:

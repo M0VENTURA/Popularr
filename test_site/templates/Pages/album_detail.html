@@ -272,7 +272,7 @@
         <div class="alert alert-warning d-flex flex-column gap-2 mb-0 rounded-0 border-0" id="albumMixedReleasesNotice">
           <div class="d-flex align-items-start gap-2">
             <i class="bi bi-exclamation-triangle-fill mt-1"></i>
-            <div>
+            <div class="flex-grow-1">
               <strong>{{ unscoped_track_count }} track{{ '' if unscoped_track_count == 1 else 's' }} in this album belong to a different release</strong>
               <div class="small mt-1">
                 They are not shown above because this page is scoped to one
@@ -280,6 +280,34 @@
                 next Navidrome scan will re-import them under their own release.
               </div>
             </div>
+            {#
+              ⭐ ONE CLICK REPAIRS THE SPLIT, instead of clicking through each
+              other release and hand-editing its id.
+
+              The bug that made the manual route useless: opening an "other
+              release" and running its MBID lookup reported "matches" with no
+              corrections, because the proposal service reads EVERY row of the
+              artist+album and picks the first non-empty album-level value from
+              any of them — so the release always looked already correct. The
+              lookup is now scoped to the page's release group (see
+              ``metadata_proposal_service._LOCAL_TRACKS_SQL`` callers), but the
+              merge is still the action the user actually wants here: it makes
+              THIS page's release win for the whole folder.
+
+              data-* rather than an inline onclick so album.js owns the handler
+              and the ids are not re-encoded into markup.
+            #}
+            <button type="button"
+                    class="btn btn-sm btn-warning flex-shrink-0 ms-auto align-self-start"
+                    id="mergeReleasesBtn"
+                    data-action="merge-releases"
+                    data-artist="{{ artist_name }}"
+                    data-album="{{ album_name }}"
+                    data-release-mbid="{{ album_mbid or '' }}"
+                    data-release-group-mbid="{{ album_rg_mbid or '' }}"
+                    title="Write this page's release onto every track and file in this album">
+              <i class="bi bi-intersect me-1"></i> Merge {{ unscoped_track_count }} track{{ '' if unscoped_track_count == 1 else 's' }} into this release
+            </button>
           </div>
           <ul class="mb-0 ps-3 small">
             {% for other in other_releases %}

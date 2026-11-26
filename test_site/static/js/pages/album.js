@@ -3728,11 +3728,97 @@
     });
   }
 
+  // ── Merge split releases ──────────────────────────────────────────────────
+
+  /**
+   * Make THIS page's release win for every track and file in the album folder.
+   *
+   * Reported: *"when two releases aren't aligned with the same MBID ... when I
+   * go to one of the other releases and look up mbid, it says it matches, but
+   * doesn't offer the corrections. Can we have a button to merge releases?"*
+   *
+   * Unlike the page save (which only touches the rows this page displays), this
+   * reaches every row of the artist+album, including the ones the release-scoped
+   * tracklist cannot show. The server writes the DB **and** the files, which is
+   * what stops Navidrome re-splitting the album on its next scan.
+   */
+  async function mergeReleases(btn) {
+    if (!btn) return;
+    const artist = btn.getAttribute('data-artist') || '';
+    const album = btn.getAttribute('data-album') || '';
+    const releaseMbid = btn.getAttribute('data-release-mbid') || '';
+    const releaseGroupMbid = btn.getAttribute('data-release-group-mbid') || '';
+
+    if (!artist || !album || !releaseMbid) {
+      notifyError(
+        'This page has no release id, so there is nothing to merge toward. '
+        + 'Set a release for the album first.'
+      );
+      return;
+    }
+
+    // ``global.ui.confirm`` is the THEMED dialog (ui/confirm.js). A bare
+    // ``global.confirm`` is the native browser one — it blocks the event loop
+    // and ignores the app's own options object.
+    const ask = (global.ui && typeof global.ui.confirm === 'function')
+      ? global.ui.confirm
+      : null;
+    const confirmed = ask ? await ask({
+      title: 'Merge releases?',
+      message:
+        'Every track and file in "' + album + '" will be written to this '
+        + 'page\'s release. Any other release id in the folder is replaced.',
+      confirmLabel: 'Merge',
+    }) : true;
+    if (!confirmed) return;
+
+    const label = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Merging…';
+
+    try {
+      const data = await global.api.postJson('/api/album/merge-releases', {
+        artist,
+        album,
+        release_mbid: releaseMbid,
+        release_group_mbid: releaseGroupMbid,
+      });
+
+      if (!data || data.success === false) {
+        throw new Error((data && data.error) || 'Merge failed');
+      }
+
+      const rows = data.rows_updated || 0;
+      const files = data.files_updated || 0;
+      notifySuccess(
+        'Merged ' + rows + ' track' + (rows === 1 ? '' : 's')
+        + ' (' + files + ' file' + (files === 1 ? '' : 's') + ' rewritten).'
+      );
+
+      // The banner describes a split that no longer exists, and the tracklist
+      // was scoped to the old release grouping — reload so both are rebuilt
+      // from the data that was just written.
+      setTimeout(() => global.location.reload(), 900);
+    } catch (error) {
+      notifyError('Could not merge releases: ' + ((error && error.message) || error));
+      btn.disabled = false;
+      btn.innerHTML = label;
+    }
+  }
+
+  document.addEventListener('click', (event) => {
+    const btn = event.target && event.target.closest
+      ? event.target.closest('[data-action="merge-releases"]')
+      : null;
+    if (!btn) return;
+    event.preventDefault();
+    mergeReleases(btn);
+  });
+
   document.addEventListener('DOMContentLoaded', () => {
     // Fire-and-forget: a failure here must not stop the page's other wiring.
     loadAlbumMissingTracks();
     loadAlbumDuplicateFlags();
-
     // A save redirects back with #tab-details. Bootstrap 5 does not restore a
     // tab from the URL on its own, so without this the reload always landed on
     // the default TRACKS tab and the save appeared to switch contexts.

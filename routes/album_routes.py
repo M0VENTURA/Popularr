@@ -15,7 +15,10 @@ from urllib.parse import unquote
 from typing import Any
 
 from quart import Blueprint, Response, jsonify, request, send_file
+from sqlalchemy import text
 import structlog
+
+from db.engine import db_session
 
 from services.metadata.album_service import (
     rename_album_files_service,
@@ -1084,6 +1087,184 @@ async def api_album_bulk_delete() -> Any:
     from services.metadata.album_service import bulk_delete_tracks
     result, code = bulk_delete_tracks(payload)
     return jsonify(result), code
+
+
+@album_bp.route("/merge-releases", methods=["POST"])
+async def api_album_merge_releases() -> Any:
+    """Make ONE release win for every track and file in the album folder.
+
+    Reported: *"When two releases aren't aligned with the same MBID, it shows as
+    a warning on the album page that one or two other releases are different, but
+    when I go to one of the other releases and look up mbid, it says it matches,
+    but doesn't offer the corrections. Can we have a button to select merge
+    releases that will merge all other releases in to the release on the page
+    that's being used?"*
+
+    Two cases, and they need DIFFERENT machinery:
+
+    * **Same release group** — ``unify_album_release_identity`` is the
+      purpose-built repair. It fans the release id plus every release-level
+      field (barcode, catalogue number, country, media, totals, dates) across
+      all rows AND all files, and stamps the correction so a Navidrome import
+      cannot revert it.
+
+    * **Different release groups** — the unifier REFUSES by design
+      (``skipped: multiple_groups``), because two groups normally mean two
+      genuinely different albums. Here the user has explicitly said they are one
+      album, so ``apply_album_wide_ids`` is used instead: it scopes to BOTH
+      groups, so the target id reaches the rows the unifier would have left
+      alone. A follow-up unify then carries the release-level fields.
+
+    Both write the FILES as well as the DB — that is what stops Navidrome
+    re-splitting the album on its next scan.
+    """
+    payload = (await request.get_json(silent=True)) or {}
+    artist = str(payload.get("artist") or "").strip()
+    album = str(payload.get("album") or "").strip()
+    release_mbid = str(payload.get("release_mbid") or "").strip()
+    release_group_mbid = str(payload.get("release_group_mbid") or "").strip()
+
+    if not artist or not album:
+        return jsonify({"success": False, "error": "artist and album are required"}), 400
+    if not release_mbid:
+        return jsonify(
+            {
+                "success": False,
+                "error": (
+                    "This page has no release id, so there is nothing to merge "
+                    "toward. Pick a release for the album first."
+                ),
+            }
+        ), 400
+
+    from services.metadata.album_release_unify_service import (
+        unify_album_release_identity,
+    )
+
+    result: dict[str, Any] = dict(
+        unify_album_release_identity(
+            artist,
+            album,
+            release_group_mbid=release_group_mbid or None,
+            preferred_release_mbid=release_mbid,
+        )
+    )
+    skipped = str(result.get("skipped") or "")
+
+    if skipped == "multiple_groups":
+        # The folder really holds rows from two release groups. The user has
+        # asked for them to become one release, so fan the target across the
+        # whole album first, then let the unifier apply the release-level
+        # fields now that every row names one group.
+        #
+        # ⚠️ ``update_album_ids`` UNFILTERED, not ``apply_album_wide_ids``:
+        # the latter scopes to a single ``previous_release_group_mbid``, so it
+        # cannot cover a folder with three families. Here the intent is
+        # explicitly "one album", and ``update_album_ids`` already refuses a
+        # release-group id as the target (409), so the route stays safe.
+        from services.metadata.album_service import update_album_ids
+
+        try:
+            with db_session() as session:
+                other_groups = [
+                    str(row[0]).strip()
+                    for row in session.execute(
+                        text(
+                            "SELECT DISTINCT musicbrainz_releasegroupid FROM tracks "
+                            "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                            "  AND LOWER(COALESCE(album, '')) = LOWER(:album) "
+                            "  AND COALESCE(musicbrainz_releasegroupid, '') <> '' "
+                            "  AND LOWER(musicbrainz_releasegroupid) <> LOWER(:rg)"
+                        ),
+                        {"artist": artist, "album": album, "rg": release_group_mbid},
+                    ).fetchall()
+                    if row[0]
+                ]
+        except Exception as exc:
+            logger.warning("Could not read the album's release groups", error=str(exc))
+            other_groups = []
+
+        fan_payload: dict[str, Any] = {
+            "artist": artist,
+            "album": album,
+            "musicbrainz_release_id": release_mbid,
+        }
+        if release_group_mbid:
+            fan_payload["musicbrainz_release_group_id"] = release_group_mbid
+        fan, fan_code = update_album_ids(fan_payload)
+        if fan_code != 200 or not fan.get("success"):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": str(fan.get("error") or "Could not merge the releases."),
+                }
+            ), fan_code if fan_code in (400, 409) else 400
+
+        result = {
+            "success": True,
+            "rows_updated": fan.get("rows_updated", 0),
+            "files_updated": fan.get("files_updated", 0),
+            "release_id": release_mbid,
+            "merged_groups": [release_group_mbid, *other_groups],
+        }
+        # Now that every row names the same group, the unifier can carry the
+        # barcode / catalogue number / country / totals onto all of them.
+        retry = unify_album_release_identity(
+            artist,
+            album,
+            release_group_mbid=release_group_mbid or None,
+            preferred_release_mbid=release_mbid,
+        )
+        if not str(retry.get("skipped") or ""):
+            result["rows_updated"] = retry.get("rows_updated", result["rows_updated"])
+            result["files_updated"] = retry.get("files_updated", result["files_updated"])
+        else:
+            result["fields_skipped"] = retry.get("skipped")
+
+    if skipped and skipped not in ("", "multiple_groups"):
+        # already_consistent is a success (nothing to do); the rest are not.
+        if skipped == "already_consistent":
+            return jsonify(
+                {
+                    "success": True,
+                    "rows_updated": 0,
+                    "files_updated": 0,
+                    "release_id": release_mbid,
+                    "message": "Every track already uses this release.",
+                }
+            ), 200
+        return jsonify(
+            {
+                "success": False,
+                "error": _MERGE_SKIP_MESSAGES.get(skipped, f"Could not merge: {skipped}"),
+                "skipped": skipped,
+                "release_id": result.get("release_id") or "",
+            }
+        ), 400
+
+    try:
+        from helpers.logging_config import log_unified
+
+        log_unified(
+            f"[ALBUM] Merged every track into release {release_mbid} "
+            f"({artist} - {album}): {result.get('rows_updated', 0)} row(s), "
+            f"{result.get('files_updated', 0)} file(s)"
+        )
+    except Exception:
+        pass
+
+    result["success"] = True
+    return jsonify(result), 200
+
+
+#: Plain-English reasons ``unify_album_release_identity`` can decline.
+_MERGE_SKIP_MESSAGES: dict[str, str] = {
+    "missing_album": "That artist and album could not be found.",
+    "too_few_tracks": "There is only one track — nothing to merge.",
+    "no_group": "No track carries a release-group id, so the merge cannot be scoped.",
+    "no_canonical": "MusicBrainz could not resolve a release for this album.",
+    "db_failed": "The database update failed.",
+}
 
 
 @album_bp.route("/update-ids", methods=["POST"])

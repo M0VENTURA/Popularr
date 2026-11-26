@@ -1647,6 +1647,20 @@ def update_file_metadata(file_path: str, metadata: Dict[str, Any]) -> bool:
 
     if metadata.get("recording_mbid"):
         tag_updates["musicbrainz_trackid"] = metadata.get("recording_mbid")
+    # ⚠️ THE RELEASE-TRACK id is PER RELEASE, not per recording.
+    #
+    # It was never written here at all, which is why a track COPIED from another
+    # album kept the source release's MUSICBRAINZ_RELEASETRACKID: the copy got
+    # the new album id but the old track-position id, so the file described a
+    # position on a release it no longer belonged to.
+    #
+    # ⚠️ AN EXPLICIT "" IS A CLEAR, NOT "not supplied". ``copy2`` carries the
+    # source file's tags, so the copy service passes "" to wipe the stale
+    # position before the import fills the correct one. ``None`` still means
+    # "leave alone" — that distinction is the whole contract of this function.
+    _release_track_mbid = metadata.get("musicbrainz_releasetrackid")
+    if _release_track_mbid is not None:
+        tag_updates["musicbrainz_releasetrackid"] = str(_release_track_mbid).strip()
     # Never write the release-GROUP id into the release frame. A queue row whose
     # two ids are the same value is the malformed identity, not a release.
     _release_mbid = str(metadata.get("release_mbid") or "").strip()

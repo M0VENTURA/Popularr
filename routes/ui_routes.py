@@ -2580,6 +2580,22 @@ async def album_detail(album_path: str) -> Any:
     # to, so the banner can say WHICH other release they are from. Empty when
     # the folder is uniform — the overwhelmingly common case.
     _other_releases: list[dict[str, Any]] = []
+    #: The release THIS page is scoped to — the merge button's target. Read from
+    #: the SCOPED rows (``tracks``), not the whole folder, so a folder whose
+    #: majority is one release and whose page was opened for another merges
+    #: toward the one the user is looking at.
+    _page_release_mbid = ""
+    _page_release_group_mbid = album_rg_filter or ""
+    for _t in tracks:
+        if not _page_release_group_mbid:
+            _page_release_group_mbid = str(
+                _t.get("musicbrainz_releasegroupid") or ""
+            ).strip()
+        _page_release_mbid = str(
+            _t.get("musicbrainz_album_mbid") or _t.get("musicbrainz_albumid") or ""
+        ).strip()
+        if _page_release_mbid:
+            break
     if _unscoped_tracks:
         _by_group: dict[str, list[dict[str, Any]]] = {}
         for _t in _unscoped_tracks:
@@ -4163,6 +4179,9 @@ async def album_detail(album_path: str) -> Any:
         # say so instead of silently omitting them.
         other_releases=_other_releases,
         unscoped_track_count=len(_unscoped_tracks),
+        # The merge button's target: the release this page shows.
+        album_mbid=_page_release_mbid,
+        album_rg_mbid=_page_release_group_mbid,
     )
 
 

@@ -28,6 +28,7 @@ from helpers.normalization_service import (
     extract_version_info,
     queue_duration_seconds,
     edition_annotations_compatible,
+    extract_edition_annotation,
 )
 from helpers.config_helpers import _GENERIC_COMPILATION_ARTISTS
 
@@ -235,7 +236,14 @@ def _metadata_matches_queue_item(
     # ------------------------------------------------------------------
 
     if not edition_annotations_compatible(file_title, queue_title):
-        _reject("edition_mismatch")
+        # Record BOTH annotations: the bare "does not match" sentence gave the
+        # user nothing to verify the verdict against (see
+        # ``_discard_detail_sentence``).
+        _reject(
+            "edition_mismatch",
+            file_edition_annotation=extract_edition_annotation(file_title) or "",
+            queue_edition_annotation=extract_edition_annotation(queue_title) or "",
+        )
         return False
 
     # ------------------------------------------------------------------

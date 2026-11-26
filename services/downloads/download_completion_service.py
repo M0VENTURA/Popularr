@@ -962,8 +962,40 @@ def _discard_detail_sentence(detail: dict[str, Any], match_source: str) -> str:
 
     if reason == "wrong_length":
         got, want = _mmss(found_len), _mmss(want_len)
+        # ⚠️ STATE THE DIFFERENCE, NOT JUST THE TWO LENGTHS.
+        #
+        # Reported from the discard list: "Wrong length — the file is 4:03 but
+        # the queue item is 3:58". 3:58 vs 4:03 is a 5s difference, which is
+        # exactly the default tolerance — so the sentence read as a bug report
+        # when it was really a boundary case. Rounding to m:ss also HIDES the
+        # size of the gap (4:02.6 vs 3:58.4 renders as "4:03" and "3:58" but is
+        # 4.2s). Showing the delta and the tolerance makes the verdict auditable.
+        tolerance = detail.get("length_tolerance_seconds")
+        delta = detail.get("length_difference_seconds")
+        try:
+            delta_value = float(delta) if delta is not None else None
+        except (TypeError, ValueError):
+            delta_value = None
+        if delta_value is None and found_len and want_len:
+            try:
+                delta_value = abs(float(found_len) - float(want_len))
+            except (TypeError, ValueError):
+                delta_value = None
+
         if got and want:
-            return f"Wrong length — the file is {got} but the queue item is {want}"
+            sentence = f"Wrong length — the file is {got} but the queue item is {want}"
+            if delta_value is not None:
+                try:
+                    tolerance_value = float(tolerance) if tolerance is not None else None
+                except (TypeError, ValueError):
+                    tolerance_value = None
+                # One decimal: a 4.2s gap rounded to "4s" would look within a 5s
+                # tolerance and read as a contradiction.
+                sentence += f" ({delta_value:.1f}s apart"
+                if tolerance_value is not None:
+                    sentence += f", tolerance {tolerance_value:g}s"
+                sentence += ")"
+            return sentence
         if got:
             return f"Wrong length — the file is {got}"
         return "Wrong length — did not match the queue item"
@@ -975,6 +1007,22 @@ def _discard_detail_sentence(detail: dict[str, Any], match_source: str) -> str:
         return "Different song — the file's title does not match"
 
     if reason == "edition_mismatch":
+        # ⚠️ NAME THE ANNOTATIONS. "the file's edition annotation does not match"
+        # tells the user nothing they can act on — and cannot be told apart from
+        # a false positive. Reported cases ("Mama" vs a plain "Mama" title, and
+        # "Architecture of Aggression") turned out to be ordinary titles whose
+        # edition check disagreed for reasons the message never showed.
+        file_ann = str(detail.get("file_edition_annotation") or "").strip()
+        queue_ann = str(detail.get("queue_edition_annotation") or "").strip()
+        if file_ann and queue_ann:
+            return (
+                f"Different edition — the file is '{file_ann}' "
+                f"but the queue item is '{queue_ann}'"
+            )
+        if file_ann:
+            return f"Different edition — the file is '{file_ann}' but the queue item has none"
+        if queue_ann:
+            return f"Different edition — the queue item is '{queue_ann}' but the file has none"
         return "Different edition — the file's edition annotation does not match"
 
     if reason == "unsupported_format":
@@ -1667,6 +1715,14 @@ def _apply_stored_metadata(
                 meta["tracktotal"] = str(_stored["tracktotal"])
             if _stored.get("musicbrainz_artistid"):
                 meta["musicbrainz_artistid"] = str(_stored["musicbrainz_artistid"])
+            # The release-TRACK id is per release and the queue writer persists
+            # it with the rest of the release payload. Reading it here means a
+            # fully-resolved queue row needs no MusicBrainz call, and only a row
+            # that lacks it (e.g. a library copy) triggers the refresh.
+            if _stored.get("musicbrainz_releasetrackid"):
+                meta["musicbrainz_releasetrackid"] = str(
+                    _stored["musicbrainz_releasetrackid"]
+                )
     except Exception as _stored_exc:
         logger.debug("Stored MB metadata parse failed", queue_id=item.get("id"), error=str(_stored_exc))
 
@@ -1687,6 +1743,16 @@ def _apply_stored_metadata(
             # artist-id only. The release tracklist already carries all three
             # fields, so this costs no extra request.
             "writer", "composer", "lyricist",
+            # ⭐ THE RELEASE-TRACK ID MUST FOLLOW THE TARGET RELEASE.
+            #
+            # Reported: "when the downloader copies a track from another item in
+            # the collection, it doesn't update MBIDs to the new release ... it
+            # keeps the original that it's copied." A copied file arrives still
+            # carrying the SOURCE release's MUSICBRAINZ_RELEASETRACKID — a
+            # position on a release the copy no longer belongs to. It is never
+            # read from the queue row, so it must be resolved from the release
+            # tracklist here.
+            "musicbrainz_releasetrackid",
         )
         if not meta.get(_k)
     ]
@@ -1710,10 +1776,19 @@ def _apply_stored_metadata(
                     "writer": _match.get("writer"),
                     "composer": _match.get("composer"),
                     "lyricist": _match.get("lyricist"),
+                    "musicbrainz_releasetrackid": _match.get("release_track_mbid"),
                 }
                 for _k in _track_missing:
                     if _fills.get(_k) not in (None, ""):
                         meta[_k] = str(_fills[_k])
+            elif "musicbrainz_releasetrackid" in _track_missing:
+                # ⚠️ A POSITION THAT CANNOT BE RESOLVED MUST BE CLEARED, not
+                # inherited. A library copy arrives carrying the SOURCE album's
+                # release-track id; if the target release's tracklist has no
+                # matching track this import writes nothing, so the file keeps
+                # describing a position on a release it no longer belongs to.
+                # Empty is the honest value here.
+                meta["musicbrainz_releasetrackid"] = ""
         except Exception as _track_exc:
             logger.debug(
                 "Track-level MB enrichment refresh failed — stored values only",
