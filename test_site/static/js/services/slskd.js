@@ -81,6 +81,28 @@
   const TERMINAL_GRACE_POLLS = 8;
   const SLOT_RETRY_INTERVAL_MS = 2000;
   const SLOT_MAX_RETRIES = 30;
+
+  /**
+   * Per-request timeouts.
+   *
+   * ⚠️ THE DEFAULT 30 s IS TOO SHORT FOR A SLOW slskd, but raising it alone
+   * does not help if the SERVER is allowed to hang for minutes. The server now
+   * answers a poll within ~8 s (no retries, short read timeout), so 20 s is
+   * ample headroom for one poll and keeps the loop responsive.
+   */
+  const POLL_TIMEOUT_MS = 20000;
+  /** Starting a search makes four slskd calls; allow for a busy slskd. */
+  const START_TIMEOUT_MS = 45000;
+  /**
+   * Consecutive failed polls before the loop gives up.
+   *
+   * ⚠️ WITHOUT THIS the loop treated EVERY failed poll as transient and kept
+   * going for the full 120 attempts — at a 30 s abandoned poll that is up to an
+   * hour of "Searching…" followed by a bare "Timed out", which is exactly the
+   * reported "manual search keeps failing and timing out". A poll that fails
+   * several times in a row is not going to recover by being retried.
+   */
+  const MAX_CONSECUTIVE_POLL_ERRORS = 5;
   /**
    * How many times a single search() call may re-enter itself after a busy
    * slot. Without this the retry is unbounded: all three original copies
@@ -208,7 +230,11 @@
 
     let data;
     try {
-      data = await global.api.postJson(SEARCH_ENDPOINT, { query });
+      data = await global.api.postJson(
+        SEARCH_ENDPOINT,
+        { query },
+        { timeoutMs: START_TIMEOUT_MS }
+      );
     } catch (error) {
       fail(error);
       return null;
@@ -274,6 +300,10 @@
    */
   function pollUntilComplete(session, opts = {}) {
     const filterBusy = opts.filterBusy !== false;
+    // ⚠️ Per-run state. A module-level counter left at its cap made the NEXT
+    // search fail on its very first poll (the documented
+    // `_slskdCompleteGraceCount` bug), so the error counter lives here too.
+    let consecutiveErrors = 0;
 
     return new Promise((resolve) => {
       session.poll = global.poller.create({
@@ -283,15 +313,24 @@
           if (session.cancelled) return ctx.stop();
 
           const data = await global.api.getJson(
-            RESULT_ENDPOINT + encodeURIComponent(session.searchId)
+            RESULT_ENDPOINT + encodeURIComponent(session.searchId),
+            { timeoutMs: POLL_TIMEOUT_MS }
           );
           if (data.error) throw new Error(data.error);
+
+          // A successful poll resets the failure streak.
+          consecutiveErrors = 0;
 
           const raw = data.results || [];
           session.results = filterBusy
             ? raw.filter((r) => (r.freeUploadSlots === undefined ? 1 : r.freeUploadSlots) > 0)
             : raw;
           session.responseCount = data.responseCount || 0;
+          // ⚠️ How many results slskd returned and were then DISCARDED (wrong
+          // container, or a peer with no free slot). Without this a fully
+          // filtered search rendered "No results found" and was
+          // indistinguishable from a genuinely empty one.
+          session.formatFiltered = data.formatFiltered || 0;
           // What the server judged the list against (downloads.quality) and how
           // many cleared it — reported instead of a bare result count.
           session.quality = data.quality || null;
@@ -324,9 +363,24 @@
           resolve(session);
         },
         onError: (error) => {
-          // Transient poll failures are normal on a busy slskd instance.
-          // Only surface them; the loop keeps going until maxAttempts.
-          console.warn('[slskd] poll error:', error.message);
+          // ⚠️ FAIL FAST, DO NOT DRIFT. Polling used to continue for the whole
+          // 120-attempt budget on ANY error, so a slskd that is down or
+          // permanently slow produced an hour of "Searching…" and then a bare
+          // timeout. One blip is normal; a run of them is a real failure.
+          consecutiveErrors += 1;
+          console.warn(
+            `[slskd] poll error (${consecutiveErrors}/${MAX_CONSECUTIVE_POLL_ERRORS}):`,
+            error.message
+          );
+          if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            session.isComplete = true;
+            session.state = 'Failed';
+            session.error = error;
+            session.poll.stop();
+            if (typeof opts.onError === 'function') opts.onError(error);
+            if (typeof opts.onComplete === 'function') opts.onComplete(session);
+            resolve(session);
+          }
         },
       });
       session.poll.start();
@@ -444,9 +498,25 @@
 
     const results = session.results || [];
     if (!results.length) {
+      // ⚠️ SAY WHY IT IS EMPTY. A search that slskd answered with files that
+      // were then dropped (unapproved container, or every peer busy) used to
+      // render exactly "No results found" — the same text as a genuinely empty
+      // search. That is the reported "search fails and shows nothing": the
+      // search DID work, the results were discarded, and nothing said so.
+      const filtered = Number(session.formatFiltered || 0);
+      let detail = '';
+      if (filtered > 0) {
+        detail =
+          ` ${filtered} result(s) were returned but filtered out — ` +
+          'check the allowed formats in Downloads ▸ Quality.';
+      } else if (session.quality && session.quality.total > 0) {
+        detail = ' All results were hidden because their peers had no free upload slot.';
+      } else if (session.state === 'Failed') {
+        detail = ' slskd could not be reached — check that it is running.';
+      }
       container.innerHTML =
         '<div class="alert alert-info"><i class="bi bi-info-circle"></i> ' +
-        `No results found${session.state ? ` (${esc(session.state)})` : ''}.</div>`;
+        `No results found${session.state ? ` (${esc(session.state)})` : ''}.${detail}</div>`;
       return;
     }
 

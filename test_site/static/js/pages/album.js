@@ -2387,11 +2387,12 @@
 
     // Payload held in a closure rather than serialised into ten data-*
     // attributes — no escaping needed and no attribute-size limits.
+    const trackArtist = String(trackComp.track_artist || trackComp.mb_artist || '').trim();
     const payload = {
       // The TRACK's performer, never the album's artist: on a compilation
       // pageArtist() is "Various Artists", and a queue row searched under it
       // finds nothing (see tests/test_compilation_track_artist.py).
-      artist: trackComp.track_artist || trackComp.mb_artist || pageArtist(),
+      artist: trackArtist || pageArtist(),
       album_artist: pageArtist(),
       album: pageAlbum(),
       title: trackComp.mb_title || '',
@@ -2402,6 +2403,15 @@
       recording_mbid: trackComp.mb_recording_mbid || null,
       duration: trackComp.mb_duration != null ? trackComp.mb_duration : null,
     };
+
+    // ⚠️ ALSO CARRY THE PERFORMER IN metadata. The queue worker recovers a
+    // real artist from `metadata.track_artist` when the row's `artist` is a
+    // compilation placeholder; without it the row searches on a bare title and
+    // the artist gate is skipped. Exportify album mode already sends this key,
+    // so a row queued from either surface heals the same way.
+    if (trackArtist && trackArtist !== String(pageArtist() || '').trim()) {
+      payload.metadata = { track_artist: trackArtist };
+    }
 
     row.querySelector('.mb-queue-missing').addEventListener('click', function () {
       queueMissingTrack(payload, this);
@@ -3390,6 +3400,23 @@
     return {
       matched: false,
       mb_title: row.title || '',
+      // ⚠️⚠️ THE TRACK'S OWN PERFORMER. This field was DROPPED here, and that
+      // one omission is the reported "various artist collections are adding to
+      // the download queue with the album artist, not track artist".
+      //
+      // The server DOES select it (`missing_album_tracks.track_artist`, see
+      // services/metadata/album_missing_service.py) and returns it verbatim.
+      // Without it, `buildMissingRow`'s payload fell through
+      // ``track_artist || mb_artist || pageArtist()`` to the ALBUM artist, so
+      // every track queued from a compilation was stored as
+      // "Various Artists" — and the queue then searched for a bare title with
+      // the artist gate skipped, binding whatever artist's recording matched.
+      //
+      // The row's performer label had the same hole: `buildMissingRow` shows
+      // the artist when it differs from the album's, so it was silently
+      // omitted on every compilation row too.
+      track_artist: row.track_artist || '',
+      mb_artist: row.track_artist || '',
       mb_track_number: row.track_number,
       mb_disc_number: row.disc_number != null ? row.disc_number : 1,
       mb_recording_mbid: row.recording_mbid || '',

@@ -68,6 +68,18 @@ def is_private_host(host: str | None) -> bool:
     if name in ("localhost", "localhost.localdomain", "ip6-localhost"):
         return True
 
+    # ⚠️ A SINGLE-LABEL HOSTNAME IS LOCAL. ``slskd``, ``navidrome``, ``beets`` —
+    # the service names a docker-compose deployment uses — have no dot, so they
+    # cannot be a public FQDN (public names require at least one label
+    # separator). They fell through to the IP parse below, failed, and were
+    # treated as PUBLIC: every request to ``http://slskd:5030`` was serialised
+    # through the 1 req/s domain throttle. That is a pure latency cliff — the
+    # same deployment works at full speed on ``localhost`` and crawls on the
+    # Compose service name, which is a real contributor to the reported manual
+    # search timeouts.
+    if "." not in name and ":" not in name:
+        return True
+
     # Strip an IPv6 zone index (``fe80::1%eth0``) and brackets.
     candidate = name.split("%", 1)[0].strip("[]")
     try:

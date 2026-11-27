@@ -32,6 +32,20 @@ _manual_search_state: dict[str, dict[str, Any]] = {}
 _manual_search_lock = threading.Lock()
 
 
+def _manual_search_client(slskd_config: dict[str, Any]) -> SlskdHttpClient:
+    """The slskd client used by the interactive search box.
+
+    ⚠️ ``fast=True`` — NO RETRIES. The shared session retries 3 times, so one
+    poll (state + responses) could block ~80-120 s while the browser abandons it
+    at 30 s. Every poll then looked like a hang. See ``api_clients/slskd_http``.
+    """
+    return SlskdHttpClient(
+        slskd_config["web_url"],
+        slskd_config.get("api_key", ""),
+        fast=True,
+    )
+
+
 def _log_manual_search_event(
     *,
     search_type: str,
@@ -138,7 +152,7 @@ async def slskd_search() -> Any:
     api_key = slskd_config.get("api_key", "")
 
     try:
-        client = SlskdHttpClient(web_url, api_key)
+        client = _manual_search_client(slskd_config)
         slskd_service = SlskdService(http_client=client)
 
         try:
@@ -181,7 +195,11 @@ async def slskd_search() -> Any:
                     "query": query,
                     "last_result_count": -1,
                 }
-            _log_manual_search_event(
+            # ⚠️ OFFLOADED. ``_log_manual_search_event`` writes a log file AND
+            # does a synchronous Postgres INSERT; on the event loop that stalls
+            # every other request in this hypercorn worker.
+            await asyncio.to_thread(
+                _log_manual_search_event,
                 search_type="manual",
                 query=query,
                 result_count=0,
@@ -191,9 +209,21 @@ async def slskd_search() -> Any:
             )
             return jsonify({"searchId": search_id, "status": "searching"})
 
-        return jsonify({"error": "Failed to start search — slskd search slot may be busy. Try again in a moment."}), 500
+        # ⚠️ LOGGED. This branch used to return a 500 with no server-side trace,
+        # so "search keeps failing" left nothing to diagnose.
+        logger.warning(
+            "slskd manual search could not be started",
+            query=query,
+            web_url=web_url,
+        )
+        return jsonify({
+            "error": (
+                "slskd did not accept the search. It is either busy with another "
+                "search or unreachable — check slskd, then try again."
+            ),
+        }), 503
     except Exception as exc:
-        logger.error("Slskd search failed", error=str(exc))
+        logger.error("Slskd search failed", error=str(exc), exc_info=True)
         return jsonify({"error": str(exc)}), 500
 
 
@@ -241,8 +271,8 @@ def slskd_search_slot() -> Any:
         return jsonify({"slotFree": False, "error": "slskd not enabled"}), 400
 
     try:
-        client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
-        searches = client.list_searches(timeout=8)
+        client = _manual_search_client(slskd_config)
+        searches = client.list_searches(timeout=6)
         active_states = {"None", "Queued", "Requested", "InProgress", "Initializing", "In Progress"}
         active = [s for s in (searches or []) if (s.get("state") or s.get("State") or "") in active_states]
 
@@ -257,8 +287,18 @@ def slskd_search_slot() -> Any:
 
         return jsonify({"slotFree": True})
     except Exception as exc:
+        # ⚠️ A FAILED CHECK IS NOT A FREE SLOT. This used to return
+        # ``slotFree: True`` with HTTP 200 on any error, so a BROKEN slot check
+        # was indistinguishable from a free one: the client proceeded, tried to
+        # start a search that could not start, and reported "search failed" with
+        # no clue why. Fail the check instead so the caller can say what is
+        # actually wrong.
         logger.error("Failed to check search slot", error=str(exc))
-        return jsonify({"slotFree": True, "error": str(exc)}), 200
+        return jsonify({
+            "slotFree": False,
+            "error": "Could not reach slskd to check for a free search slot",
+            "unreachable": True,
+        }), 503
 
 
 @slskd_bp.route("/search/<search_id>", methods=["GET"])
@@ -270,9 +310,13 @@ def slskd_search_results(search_id: str) -> Any:
         return jsonify({"error": "slskd not enabled"}), 400
 
     try:
-        client = SlskdHttpClient(slskd_config["web_url"], slskd_config.get("api_key", ""))
+        client = _manual_search_client(slskd_config)
         slskd_service = SlskdService(http_client=client)
-        responses, state, is_complete = slskd_service.get_search_results(search_id, timeout=10)
+        # ⚠️ A SHORT POLL TIMEOUT. This endpoint is polled once a second by the
+        # search modal; it must answer quickly and let the NEXT poll retry,
+        # rather than hold the request open. Combined with ``fast=True`` (no
+        # retries) a slow slskd now costs one 8 s read timeout, not four.
+        responses, state, is_complete = slskd_service.get_search_results(search_id, timeout=8)
 
         with _manual_search_lock:
             _query = str((_manual_search_state.get(search_id) or {}).get("query") or "")
@@ -320,41 +364,53 @@ def slskd_search_results(search_id: str) -> Any:
         count = len(ordered or [])
         response_count = len(responses or [])
 
+        # ⚠️ THE LOCK GUARDS THE DICT, NOT THE LOG WRITES.
+        #
+        # ``_log_manual_search_event`` does a file write AND a synchronous
+        # Postgres INSERT. Holding ``_manual_search_lock`` across that made
+        # every other open queue row's poll wait behind one log insert — a
+        # serialiser on the busiest corrections path. Decide under the lock,
+        # log outside it.
+        _log_now: list[tuple[str, str]] = []
         with _manual_search_lock:
             state_entry = _manual_search_state.get(search_id)
             if state_entry is not None:
+                _q = state_entry.get("query") or search_id
                 if count != state_entry.get("last_result_count", -1):
                     state_entry["last_result_count"] = count
-                    _notes = "search_complete" if is_complete else "results_returned"
-                    _log_manual_search_event(
-                        search_type="manual",
-                        query=state_entry.get("query") or search_id,
-                        result_count=count,
-                        notes=_notes,
-                        search_id=search_id,
-                    )
+                    _log_now.append((_q, "search_complete" if is_complete else "results_returned"))
                     if is_complete:
                         state_entry["_complete_logged"] = True
                 elif is_complete and not state_entry.get("_complete_logged"):
                     state_entry["_complete_logged"] = True
-                    _log_manual_search_event(
-                        search_type="manual",
-                        query=state_entry.get("query") or search_id,
-                        result_count=count,
-                        notes="search_complete",
-                        search_id=search_id,
-                    )
+                    _log_now.append((_q, "search_complete"))
                 if is_complete:
                     _term_count = state_entry.get("_terminal_seen", 0) + 1
                     state_entry["_terminal_seen"] = _term_count
                     if _term_count >= 2 or count > 0:
                         _manual_search_state.pop(search_id, None)
 
+        for _q, _notes in _log_now:
+            _log_manual_search_event(
+                search_type="manual",
+                query=_q,
+                result_count=count,
+                notes=_notes,
+                search_id=search_id,
+            )
+
         return jsonify({
             "results": ordered,
             "state": state or "InProgress",
             "responseCount": response_count,
             "fileCount": count,
+            # ⚠️ REPORT THE DROPS. These results WERE returned by slskd and were
+            # then discarded (wrong container, or a peer with no free slot). The
+            # UI showed "No results found" for either, with no way to tell a
+            # genuinely empty search from one that was filtered to nothing —
+            # the reported "search fails and shows nothing".
+            "formatFiltered": _format_filtered,
+            "formatFilteredOut": _format_filtered,
             "isComplete": bool(is_complete),
             "quality": {
                 "min_bitrate": _min_bitrate,

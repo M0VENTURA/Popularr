@@ -206,11 +206,19 @@ class TestTheQueueButtonsSendTheTrackArtist:
 
     def test_the_rebuilt_missing_row_payload_prefers_the_track_artist(self):
         src = _src(REBUILT_ALBUM)
+        # The payload now reads a trimmed local so the same value can also be
+        # stashed in `metadata.track_artist`; the precedence is unchanged.
         assert (
-            "artist: trackComp.track_artist || trackComp.mb_artist || pageArtist(),"
+            "const trackArtist = String(trackComp.track_artist || trackComp.mb_artist || '').trim();"
             in src
         ), "the rebuilt missing-row payload still queues the album artist"
+        assert "artist: trackArtist || pageArtist()," in src
         assert "album_artist: pageArtist()," in src
+
+    def test_the_rebuilt_missing_row_carries_the_performer_in_metadata(self):
+        """The queue worker recovers a real artist from metadata.track_artist."""
+        src = _src(REBUILT_ALBUM)
+        assert "payload.metadata = { track_artist: trackArtist };" in src
 
     def test_the_redownload_button_uses_the_check_artist(self):
         rebuilt = _src(REBUILT_REVIEW)

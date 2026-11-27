@@ -26,6 +26,37 @@ from api_clients import session
 logger = structlog.get_logger(__name__)
 
 
+#: ⚠️⚠️ WHY A SECOND SESSION EXISTS — "manual search keeps failing and timing
+#: out".
+#:
+#: The shared ``api_clients.session`` is a RETRY client with ``retries=3``, so
+#: every slskd call becomes FOUR attempts. slskd serialises its API and is slow
+#: while a search is running, so one poll of the manual search box —
+#: ``GET /searches/{id}`` plus ``GET /searches/{id}/responses`` — could spend
+#: ~80-120 s before answering, against a browser cap of 30 s. Every poll was
+#: therefore abandoned client-side, the loop treated each abort as "transient"
+#: and kept going, and the search appeared to hang for up to an hour and then
+#: fail with no message.
+#:
+#: Unattended/background callers (the queue worker) still get the retrying
+#: session — they have no browser waiting and benefit from riding out a blip.
+#: USER-FACING polling must fail fast so the UI can show a real state instead
+#: of hanging: one attempt, and a read timeout well inside the client budget.
+def _fast_session() -> Any:
+    """A no-retry httpx client for request-path slskd polling."""
+    import httpx
+
+    return httpx.Client(
+        timeout=httpx.Timeout(connect=4.0, read=8.0, write=8.0, pool=4.0)
+    )
+
+
+try:  # module-level, shared: building a Client per poll leaks connections
+    _FAST_SESSION: Any = _fast_session()
+except Exception:  # pragma: no cover - httpx always present in prod
+    _FAST_SESSION = None
+
+
 class SlskdHttpClient:
     """Raw slskd API wrapper with extended search and transfer management."""
 
@@ -35,11 +66,21 @@ class SlskdHttpClient:
         api_key: str = "",
         http_session: Any = None,
         enabled: bool = True,
-        default_timeout: int | None = 60
+        default_timeout: int | None = 60,
+        fast: bool = False,
     ):
         self.web_url = (web_url or "").rstrip("/")
         self.api_key = api_key or ""
-        self.session = http_session or session
+        # ⚠️ ``fast=True`` selects the NO-RETRY session. Use it for anything a
+        # browser is waiting on (the manual search poll): the retrying shared
+        # session multiplies every call by 4 attempts and blows past the
+        # client's timeout. The queue worker keeps the retrying session.
+        if http_session is not None:
+            self.session = http_session
+        elif fast and _FAST_SESSION is not None:
+            self.session = _FAST_SESSION
+        else:
+            self.session = session
         self.enabled = enabled
         self.default_timeout = default_timeout
         self.base_url = f"{self.web_url}/api/v0"
@@ -98,7 +139,10 @@ class SlskdHttpClient:
         try:
             return self.get_json("searches", timeout=timeout, default=[])
         except Exception as exc:
-            logger.debug("Failed to list searches", error=str(exc))
+            # ⚠️ WARNING, not DEBUG. At the default INFO log level a DEBUG line
+            # is invisible, so an UNREACHABLE slskd produced no log entry at all
+            # — the caller just saw an empty list and reported "no results".
+            logger.warning("Failed to list slskd searches", error=str(exc))
             return []
 
     def get_search_state(self, search_id: str, include_responses: bool = False, timeout: int = 10) -> dict[str, Any]:
@@ -123,7 +167,9 @@ class SlskdHttpClient:
         try:
             return self.get_json(f"searches/{search_id}/responses", timeout=timeout, default=[])
         except Exception as exc:
-            logger.debug("Failed to get search responses", search_id=search_id, error=str(exc))
+            # ⚠️ WARNING, not DEBUG — see list_searches. A silent [] here is
+            # indistinguishable from "the search found nothing".
+            logger.warning("Failed to get slskd search responses", search_id=search_id, error=str(exc))
             return []
 
     def get_search_results(self, search_id: str, timeout: int = 10) -> list[dict[str, Any]]:
