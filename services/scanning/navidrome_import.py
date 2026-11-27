@@ -151,6 +151,71 @@ def _album_fetch_workers() -> int:
     return max(1, min(8, value))
 
 
+def _heal_contaminated_va_album_artist(
+    track_payloads: list[dict[str, Any]], album_artist: str,
+) -> int:
+    """Correct a stored "Various Artists" on an album that is NOT a compilation.
+
+    ⚠️⚠️ WHY THIS EXISTS. ``album_artist`` is a local-authority field, so the
+    import DELIBERATELY preserves a stored value against an incoming one — that
+    guard is what stops a Navidrome scan reverting a real local correction. The
+    side effect is that rows polluted by the old artist-keyed slot (see
+    ``_album_artist_state_key``) would keep "Various Artists" forever, because
+    the guard reads that as a correction the user made.
+
+    Reported: *"A heap of albums are being imported as various artists even
+    though they are in Navidrome under their regular artist name"* — so the fix
+    has to repair what is already stored, not only prevent new pollution.
+
+    THE DISCRIMINATOR IS SOUND: a genuine compilation has several different
+    TRACK artists. Here every track of the album carries the SAME artist, and
+    that artist is the resolved specific album artist. A real "Various Artists"
+    album can never satisfy that, so this cannot rewrite one.
+    """
+    resolved = _clean_artist_name_for_storage(album_artist or "")
+    if not resolved or _has_various_artist_part(resolved):
+        return 0
+
+    ids: list[str] = []
+    for payload in track_payloads:
+        track_artist = _clean_artist_name_for_storage(
+            str(payload.get("artist") or "")
+        )
+        # One differing track artist means this album has several performers —
+        # a compilation — so leave it alone.
+        if not track_artist or track_artist.casefold() != resolved.casefold():
+            return 0
+        if payload.get("id"):
+            ids.append(str(payload.get("id")))
+    if len(ids) < 2:
+        # A single-track "album" proves nothing about whether it is a
+        # compilation; too little evidence to overwrite a stored value.
+        return 0
+
+    try:
+        with db_session() as session:
+            result = session.execute(
+                text(
+                    "UPDATE tracks SET album_artist = :value "
+                    "WHERE CAST(id AS TEXT) IN :ids "
+                    "AND (LOWER(COALESCE(album_artist, '')) LIKE '%various%' "
+                    "     OR LOWER(COALESCE(album_artist, '')) IN ('va', 'v/a', 'compilation'))"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"value": resolved, "ids": ids},
+            )
+            changed = int(result.rowcount or 0)
+        if changed:
+            logger.info(
+                "Healed a stale Various Artists album artist",
+                album_artist=resolved,
+                tracks=changed,
+            )
+        return changed
+    except Exception as exc:
+        logger.debug("VA album artist heal failed", error=str(exc))
+        return 0
+
+
 def _normalise_va_album_artist(
     track_payloads: list[dict[str, Any]], album_artist: str,
 ) -> int:
@@ -496,6 +561,33 @@ def _has_various_artist_part(value: str) -> bool:
     )
 
 
+def _album_artist_state_key(artist: str, album: str) -> str:
+    """Scope key for the stored-album-artist slot: ONE ARTIST, ONE ALBUM.
+
+    ⚠️⚠️ THIS USED TO BE THE ARTIST ALONE, AND THAT MISLABELLED DISCOGRAPHIES.
+
+    Reported: *"A heap of albums are being imported as various artists even
+    though they are in Navidrome under their regular artist name"* — and the
+    user's own diagnosis was exact: *"It seems to be artists that also appear as
+    a track artist on other various artist collections."*
+
+    The prefetch deliberately loads rows where the artist is only a CONTRIBUTOR
+    (``_artist_identity_clause`` matches the track artist too), so an artist's
+    track on any VA compilation is loaded. The slot was then written per ARTIST
+    — last row wins — so ONE VA compilation row set ``existing["Gorillaz"] =
+    "Various Artists"``, and ``album_artist_from_sources`` returned
+    "Various Artists" for EVERY Gorillaz album, including *The Mountain*, whose
+    own tags and Navidrome entry both say ``albumartist: Gorillaz``.
+
+    Scoping to (artist, album) makes the slot mean what its comment always
+    claimed: whether THIS album is already stored as a compilation.
+    """
+    return (
+        f"{str(artist or '').strip().casefold()}"
+        f"|{strip_album_edition_marker(str(album or '')).strip().casefold()}"
+    )
+
+
 def album_artist_from_sources(
     *,
     api_album_artist: str,
@@ -512,20 +604,35 @@ def album_artist_from_sources(
     "Various Artists • HIM" already picks "Various Artists", but "HIM" is truthy
     and used to win before that cleaning ran.
 
-    ⚠️ ``existing_album_artists`` IS LOOKED UP BY ``canonical_artist_name``.
+    ⚠️ ``existing_album_artists`` IS LOOKED UP BY ARTIST **AND** ALBUM.
 
-    That name is the artist being imported, so the entry is that artist's OWN
-    stored album artist — which is what makes the guard safe. This is deliberately
-    NOT keyed by album name: album titles are not unique ("Greatest Hits" exists a
-    thousand times over), so a title-keyed lookup answered with an arbitrary
-    artist's row.
+    ⚠️⚠️ IT USED TO BE THE ARTIST ALONE, AND THAT MISLABELLED DISCOGRAPHIES.
+
+    Reported: *"A heap of albums are being imported as various artists even
+    though they are in Navidrome under their regular artist name"* — and the
+    diagnosis was exactly right: *"It seems to be artists that also appear as a
+    track artist on other various artist collections."*
+
+    The prefetch deliberately loads rows where the artist is only a CONTRIBUTOR
+    (``_artist_identity_clause`` matches the TRACK artist too), so one track on
+    any VA compilation was loaded. With an artist-only key — last row wins — that
+    set ``existing["Gorillaz"] = "Various Artists"``, and EVERY Gorillaz album
+    resolved to VA, including *The Mountain*, whose tags and Navidrome entry both
+    say ``albumartist: Gorillaz``.
+
+    Keying by artist+album (``_album_artist_state_key``) makes the entry mean
+    what this docstring always claimed: whether THIS album is a compilation. The
+    rows already polluted by the old key are repaired by
+    ``_heal_contaminated_va_album_artist``.
 
     ``album_artist_from_state`` lets the caller pass the value directly when it
     has already resolved the album (it has the album id, which the map does not).
     """
     existing_album_artist = (
         album_artist_from_state
-        or existing_album_artists.get(canonical_artist_name, "")
+        or existing_album_artists.get(
+            _album_artist_state_key(canonical_artist_name, album_name), ""
+        )
     )
     existing_is_va = _has_various_artist_part(existing_album_artist)
 
@@ -744,11 +851,24 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
                 existing_album_tracks.setdefault(album_key, set()).add(str(track_id))
                 existing_album_rows.setdefault(album_key, []).append(row_dict)
             if album and album_artist:
-                # Keyed by the ARTIST being imported, not the album title — see
-                # ``album_artist_from_sources``. The prefetch is already scoped
-                # by ``canonical_artist_name``, so this is that artist's own
-                # value, never another artist's album of the same name.
-                existing_album_artists[str(canonical_artist_name)] = str(album_artist)
+                # ⚠️⚠️ KEYED BY (ARTIST, ALBUM) — NOT BY ARTIST ALONE.
+                #
+                # This slot used to be ``existing_album_artists[artist]``, "last
+                # row wins". The prefetch loads rows where the artist is only a
+                # CONTRIBUTOR (see ``_artist_identity_clause``), so one track on
+                # any "Various Artists" compilation set this artist's slot to
+                # "Various Artists" — and then EVERY album of theirs resolved to
+                # "Various Artists", even though Navidrome and their own tags
+                # name the real artist. Reported: "a heap of albums are being
+                # imported as various artists", and the diagnosis "artists that
+                # also appear as a track artist on other various artist
+                # collections" was exactly right.
+                #
+                # ``_album_artist_state_key`` makes the entry mean what it always
+                # claimed to: whether THIS album is stored as a compilation.
+                existing_album_artists[
+                    _album_artist_state_key(canonical_artist_name, album)
+                ] = str(album_artist)
             # Any critical field still empty → this album needs a re-import
             # when ``filter_missing`` is on (all four ARE on the wire, so a
             # re-import genuinely fills them).
@@ -1492,6 +1612,16 @@ def scan_artist_to_db(
                         if _seen_ids:
                             mark_navidrome_import_seen(_seen_ids)
                         _normalise_va_album_artist(
+                            _album_payloads, album_artist_value
+                        )
+                        # ⚠️ THE OTHER DIRECTION. A row left as "Various
+                        # Artists" by the old artist-keyed slot is a protected
+                        # local-authority value, so the upsert will NOT correct
+                        # it — it has to be healed explicitly. Safe because it
+                        # only fires when every track artist on the album agrees
+                        # with the resolved specific album artist, which a real
+                        # compilation can never satisfy.
+                        _heal_contaminated_va_album_artist(
                             _album_payloads, album_artist_value
                         )
                         save_album_state(

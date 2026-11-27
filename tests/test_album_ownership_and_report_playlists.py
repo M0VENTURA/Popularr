@@ -22,11 +22,27 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 class TestAlbumArtistResolution:
     """VA must survive a re-import, and must not be invented.
 
-    ⚠️ An earlier version of this file asserted a per-album-ID key. That was
-    WRONG: the prefetch is already scoped by the artist being imported, so it
-    cannot observe another artist's album, and the ID key broke the one thing the
-    map is FOR — preserving a stored "Various Artists" on re-import.
+    ⚠️ THE MAP IS KEYED BY ARTIST **AND** ALBUM.
+
+    It used to be keyed by artist alone, and that mislabelled whole
+    discographies: the prefetch deliberately loads rows where the artist is only
+    a CONTRIBUTOR (so a track on any VA compilation is loaded), and "last row
+    wins" made one compilation row mark EVERY album of that artist as Various
+    Artists — reported as *"a heap of albums are being imported as various
+    artists even though they are in Navidrome under their regular artist
+    name"*, with the correct diagnosis *"artists that also appear as a track
+    artist on other various artist collections"*.
+
+    The preservation behaviour these tests pin is unchanged; only the key is
+    scoped, so one album's stored value cannot answer for another's.
     """
+
+    ALBUM = "Essential Alternative"
+
+    def _key(self, artist: str) -> str:
+        from services.scanning.navidrome_import import _album_artist_state_key
+
+        return _album_artist_state_key(artist, self.ALBUM)
 
     def _resolve(self, *, artist, existing=None, from_state="", **kw):
         from services.scanning.navidrome_import import album_artist_from_sources
@@ -35,7 +51,7 @@ class TestAlbumArtistResolution:
             api_album_artist=kw.get("api", artist),
             album_artist_from_artist_view=kw.get("view", ""),
             canonical_artist_name=artist,
-            album_name="Essential Alternative",
+            album_name=self.ALBUM,
             existing_album_artists=existing or {},
             album_artist_from_state=from_state,
         )
@@ -45,7 +61,7 @@ class TestAlbumArtistResolution:
     )
     def test_a_stored_va_is_preserved(self, stored):
         assert self._resolve(
-            artist="Evanescence", existing={"Evanescence": stored}
+            artist="Evanescence", existing={self._key("Evanescence"): stored}
         ) == "Various Artists", "the whole point of the stored value"
 
     def test_an_ordinary_artist_is_not_forced_to_va(self):
@@ -54,8 +70,21 @@ class TestAlbumArtistResolution:
     def test_another_artists_row_cannot_claim_this_one(self):
         """The map is artist-scoped, so a different key must not be consulted."""
         assert self._resolve(
-            artist="Evanescence", existing={"Gorillaz": "Various Artists"}
+            artist="Evanescence", existing={self._key("Gorillaz"): "Various Artists"}
         ) == "Evanescence"
+
+    def test_another_album_of_the_same_artist_cannot_claim_this_one(self):
+        """⭐ THE REPORTED BUG: a VA compilation must not answer for a real album."""
+        from services.scanning.navidrome_import import _album_artist_state_key
+
+        compilation = _album_artist_state_key(
+            "Gorillaz", "Now That's What I Call Music 42"
+        )
+        assert self._resolve(
+            artist="Gorillaz",
+            album="The Mountain",
+            existing={compilation: "Various Artists"},
+        ) == "Gorillaz"
 
     @pytest.mark.parametrize("kw", [
         {"api": "Various Artists"},
@@ -67,7 +96,7 @@ class TestAlbumArtistResolution:
     def test_an_explicit_state_value_wins(self):
         assert self._resolve(
             artist="Evanescence",
-            existing={"Evanescence": "Evanescence"},
+            existing={self._key("Evanescence"): "Evanescence"},
             from_state="Various Artists",
         ) == "Various Artists"
 
