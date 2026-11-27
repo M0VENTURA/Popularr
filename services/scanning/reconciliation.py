@@ -53,9 +53,16 @@ LOCAL_AUTHORITY_FIELDS: frozenset[str] = frozenset({
 })
 
 #: Stable fields used for the album freshness fingerprint.
+#:
+#: ⚠️ ``release_year`` IS HERE BECAUSE THE IMPORT SPLITS THE TWO YEARS.
+#: ``Child.year`` from Navidrome is the file's DATE tag — the EDITION year — and
+#: ``payload_builder`` deliberately stores it in ``release_year``, putting the
+#: ORIGINAL year in ``year``. Comparing only ``year`` therefore compared the
+#: incoming EDITION year against the stored ORIGINAL year: permanently unequal
+#: for every remaster/reissue, so nothing ever skipped.
 FINGERPRINT_FIELDS: tuple[str, ...] = (
     "id", "file_path", "title", "artist", "album_artist", "album",
-    "year", "track_number", "disc_number", "duration",
+    "year", "release_year", "track_number", "disc_number", "duration",
     "musicbrainz_trackid", "navidrome_genres",
 )
 
@@ -189,6 +196,7 @@ def _record(
     duration: Any,
     recording_mbid: Any,
     genres: Any,
+    release_year: Any = None,
 ) -> dict[str, str]:
     return {
         "id": _text(track_id),
@@ -198,6 +206,7 @@ def _record(
         "album_artist": _text(album_artist),
         "album": _text(album),
         "year": _year_text(year),
+        "release_year": _year_text(release_year),
         "track_number": _number_text(track_number),
         "disc_number": _number_text(disc_number),
         "duration": _duration_text(duration),
@@ -218,7 +227,10 @@ def navidrome_row_record(
             track.get("albumArtist") or album_artist or ""
         ),
         album=album_name,
+        # Child.year IS the edition year — the same meaning ``release_year``
+        # carries on the stored row (see FINGERPRINT_FIELDS).
         year=track.get("year"),
+        release_year=track.get("year"),
         track_number=track.get("trackNumber") if "trackNumber" in track else track.get("track"),
         disc_number=track.get("discNumber") if "discNumber" in track else track.get("disc"),
         duration=track.get("duration"),
@@ -236,11 +248,19 @@ def db_row_record(row: dict[str, Any]) -> dict[str, str]:
     return _record(
         track_id=row.get("id"),
         file_path=row.get("file_path"),
+        # ⚠️ THE SAME NAME CLEANING THE INCOMING SIDE APPLIES. The stored value
+        # is whatever the last payload wrote, and the payload runs it through
+        # ``clean_artist_name_for_storage``; reading the column raw made a
+        # case-only divergence ("SOiL" vs "Soil") a permanent mismatch.
         title=row.get("title"),
-        artist=row.get("artist"),
-        album_artist=row.get("album_artist"),
+        artist=clean_artist_name_for_storage(row.get("artist") or ""),
+        album_artist=clean_artist_name_for_storage(row.get("album_artist") or ""),
         album=row.get("album"),
-        year=row.get("year") or row.get("release_year"),
+        # ``release_year`` is the EDITION year (what Navidrome reports); ``year``
+        # is the ORIGINAL year. Compare the edition side, matching the incoming
+        # record. Fall back to ``year`` when no edition year was stored.
+        year=row.get("release_year") or row.get("year"),
+        release_year=row.get("release_year") or row.get("year"),
         track_number=row.get("track_number"),
         disc_number=row.get("disc_number"),
         duration=row.get("duration"),
@@ -314,26 +334,58 @@ def album_metadata_dirty(rows: list[dict[str, Any]]) -> bool:
 # ---------------------------------------------------------------------------
 
 def mark_local_tags_written_for_track_ids(track_ids: Iterable[Any]) -> int:
-    ids = [str(value).strip() for value in track_ids or [] if str(value or "").strip()]
+    """Stamp the "local correction" flags on a set of tracks.
+
+    ⚠️⚠️ THE IDS ARE SORTED, AND THAT IS A DEADLOCK FIX, NOT COSMETICS.
+
+    Reported (PostgreSQL)::
+
+        ERROR: deadlock detected
+        Process 26841: UPDATE tracks SET local_tags_written_at = CURRENT_TIMESTAMP ...
+                       WHERE id IN ('6orySG…','4hGnBg……','0Tr3u5…', …)
+        Process 26869: UPDATE tracks SET pending_mb_updates = '{…}'
+                       WHERE id = '0Tr3u5UxQoYaWtmuNBqeXm'
+
+    Two writers touched overlapping ``tracks`` rows in DIFFERENT orders: this
+    bulk stamp took its ids in whatever order the caller produced, while the
+    pending-recommendation writer took them one at a time. Postgres resolves
+    that by killing one session.
+
+    A multi-row UPDATE acquires its row locks in the order the rows are
+    scanned, so a DETERMINISTIC id order makes two overlapping bulk updates
+    serialise instead of interleaving. Sorting here (plus the ORDER BY in the
+    pending writer) removes the cycle for the pair actually observed.
+    """
+    ids = sorted({
+        str(value).strip() for value in track_ids or [] if str(value or "").strip()
+    })
     if not ids:
         return 0
-    placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
-    params = {f"id{i}": value for i, value in enumerate(ids)}
     try:
         from sqlalchemy import text
 
+        stamped = 0
         with db_session() as session:
-            result = session.execute(
-                text(
-                    "UPDATE tracks SET "
-                    "local_tags_written_at = CURRENT_TIMESTAMP, "
-                    "metadata_dirty_for_navidrome = TRUE, "
-                    "metadata_source = 'popularr' "
-                    f"WHERE CAST(id AS TEXT) IN ({placeholders})"
-                ),
-                params,
-            )
-            return int(result.rowcount or 0)
+            # ⚠️ ONE ROW PER STATEMENT, IN ID ORDER — not one ``IN (...)`` list.
+            # A single multi-row UPDATE takes its row locks in scan order, and
+            # the pending-recommendation writer updates the same rows one at a
+            # time; that interleaving is what Postgres killed. Sorted,
+            # single-row statements make every writer acquire in the same order
+            # (and avoid the Postgres-only ``ORDER BY`` that SQLite rejects).
+            for track_id in ids:
+                result = session.execute(
+                    text(
+                        "UPDATE tracks SET "
+                        "local_tags_written_at = CURRENT_TIMESTAMP, "
+                        "metadata_dirty_for_navidrome = TRUE, "
+                        "metadata_source = 'popularr' "
+                        "WHERE CAST(id AS TEXT) = :track_id"
+                    ),
+                    {"track_id": track_id},
+                )
+                stamped += max(int(result.rowcount or 0), 0)
+            session.commit()
+        return stamped
     except Exception as exc:
         logger.debug("Local tag write stamp failed", count=len(ids), error=str(exc))
         return 0

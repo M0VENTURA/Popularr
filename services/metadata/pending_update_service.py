@@ -131,12 +131,22 @@ def stash_album_recommendations(
         ).fetchall()
         track_ids = [_as_text(getattr(r, "id", None) or r[0]) for r in rows or []]
 
-        for track_id in track_ids:
+        # ⚠️ WRITE IN ID ORDER — a deadlock fix.
+        #
+        # Reported (PostgreSQL): this writer's single-row UPDATE on
+        # '0Tr3u5…' deadlocked against the bulk tag stamp
+        # (``mark_local_tags_written_for_track_ids``) updating the same row.
+        # Both sides now acquire their row locks in ascending id order, so the
+        # cycle cannot form. ``is_first`` is decided before sorting so the
+        # album-level block still lands on a STABLE row (the lowest id), not on
+        # whatever the query happened to return first.
+        _album_block_row = min(track_ids) if track_ids else ""
+        for track_id in sorted(track_ids):
             own_changes = track_changes.get(track_id) or []
             # Only rows with something to say are written — an album with only
-            # album-level changes still needs one row to hang them on, so the
-            # first track carries them and the rest are left clean.
-            is_first = track_id == track_ids[0]
+            # album-level changes still needs one row to hang them on, so a
+            # single stable row carries them and the rest are left clean.
+            is_first = track_id == _album_block_row
             if not own_changes and not (album_changes and is_first):
                 continue
 

@@ -231,13 +231,20 @@ def normalize_existing_artist_rows(
         return 0
 
     updates = 0
+    # ⚠️ NO CASE VARIANTS OF THE CANONICAL ARE ADDED HERE.
+    #
+    # This used to add ``.lower()`` / ``.upper()`` / ``.title()`` of the
+    # canonical unconditionally. For a mixed-case act that is a DIFFERENT
+    # spelling — "SOiL".title() == "Soil" ≠ "SOiL" — so the scan rewrote
+    # "Soil" → "SOiL" while ``payload_builder`` wrote "Soil" back on the very
+    # same pass. The two oscillated forever: 40 rows rewritten per artist per
+    # scan, logged as "Normalized existing artist rows … updated_rows=40" with
+    # alias == canonical, and it churned row versions (dead tuples, write
+    # amplification, autovacuum pressure).
+    #
+    # Only the CALLER's aliases are rewritten, and only when they normalise to
+    # the canonical key (checked below). The canonical itself is skipped.
     alias_candidates = {alias for alias in (aliases or []) if alias}
-    alias_candidates.update({
-        canonical_artist_name,
-        canonical_artist_name.lower(),
-        canonical_artist_name.upper(),
-        canonical_artist_name.title(),
-    })
 
     def _do_update(sess: Any) -> None:
         nonlocal updates
@@ -249,6 +256,10 @@ def normalize_existing_artist_rows(
                 continue
 
             for column_name in ("album_artist", "artist"):
+                # ⚠️ NO ``IS DISTINCT FROM`` GUARD IS NEEDED: ``original`` is
+                # never ``canonical`` (skipped above), so any matched row
+                # genuinely changes value. A guard here would be dead logic AND
+                # Postgres-only syntax (the suite runs on SQLite).
                 result = sess.execute(
                     text(f"""
                     UPDATE tracks
