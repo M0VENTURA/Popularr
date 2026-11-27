@@ -517,7 +517,11 @@
                   {{ track.track_number or loop.index }}
                 </td>
                 <td>
-                  <a href="{{ url_for('ui.track_detail', track_id=track.id) }}" class="fw-bold text-light text-decoration-none">
+                  {# ⚠️ ``track-title-display-<id>`` IS LOAD-BEARING. album.js
+                     inserts the "Extra" badge (a library track that is not on
+                     this release's tracklist) AFTER this element by class name;
+                     without the class the badge silently never rendered. #}
+                  <a href="{{ url_for('ui.track_detail', track_id=track.id) }}" class="fw-bold text-light text-decoration-none track-title-display-{{ track.id }}">
                     {{ track.title }}
                   </a>
                   {# Save-state at a glance: a correction the database holds but

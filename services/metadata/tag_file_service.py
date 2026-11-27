@@ -1511,8 +1511,18 @@ def _writer_names_text(value: Any) -> str:
 
                 candidate = _json.loads(stripped)
             except Exception:
-                # Invalid JSON (already-corrupted text) — repair it as text.
-                candidate = None
+                # ⚠️ A PYTHON LIST REPR (single quotes) is not valid JSON, and
+                # this is exactly what a past ``str(list)`` write left on disk:
+                # ``['Dion Rambo', 'Jacques Richmond']``. ``literal_eval`` is the
+                # only parser that reads it, so try it before falling back to
+                # text splitting — otherwise the repr is split on its own commas
+                # and the debris is preserved forever.
+                try:
+                    import ast as _ast
+
+                    candidate = _ast.literal_eval(stripped)
+                except Exception:
+                    candidate = None
             if isinstance(candidate, dict):
                 candidate = list(candidate.values())
             if isinstance(candidate, list):
@@ -1566,6 +1576,14 @@ def build_tag_updates(payload: dict[str, Any]) -> dict[str, Any]:
     # the format the round trip already understands (``split_credit_names``).
     if "writer" in tags:
         tags["writer"] = _writer_names_text(tags["writer"])
+    # ⭐ COMPOSER GETS THE SAME TREATMENT. It was the one credit field with no
+    # normaliser, so a Python list reaching the writer became `str(list)` in the
+    # TCOM frame ("['Dion Rambo', 'Jacques Richmond']"), and the Navidrome
+    # import then re-split that repr on its commas into ever-nesting debris —
+    # which the local-correction guard then protected from the clean remote
+    # value. Same repair, same reasoning.
+    if "composer" in tags:
+        tags["composer"] = _writer_names_text(tags["composer"])
 
     # ---- years ---------------------------------------------------------
     # The DATE/YEAR tag describes the RELEASE THE FILE IS FROM, so a 2026

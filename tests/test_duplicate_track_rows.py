@@ -127,7 +127,10 @@ class TestDuplicateTracksIgnoresRowsForTheSameFile:
             _row(id="4", file_path="/music/Other/10. Track.mp3", recording_mbid=""),
         ]
         monkeypatch.setattr(ams, "db_session", lambda: _fake_db(rows))
-        monkeypatch.setattr(ams, "_version_recommendation", lambda tracks: {})
+        monkeypatch.setattr(
+            ams, "_version_recommendation",
+            lambda tracks, expected_duration=0.0: {},
+        )
 
         result = ams.find_duplicate_tracks("The Kinks", "Battlefield Vietnam")
 

@@ -758,6 +758,25 @@ def local_authority_conflicts(
             if not _dates_compatible(existing.get(field), payload.get(field)):
                 conflicts.append(field)
             continue
+        # ⭐ A MALFORMED LOCAL VALUE IS NOT A CORRECTION.
+        #
+        # Reported: a track's composer had become "Dion Rambo, Jacques Richmond,
+        # D Rambo, J Richmond • ['Dion Rambo', 'Jacques Richmond'], ..." — a
+        # human string, then a Python list repr, then an escaped copy — and the
+        # guard below protected that garbage from Navidrome's clean value on
+        # every import ("winner='existing'").
+        #
+        # The local value is only worth protecting while it is a plausible
+        # value. If it carries list-repr debris (``['``, ``"]``, ``\\'``) or a
+        # bullet-joined duplicate of itself, it is corruption, not a user edit:
+        # skip the protection so the provider's value can repair the row.
+        if _looks_like_serialised_debris(existing.get(field)):
+            logger.info(
+                "Ignoring a malformed local value instead of protecting it",
+                field=field,
+                local=str(existing.get(field))[:120],
+            )
+            continue
         if existing_value == payload_value:
             continue
         # Unicode hyphen/quote variants are the same value, not a conflict.
@@ -767,6 +786,34 @@ def local_authority_conflicts(
             continue
         conflicts.append(field)
     return conflicts
+
+
+def _looks_like_serialised_debris(value: Any) -> bool:
+    """True when a credit value is list-repr garbage, not a real value.
+
+    The signature of the corruption reported for composer: a Python list repr
+    (``['A', 'B']``) embedded in, and often appended after a bullet to, a
+    human-readable string. Plain names are never affected — ``AC/DC``,
+    ``Tyler "T-Bone" Spencer`` and ``[Unknown]`` all pass, because the test
+    looks for the SYNTAX of a serialised list, not for a quote or a bracket.
+    """
+    text = _text(value)
+    if not text:
+        return False
+    # An embedded list literal: "['A'" / "']" / "\'A\'" (an escaped repr).
+    if re.search(r"[\[{]\s*['\"]", text) or re.search(r"['\"]\s*[\]}]", text):
+        return True
+    if "\\'" in text or '\\"' in text:
+        return True
+    # A bullet-joined tail that contains list syntax ("A, B • ['A', 'B']").
+    # ⚠️ A plain bullet-joined credit ("A • B") is NORMAL here — Navidrome
+    # joins names that way — so only the presence of list brackets/quotes in
+    # the tail signals corruption.
+    if "•" in text:
+        tail = "".join(text.split("•")[1:])
+        if any(ch in tail for ch in "[]'\""):
+            return True
+    return False
 
 
 def local_authority_values_match(

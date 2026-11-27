@@ -151,9 +151,19 @@
         sourceVariations,
       };
 
+      // ⭐ EACH VARIATION IS A LINK, NOT JUST A BADGE.
+      //
+      // Reported: the duplicate-MBID list only offered "Merge", so a variant
+      // that is genuinely a DIFFERENT act (or whose release needs a different
+      // correction) could not be inspected — merging was the only option, and
+      // "not every release should be merged to fix". Each spelling now links to
+      // its own artist page so the release can be fixed there instead.
       const variationsHtml = variations.map((v) =>
-        `<span class="badge bg-secondary me-1 mb-1">${esc(v)} ` +
-        `<span class="opacity-50 ms-1">(${esc(String(trackCounts[v] || 0))})</span></span>`
+        `<a class="badge bg-secondary me-1 mb-1 text-decoration-none" ` +
+        `href="/artist/${encodeURIComponent(v)}" ` +
+        `title="Open ${esc(v)} to correct its releases instead of merging">` +
+        `${esc(v)} ` +
+        `<span class="opacity-50 ms-1">(${esc(String(trackCounts[v] || 0))})</span></a>`
       ).join('');
 
       const row = document.createElement('tr');
@@ -163,7 +173,13 @@
         <td data-label="Recommended Name"><strong class="text-success">${esc(canonical)}</strong></td>
         <td class="text-center" data-label="Total Tracks"><span class="badge bg-info text-dark">${totalTracks}</span></td>
         <td class="text-end" data-label="Action">
-          <button type="button" class="btn btn-sm btn-primary fw-bold"
+          <a class="btn btn-sm btn-outline-secondary"
+             href="/artist/${encodeURIComponent(artistName)}"
+             title="Open this artist to correct a release instead of merging"
+             data-action="ac-open-artist">
+            <i class="bi bi-box-arrow-up-right me-1"></i> Open
+          </a>
+          <button type="button" class="btn btn-sm btn-primary fw-bold ms-1"
                   data-action="ac-merge-artist"
                   data-merge-key="${esc(mergeKey)}"
                   data-total="${totalTracks}"

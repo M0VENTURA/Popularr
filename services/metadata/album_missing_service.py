@@ -673,8 +673,16 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     }
 
 
-def _version_recommendation(tracks: list[dict[str, Any]]) -> dict[str, Any]:
+def _version_recommendation(
+    tracks: list[dict[str, Any]],
+    expected_duration: float = 0.0,
+) -> dict[str, Any]:
     """Which duplicate copy to keep, or a tie. Never raises.
+
+    ``expected_duration`` is the RELEASE's length for this track, when it is
+    known (the album's missing/MB tracklist). Given it, "the correct track
+    length" is exact even with only two copies; without it the scorer falls back
+    to a majority vote among the copies.
 
     Advisory only: the scan reads files on disk to rate audio quality, which can
     be slow or unavailable (network mounts, a moved file). A failure degrades to
@@ -686,7 +694,7 @@ def _version_recommendation(tracks: list[dict[str, Any]]) -> dict[str, Any]:
             recommend_duplicate_keeper,
         )
 
-        return recommend_duplicate_keeper(tracks)
+        return recommend_duplicate_keeper(tracks, expected_duration)
     except Exception as exc:
         logger.debug("Duplicate version recommendation failed", error=str(exc))
         return {
@@ -765,6 +773,28 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
         grouped.setdefault(key, []).append(row)
 
     duplicates: list[dict[str, Any]] = []
+    #: Expected length per normalised title, from the RELEASE's own tracklist
+    #: (the missing list). This is the "correct track length" a duplicate
+    #: recommendation should be judged against.
+    _expected_duration: dict[str, float] = {}
+    try:
+        with db_session() as session:
+            for md in session.execute(
+                text(
+                    "SELECT title, duration FROM missing_album_tracks "
+                    "WHERE LOWER(artist_name) = LOWER(:artist) "
+                    "  AND LOWER(album_name) = LOWER(:album) "
+                    "  AND COALESCE(ignored, FALSE) = FALSE "
+                    "  AND COALESCE(duration, 0) > 0"
+                ),
+                {"artist": artist, "album": album},
+            ).mappings().all():
+                key = _title_match_key(str(md.get("title") or ""))
+                if key:
+                    _expected_duration.setdefault(key, float(md.get("duration") or 0))
+    except Exception as exc:
+        logger.debug("Expected-duration lookup failed", error=str(exc))
+
     for (title, track_artist, track_number, disc_number), tracks in grouped.items():
         if len(tracks) < 2:
             continue
@@ -784,7 +814,9 @@ def find_duplicate_tracks(artist: str, album: str) -> dict[str, Any]:
             # "×2" leaves the user to compare durations and tags by eye; the
             # recommendation names the better copy and the reason, and NEVER
             # deletes anything.
-            "recommendation": _version_recommendation(tracks),
+            "recommendation": _version_recommendation(
+                tracks, _expected_duration.get(_title_match_key(title), 0.0)
+            ),
         })
 
     # ``disc_number``/``track_number`` are TEXT (and stored as TEXT in this
@@ -1227,6 +1259,20 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
                 {"artist": artist, "album": album},
             ).scalar() or 0
 
+            # ⭐ QUEUE STATE, READ ON PAGE LOAD.
+            #
+            # Reported: "when selecting to download a track, it shows a tick …
+            # but when the page is refreshed, it doesn't show it's in the
+            # queue." The tick was pure DOM state: ``queue_status`` was only
+            # ever computed by the live ``refresh=1`` path and never selected
+            # here, so a reload always rendered "Missing" again.
+            #
+            # A queued track is matched by (title, disc, track) within this
+            # album — the same identity ``_queued_coverage`` uses — and the row
+            # stops showing as queued once the queue row reaches a terminal
+            # imported state (it is then a library track, not a missing one).
+            queued = _queued_status_for_album(session, artist, album)
+
             # How many tracks the user dismissed.  The page must be able to
             # say "N more not shown" — otherwise a rejected pair (ignored =
             # TRUE, which NOTHING ever clears) looks identical to a release
@@ -1252,6 +1298,10 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
     # still compares "10" < "2", which is the reported missing-track order
     # after importing from the album page.
     missing.sort(key=album_track_sort_key)
+    for row in missing:
+        status = queued.get(_queued_key(row), "")
+        if status:
+            row["queue_status"] = status
     return {
         "missing_tracks": missing,
         "missing_count": len(missing),
@@ -1263,6 +1313,67 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
         # MusicBrainz release, and a page load must stay a pure DB read.
         "excluded": {"rejected": int(dismissed)},
     }
+
+
+def _queued_key(row: Any) -> tuple[str, int, str]:
+    """The identity a queue row and a missing row share: (title, disc, track)."""
+    if hasattr(row, "get"):
+        title = _title_match_key(str(row.get("title") or ""))
+        disc = _disc_of(row.get("disc_number"))
+        number = str(row.get("track_number") or "").strip()
+    else:  # pragma: no cover - defensive
+        title, disc, number = "", 1, ""
+    return (title, int(disc or 1), number)
+
+
+#: Terminal queue statuses — the track is IN THE LIBRARY, so it is no longer
+#: "queued" from the album page's point of view. Everything else that is not a
+#: failure means "in flight".
+_QUEUE_TERMINAL_DONE = frozenset({"imported", "in_collection", "completed"})
+_QUEUE_FAILED = frozenset({"failed", "removed", "cancelled", "deleted"})
+
+
+def _queued_status_for_album(
+    session: Any, artist: str, album: str,
+) -> dict[tuple[str, int, str], str]:
+    """``{(title, disc, track): status}`` for this album's in-flight downloads.
+
+    Read on PAGE LOAD so the "download" tick survives a refresh. A row is
+    included while it is still in flight (queued / searching / downloading /
+    processing / moving / matched / backed_off / pending_*); once it imports it
+    is a library track and the page shows it in the tracklist instead, so the
+    "in queue" state correctly disappears.
+    """
+    statuses = sorted(
+        {"queued", "searching", "downloading", "processing", "moving", "matched",
+         "backed_off", "pending_release", "pending_match", "awaiting_selection",
+         "possible_duplicate", "queried", "copy_recommended", "duplicate"}
+    )
+    placeholders = ", ".join(f":s{i}" for i in range(len(statuses)))
+    try:
+        rows = session.execute(
+            text(
+                "SELECT title, disc_number, track_number, status "
+                "FROM download_queue "
+                "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                "  AND LOWER(COALESCE(album, '')) = LOWER(:album) "
+                f"  AND status IN ({placeholders})"
+            ),
+            {
+                "artist": artist, "album": album,
+                **{f"s{i}": s for i, s in enumerate(statuses)},
+            },
+        ).mappings().all()
+    except Exception as exc:
+        logger.debug("Album queue-status read failed", artist=artist, album=album, error=str(exc))
+        return {}
+    out: dict[tuple[str, int, str], str] = {}
+    for row in rows:
+        key = _queued_key(dict(row))
+        status = str(row.get("status") or "").strip()
+        if key[0] and status:
+            out.setdefault(key, status)
+    return out
 
 
 def _missing_row_key(row: Any) -> tuple[str, int, str]:

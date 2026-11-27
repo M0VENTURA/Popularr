@@ -3705,23 +3705,45 @@
     tbody.querySelectorAll('.album-duplicate-badge').forEach((b) => b.remove());
 
     const counts = new Map();
+    const keepById = new Map();     // track id -> the copy to KEEP this group
+    const reasonById = new Map();   // track id -> why (shown in the tooltip)
     ((data && data.duplicates) || []).forEach((group) => {
+      const rec = group.recommendation || {};
+      const keepId = String(rec.keep_track_id || '');
       (group.track_ids || []).forEach((id) => {
         counts.set(String(id), Number(group.count) || 0);
+        if (keepId) {
+          keepById.set(String(id), keepId);
+          if (rec.reason) reasonById.set(String(id), rec.reason);
+        }
       });
     });
     if (!counts.size) return;
 
     tbody.querySelectorAll('tr[data-track-id]').forEach((row) => {
-      const count = counts.get(String(row.getAttribute('data-track-id') || ''));
+      const trackId = String(row.getAttribute('data-track-id') || '');
+      const count = counts.get(trackId);
       if (!count) return;
       const titleCell = row.cells && row.cells[1];
       if (!titleCell) return;
+      // ⭐ THE RECOMMENDATION NAMES THE COPY TO DELETE, BY LENGTH FIRST.
+      // The server already returns it (``group.recommendation``, now including
+      // a length-outlier verdict); this row used to discard it and show only a
+      // bare "×N", leaving the user to compare durations by eye.
+      const keepId = keepById.get(trackId) || '';
+      const isKeeper = keepId && keepId === trackId;
       const badge = document.createElement('span');
       badge.className = 'badge bg-danger ms-1 album-duplicate-badge';
       badge.style.fontSize = '0.65rem';
-      badge.textContent = `Duplicate \u00d7${count}`;
-      badge.title = `This track exists ${count} times on this album (downloaded more than once)`;
+      if (keepId) {
+        badge.textContent = isKeeper ? `Keep \u00d7${count}` : `Delete \u00d7${count}`;
+        badge.className = 'badge ms-1 album-duplicate-badge ' + (isKeeper ? 'bg-success' : 'bg-danger');
+        badge.title = reasonById.get(trackId)
+          || (isKeeper ? 'Recommended: keep this copy' : 'Recommended: delete this copy');
+      } else {
+        badge.textContent = `Duplicate \u00d7${count}`;
+        badge.title = `This track exists ${count} times on this album (downloaded more than once)`;
+      }
       const anchor = titleCell.querySelector('a');
       if (anchor) anchor.insertAdjacentElement('afterend', badge);
       else titleCell.insertAdjacentElement('afterbegin', badge);

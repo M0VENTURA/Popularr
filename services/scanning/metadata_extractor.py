@@ -128,7 +128,17 @@ _CREDIT_SPLIT_RE = re.compile(
 
 
 def split_credit_names(value: Any) -> list[str]:
-    """Split a composer/writer credit string (or list) into individual names."""
+    """Split a composer/writer credit string (or list) into individual names.
+
+    ⚠️ A PYTHON LIST REPR IS PARSED FIRST, NOT SPLIT. A past ``str(list)`` write
+    left ``"['Dion Rambo', 'Jacques Richmond']"`` on disk. ``_CREDIT_SPLIT_RE``
+    splits on commas but not on ``'``/``[``/``]``, so the repr used to become the
+    debris ``["['Dion Rambo'"`` and ``"'Jacques Richmond']"`` — which was then
+    written back to the file and re-split on the next import, nesting one level
+    deeper every scan. Parsing it is what breaks the cycle at the entry point.
+    (``json.loads`` cannot read a repr; ``literal_eval`` is the only parser that
+    can, so both are tried.)
+    """
     if isinstance(value, (list, tuple, set)):
         raw = [
             str(item.get("name", "")) if isinstance(item, dict) else str(item)
@@ -137,9 +147,55 @@ def split_credit_names(value: Any) -> list[str]:
         value = ", ".join(raw)
     if value is None:
         return []
+    text = str(value).strip()
+    if text[:1] in ("[", "{"):
+        parsed: Any = None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            try:
+                import ast as _ast
+
+                parsed = _ast.literal_eval(text)
+            except Exception:
+                parsed = None
+        if isinstance(parsed, dict):
+            parsed = list(parsed.values())
+        if isinstance(parsed, (list, tuple)):
+            out: list[str] = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    item = item.get("name", "")
+                if isinstance(item, (list, tuple)):
+                    # A nested list (the doubled-repr case) flattens one level.
+                    for sub in item:
+                        name = re.sub(r"\s+", " ", str(sub).strip())
+                        if name:
+                            out.append(name)
+                    continue
+                name = re.sub(r"\s+", " ", str(item).strip())
+                if name:
+                    out.append(name)
+            if out:
+                return out
+    # ⚠️ A MIXED VALUE: a human string, then an embedded repr after a bullet
+    # ("A, B • ['A', 'B']"). The leading half is clean names; the trailing
+    # repr is the SAME names serialised. Split the halves, repair each piece,
+    # and dedupe — otherwise the repr re-enters the file as debris.
+    if "•" in text:
+        out: list[str] = []
+        seen: set[str] = set()
+        for half in text.split("•"):
+            for name in split_credit_names(half):
+                key = re.sub(r"\s+", " ", name).strip().casefold()
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(name)
+        if out:
+            return out
     return [
         re.sub(r"\s+", " ", part).strip()
-        for part in _CREDIT_SPLIT_RE.split(str(value))
+        for part in _CREDIT_SPLIT_RE.split(text)
         if str(part or "").strip()
     ]
 
@@ -345,13 +401,27 @@ def extract_track_metadata(
     # musicBrainzId field``); the new-system port lost that line, so the
     # import NEVER pulled a recording MBID from Navidrome and the empty
     # payload then wiped whatever the scan/download had stored.
+    # ⚠️ ``musicbrainz_trackid`` IS DELIBERATELY ABSENT FROM THIS LIST.
+    #
+    # Reported: a track showed ``recording_mbid`` equal to the RELEASE TRACK id
+    # and ``musicbrainz_trackid`` equal to a different value, so the three
+    # identity columns disagreed permanently.
+    #
+    # Navidrome's wire field ``musicBrainzId`` IS the recording id (cited above),
+    # but the FILE TAG named ``musicbrainz_trackid`` is the RELEASE-TRACK id
+    # under the Picard/MusicBrainz convention (see ``tag_names.py``:
+    # ``musicbrainz_recordingid: [..., musicbrainz_trackid]`` vs
+    # ``musicbrainz_trackid: [..., musicbrainz_releasetrackid]``). Accepting it
+    # as a recording-id alias stored a release-track id in ``recording_mbid``,
+    # ``mbid`` AND ``musicbrainz_trackid`` — three columns, one wrong entity.
+    # The release-track id is read into its own field below.
     recording_mbid = str(
         get_tag_value(
             "musicBrainzId",
             "musicbrainzId",
             "musicbrainz_recordingid",
-            "musicbrainz_trackid",
-            "musicbrainz_track_id",
+            "musicbrainz_recording_id",
+            "recording_mbid",
             "mbid",
         )
         or ""

@@ -143,12 +143,29 @@ class TestExtractorReadsNavidromeMusicBrainzId:
     @pytest.mark.parametrize("alias", [
         "musicbrainzId",           # case variant
         "musicbrainz_recordingid", # file-tag style key
-        "musicbrainz_trackid",
         "mbid",
     ])
     def test_legacy_aliases_still_work(self, alias):
         extracted = extract_track_metadata(_navidrome_song(**{alias: REC_UUID}))
         assert extracted["musicbrainz_trackid"] == REC_UUID
+
+    def test_the_file_tag_trackid_is_not_a_recording_alias(self):
+        """⚠️ ``musicbrainz_trackid`` is DELIBERATELY NOT a recording-id alias.
+
+        It used to be, because Navidrome's WIRE field ``musicBrainzId`` is the
+        recording id, so the two looked like the same thing. But a FILE TAG
+        named ``musicbrainz_trackid`` is the RELEASE-TRACK id under the Picard
+        convention, so accepting it stored a release-track id in
+        ``recording_mbid``, ``mbid`` AND ``musicbrainz_trackid`` at once —
+        three columns, one wrong entity ("the two ids disagree" report).
+
+        The release-track id is read into ``musicbrainz_releasetrackid``.
+        """
+        extracted = extract_track_metadata(
+            _navidrome_song(**{"musicbrainz_trackid": REC_UUID})
+        )
+        assert extracted["musicbrainz_trackid"] == ""
+        assert extracted["mbid"] == ""
 
     def test_song_without_mbids_stays_empty(self):
         extracted = extract_track_metadata(_navidrome_song())

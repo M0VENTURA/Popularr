@@ -213,6 +213,122 @@ _PREFETCH_TRACK_COLUMNS: tuple[str, ...] = (
 )
 
 
+def _artist_identity_clause(param: str, like_param: str) -> str:
+    """SQL matching an existing row by ANY artist credit, not one exact column.
+
+    ⭐⭐ THE PREFETCH USED TO MATCH ONLY ONE ARTIST IDENTITY
+    (``LOWER(COALESCE(NULLIF(album_artist,''), artist)) = LOWER(:artist)``),
+    so a row stored under a DIFFERENT credit was invisible.
+
+    Reported: a collaboration ("RATATATA" by BABYMETAL & Electric Callboy) was
+    re-imported as new on EVERY scan. Navidrome stores the album artist as the
+    joined credit ``"BABYMETAL & Electric Callboy"``, which never equals the
+    scanned view ``"BABYMETAL"`` — so the prefetch returned 0 rows, every skip
+    gate (diff, fast-skip, fingerprint) was bypassed, and the album was
+    rewritten in full forever. The same shape breaks a compilation stored as
+    "Various Artists" when scanned under one contributing artist, and a
+    Unicode-hyphen variant of the same name.
+
+    Matching is now:
+      * the stored album_artist OR artist equals the view, OR
+      * either stored credit CONTAINS the view as a name inside a joined
+        credit (``album_artist LIKE '%Babymetal%'``).
+
+    The LIKE part only decides which rows to LOAD; the authoritative membership
+    tests downstream stay exact, so a broad load cannot corrupt a row. The
+    caller supplies the pre-escaped pattern (``:artist_like``) because `%` and
+    `_` inside an artist name must not act as wildcards.
+
+    ⚠️ UNICODE PUNCTUATION IS FOLDED IN SQL. A MusicBrainz-tagged file may hold
+    ``blink‐182`` (U+2010) while the view is ``blink-182`` (ASCII), which no
+    plain LIKE can match. ``_fold_sql(col)`` applies the same replacements the
+    app's own ``normalize_unicode_punctuation`` does, so both sides compare in
+    one alphabet.
+    """
+    folded = _fold_sql("LOWER(COALESCE(NULLIF(album_artist, ''), artist))")
+    folded_a = _fold_sql("LOWER(COALESCE(artist, ''))")
+    folded_al = _fold_sql("LOWER(COALESCE(album_artist, ''))")
+    # ⚠️ THE CONTAINMENT PART IS ONLY A CANDIDATE NARROWER. A bare
+    # ``LIKE '%va%'`` would pull "VAMPIRE" in for the view "VA", so the rows it
+    # returns are re-checked by ``_credit_contains_name`` in Python — which
+    # demands a whole-name, separator-bounded match. Over-loading here is
+    # harmless; under-loading is the bug being fixed.
+    return (
+        "("
+        f"  {folded} = {param}"
+        f"  OR {folded_a} = {param}"
+        f"  OR {folded_al} LIKE {like_param}"
+        f"  OR {folded_a} LIKE {like_param}"
+        ")"
+    )
+
+
+#: Characters that separate names inside one artist credit.
+_CREDIT_SEPARATORS = "&;•·,/|+\n\t"
+
+
+def _credit_contains_name(credit: Any, name: Any) -> bool:
+    """True when *credit* holds *name* as a WHOLE name, not as a substring.
+
+    ``"BABYMETAL & Electric Callboy"`` contains ``"BABYMETAL"``; ``"VAMPIRE"``
+    does NOT contain ``"VA"``; ``"Bad Omens"`` does NOT contain ``"Bad"``. The
+    credit is split on the separators Navidrome uses to join names, and the
+    comparison is folded + case-insensitive so a Unicode hyphen cannot split
+    one name into two.
+    """
+    wanted = _folded_artist_param(name)
+    if not wanted:
+        return False
+    text = _folded_artist_param(credit)
+    if not text:
+        return False
+    if text == wanted:
+        return True
+    parts = re.split(
+        r"\s*(?:[&;•·,/|+]|\bfeat\.?\b|\bft\.?\b|\band\b|\bwith\b)\s*",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return any(part.strip() == wanted for part in parts if part.strip())
+
+
+#: The Unicode punctuation the app folds to ASCII (see
+#: ``helpers.normalization_service.UNICODE_PUNCT_MAP``). Only the characters that
+#: can appear INSIDE an artist name matter here.
+_FOLD_SQL_PAIRS: tuple[tuple[str, str], ...] = (
+    ("\u2010", "-"), ("\u2011", "-"), ("\u2012", "-"),
+    ("\u2013", "-"), ("\u2014", "-"), ("\u2015", "-"),
+    ("\u2018", "'"), ("\u2019", "'"), ("\u201a", "'"), ("\u201b", "'"),
+    ("\u201c", '"'), ("\u201d", '"'), ("\u2032", "'"), ("\u2033", '"'),
+    ("\u00a0", " "),
+)
+
+
+def _fold_sql(expression: str) -> str:
+    """``REPLACE()``-chain folding the app's Unicode punctuation to ASCII."""
+    sql = expression
+    for src, dst in _FOLD_SQL_PAIRS:
+        # A literal quote must be doubled for SQL, or the statement is syntax-
+        # invalid ("near '’': syntax error").
+        _src = src.replace("'", "''")
+        _dst = dst.replace("'", "''")
+        sql = f"REPLACE({sql}, '{_src}', '{_dst}')"
+    return sql
+
+
+def _artist_like_pattern(artist: str) -> str:
+    """A ``%name%`` LIKE pattern, folded and with the name's own wildcards escaped."""
+    return f"%{_folded_artist_param(artist)}%"
+
+
+def _folded_artist_param(artist: str) -> str:
+    """The artist view folded to ASCII, for comparison against ``_fold_sql``."""
+    name = str(artist or "").strip().lower()
+    for src, dst in _FOLD_SQL_PAIRS:
+        name = name.replace(src, dst)
+    return name
+
+
 def _get_fallback_client() -> NavidromeClient | None:
     """Return a properly configured Navidrome client from the scan service.
 
@@ -319,14 +435,17 @@ def compute_artist_album_diff(
     try:
         with db_session() as session:
             result = session.execute(
-                text("""
+                text(f"""
                     SELECT album, COUNT(*) as track_count
                     FROM tracks
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
+                    WHERE {_artist_identity_clause(":artist", ":artist_like")}
                       AND album IS NOT NULL AND TRIM(album) <> ''
                     GROUP BY album
                 """),
-                {"artist": artist_name},
+                {
+                    "artist": _folded_artist_param(artist_name),
+                    "artist_like": _artist_like_pattern(artist_name),
+                },
             )
             for row in result.fetchall() or []:
                 album_name = str(row[0])
@@ -565,14 +684,28 @@ def prefetch_artist_state(*, canonical_artist_name: str) -> dict[str, Any]:
                 + ", ".join(_PREFETCH_TRACK_COLUMNS)
                 + ", local_tags_written_at, metadata_dirty_for_navidrome,"
                 + " navidrome_imported_at FROM tracks"
-                + " WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)"
+                + " WHERE " + _artist_identity_clause(":artist", ":artist_like")
             ),
-            {"artist": canonical_artist_name},
+            {
+                "artist": _folded_artist_param(canonical_artist_name),
+                "artist_like": _artist_like_pattern(canonical_artist_name),
+            },
         )
 
         for row in result.fetchall() or []:
             mapping = dict(row._mapping) if hasattr(row, "_mapping") else {}
             if not mapping:
+                continue
+            # ⚠️ RE-CHECK THE BROAD SQL MATCH. ``LIKE '%va%'`` (a candidate
+            # narrower) also returns "VAMPIRE"; only a whole-name, credit-bounded
+            # match belongs to this artist's scope. Dropping the extras here is
+            # what keeps ``existing_album_artists`` correct.
+            # ``_credit_contains_name`` also returns True for an exact match, so
+            # one test covers both the equality and the containment cases.
+            if not (
+                _credit_contains_name(mapping.get("album_artist"), canonical_artist_name)
+                or _credit_contains_name(mapping.get("artist"), canonical_artist_name)
+            ):
                 continue
             track_id = mapping.get("id")
             album = mapping.get("album")

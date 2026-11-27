@@ -123,8 +123,105 @@ def score_duplicate_copies(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return scored
 
 
+def _length_seconds(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return seconds if seconds > 0 else 0.0
+
+
+#: Two copies whose lengths differ by less than this are the same length. Round
+#: trips through INT seconds make a 1 s difference noise, not a different take.
+_LENGTH_SAME_TOLERANCE = 3.0
+
+#: How far the outlier must sit from the winning group to be called wrong.
+_LENGTH_OUTLIER_GAP = 5.0
+
+
+def _length_outlier_winner(
+    copies: list[dict[str, Any]],
+    expected_duration: float = 0.0,
+) -> dict[str, Any] | None:
+    """The copy whose length matches the reference, or None.
+
+    ⭐ AN AUTHORITATIVE REFERENCE BEATS A MAJORITY. ``expected_duration`` is the
+    release's own length for this track (MusicBrainz / the CSV tracklist), so
+    when it is known the answer is exact even with only TWO copies — which is
+    the common case ("downloaded twice": one right, one truncated). Without one
+    it falls back to the largest cluster of near-equal durations, so 3 copies at
+    ~4:05 beat one at 3:12.
+    """
+    with_duration = [c for c in copies if _length_seconds(c.get("duration")) > 0]
+    if len(with_duration) < 2:
+        return None
+
+    if _length_seconds(expected_duration) > 0:
+        reference = _length_seconds(expected_duration)
+        near = [
+            c for c in with_duration
+            if abs(_length_seconds(c.get("duration")) - reference)
+            <= _LENGTH_OUTLIER_GAP
+        ]
+        # Exactly one copy matches the release → that is the keeper.
+        if len(near) == 1 and len(near) < len(with_duration):
+            return near[0]
+        # None or several match → the reference cannot separate them.
+        return None
+
+    remaining = list(with_duration)
+    best_cluster: list[dict[str, Any]] = []
+    while remaining:
+        pivot = _length_seconds(remaining[0].get("duration"))
+        cluster = [
+            c for c in remaining
+            if abs(_length_seconds(c.get("duration")) - pivot) <= _LENGTH_SAME_TOLERANCE
+        ]
+        # ``>`` only, so the FIRST cluster wins a tie — and a tie means there is
+        # no majority, so the check below rejects it.
+        if len(cluster) > len(best_cluster):
+            best_cluster = cluster
+        remaining = [c for c in remaining if c not in cluster]
+    # ⚠️ A MAJORITY IS REQUIRED. Every copy agreeing means nothing to decide;
+    # and one copy alone is not a majority (240/260/285 has no correct length,
+    # so naming the shortest "the winner" would be an invented verdict).
+    if len(best_cluster) < 2:
+        return None
+    if len(best_cluster) == len(with_duration):
+        return None
+    reference = sorted(
+        _length_seconds(c.get("duration")) for c in best_cluster
+    )[len(best_cluster) // 2]
+    # Every copy outside the winning cluster must be clearly wrong, or the
+    # lengths do not identify a single bad file (e.g. 4:00 / 4:20 / 4:45).
+    outside = [c for c in with_duration if c not in best_cluster]
+    if not outside:
+        return None
+    if any(
+        abs(_length_seconds(c.get("duration")) - reference) <= _LENGTH_OUTLIER_GAP
+        for c in outside
+    ):
+        return None
+    return best_cluster[0]
+
+
+def _length_reason(winner: dict[str, Any], others: list[dict[str, Any]]) -> str:
+    def _fmt(value: Any) -> str:
+        seconds = int(round(_length_seconds(value)))
+        return f"{seconds // 60}:{seconds % 60:02d}" if seconds else "unknown"
+
+    lose = ", ".join(
+        _fmt(c.get("duration")) for c in others if _length_seconds(c.get("duration"))
+    )
+    return (
+        f"This copy's length ({_fmt(winner.get('duration'))}) matches the "
+        f"correct version; the other copy/copies are {lose}."
+    )
+
+
 def recommend_duplicate_keeper(
     rows: list[dict[str, Any]],
+    expected_duration: float = 0.0,
 ) -> dict[str, Any]:
     """Pick the copy to keep, with the reasoning.
 
@@ -134,8 +231,9 @@ def recommend_duplicate_keeper(
          "copies": [scored copy…]}
 
     ``confidence`` is ``"high"`` when the winner is clearly better on quality,
-    ``"metadata"`` when quality tied and the tags broke it, and ``"tie"`` when
-    nothing separates them (the caller must then choose).
+    ``"length"`` when the release's expected length (or a clear majority) names
+    the wrong copy, ``"metadata"`` when quality tied and the tags broke it, and
+    ``"tie"`` when nothing separates them (the caller must then choose).
     """
     copies = score_duplicate_copies(rows)
     if len(copies) < 2:
@@ -166,6 +264,45 @@ def recommend_duplicate_keeper(
             "reason": winner["why"],
             "copies": copies,
         }
+
+    # ── Quality tied: LENGTH decides, then metadata ───────────────────────
+    #
+    # ⭐ REPORTED: "if multiple tracks exist on the album page for the same song,
+    # it should recommend the one to delete based on the correct track length."
+    #
+    # A wrong-length copy is not a duplicate of the right one — it is a live
+    # take, a radio edit, or a truncated download. When the copies disagree on
+    # length, the outlier is the one to remove, and it beats a metadata
+    # tie-break (a correct-length copy with thinner tags is still the right
+    # file). Duration similarity is only used when the lengths genuinely differ
+    # — a 1-second rounding difference must not be read as "one is wrong".
+    length_winner = _length_outlier_winner(quality_winners, expected_duration)
+    if length_winner is not None:
+        # ⚠️ ONLY THE OUTLIERS ARE CONDEMNED. Copies in the SAME length cluster
+        # as the winner are equally valid files — deleting them because one
+        # happened to be listed first is exactly the arbitrary verdict this
+        # guard exists to avoid. The genuine duplicates inside the cluster are
+        # left for the metadata/tie steps below.
+        winner_seconds = _length_seconds(length_winner.get("duration"))
+        same_length = [
+            c for c in copies
+            if c is not length_winner
+            and abs(_length_seconds(c.get("duration")) - winner_seconds)
+            <= _LENGTH_SAME_TOLERANCE
+        ]
+        # Several copies share the correct length: length alone cannot pick one,
+        # so fall through to metadata instead of guessing.
+        if not same_length:
+            others = [c for c in copies if c is not length_winner]
+            length_winner["keep"] = True
+            length_winner["why"] = _length_reason(length_winner, others)
+            return {
+                "keep_track_id": length_winner["track_id"],
+                "remove_track_ids": [c["track_id"] for c in others],
+                "confidence": "length",
+                "reason": length_winner["why"],
+                "copies": copies,
+            }
 
     # ── Quality tied: metadata decides ────────────────────────────────────
     best_metadata = max(c["metadata"] for c in quality_winners)
