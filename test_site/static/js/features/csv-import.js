@@ -213,6 +213,13 @@
     const run = async () => {
       const group = ((lastImportData.playlist_name || 'playlist')
         .replace(/\s+/g, '_').replace(/[^A-Za-z0-9_]/g, '').slice(0, 80)) || 'playlist';
+      const targetPlaylist = String((lastImportData && lastImportData.playlist_name) || '').trim();
+      const playlistIntent = targetPlaylist
+        ? {
+            playlist_target: targetPlaylist,
+            playlist_user: String((lastImportData && lastImportData.target_user) || '').trim(),
+          }
+        : undefined;
       const items = missing.map((t) => ({
         artist: t.artist || '',
         title: t.title || '',
@@ -222,6 +229,9 @@
         year: t.year || null,
         source: 'soulseek',
         import_type: 'song',
+        // Carry the playlist target so the track is added to it once it imports
+        // and Navidrome adopts its id (a sweep in queue maintenance does the add).
+        metadata: playlistIntent,
       })).filter((t) => t.title);
       if (!items.length) return;
       const data = await global.api.postJson('/api/queue/add-batch', {

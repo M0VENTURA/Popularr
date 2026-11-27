@@ -1028,9 +1028,10 @@ def import_csv_tracklist(artist: str, album: str, csv_text: str) -> dict[str, An
 
 _CSV_HEADER_CELLS = {
     "title", "name", "track", "track title", "song", "song title",
+    "track name", "song name",
     "track number", "track #", "#", "num", "number", "no",
     "artist", "track artist", "disc", "disc number", "disk",
-    "duration", "length", "time", "year", "album",
+    "duration", "length", "time", "year", "album", "album artist",
 }
 
 
@@ -1061,19 +1062,31 @@ def _parse_csv_tracklist(csv_text: str) -> tuple[list[dict[str, Any]], list[str]
     col_map: dict[int, str] = {}
     if header_idx is not None:
         for i, cell in enumerate(reader[header_idx]):
-            name = str(cell or "").strip().lower()
-            if name in ("title", "name", "track title", "song", "song title"):
+            name = " ".join(str(cell or "").strip().lower().split())
+            # ⚠️ "TRACK NAME" IS EXPORTIFY'S HEADER and used to map to NOTHING,
+            # so an Exportify CSV (the format a user is most likely to have)
+            # imported ZERO rows with no error — header detection fired off
+            # another cell, ``title`` stayed empty, and every row was skipped
+            # silently. "Track" and "Song Name" are the other common spellings.
+            if name in (
+                "title", "name", "track title", "song", "song title",
+                "track name", "song name", "track",
+            ):
                 col_map[i] = "title"
-            elif name in ("artist", "track artist"):
+            elif name in ("artist", "track artist", "artists", "artist name",
+                          "artist name(s)"):
                 col_map[i] = "artist"
-            elif name in ("track number", "track #", "num", "number", "no", "#"):
+            elif name in ("track number", "track #", "num", "number", "no", "#",
+                          "track no", "track no."):
                 col_map[i] = "track_number"
-            elif name in ("disc", "disc number", "disk"):
+            elif name in ("disc", "disc number", "disk", "disc no", "disc no."):
                 col_map[i] = "disc_number"
             elif name in ("duration", "length", "time"):
                 col_map[i] = "duration"
             elif name == "year":
                 col_map[i] = "year"
+            # "album"/"album artist" are accepted but deliberately unused: the
+            # album identity is THIS page's artist+album, not a per-row value.
 
     for row_num, raw in enumerate(reader):
         if row_num == header_idx:

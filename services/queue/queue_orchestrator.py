@@ -127,6 +127,13 @@ MAINTENANCE_CANDIDATES: tuple[MaintenanceCandidate, ...] = (
         "services.downloads.slskd_reaper_service",
         "reap_stalled_transfers",
     ),
+    # Adds landed tracks to the playlist they were queued for ("Download Missing"
+    # stores metadata.playlist_target). Runs here — OUTSIDE the Navidrome import —
+    # because a playlist write is deferred while an import runs.
+    MaintenanceCandidate(
+        "services.playlists.playlist_pending_additions_service",
+        "apply_pending_playlist_additions",
+    ),
 )
 
 #: Substrings that identify a DATABASE outage (the log shows DNS failures for

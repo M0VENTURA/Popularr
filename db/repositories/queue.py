@@ -99,6 +99,9 @@ UPDATE_ALLOWED_COLUMNS = frozenset({
     "status",
     "collection_track_id", "in_collection",
     "copied_individually", "copied_individually_at",
+    # Row-scoped intent (e.g. a pending playlist addition). Clearing it after the
+    # sweep succeeds requires updating it, not just inserting it.
+    "metadata",
 })
 
 

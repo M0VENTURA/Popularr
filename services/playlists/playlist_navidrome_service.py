@@ -565,3 +565,45 @@ def sync_playlist_by_name(
             error=str(exc),
         )
     return result
+
+
+def add_track_to_playlist_by_name(client: Any, name: str, song_id: str) -> dict[str, Any]:
+    """Append ONE song to a named playlist if it is not already there.
+
+    ⚠️ NEVER pass just ``[song_id]`` to ``sync_playlist_by_name``: it REPLACES
+    the song list, so a single-id call would wipe the playlist down to that one
+    track. The current ids are read first and the new id is appended.
+
+    Returns ``{"success", "changed", "reason"}``:
+      * ``not_found``        — no playlist of that name yet (create it first)
+      * ``unknown_contents`` — Navidrome could not report the current list
+      * ``already_present``  — no write needed
+      * ``import_running``   — sync deferred; retry later
+    """
+    sid = str(song_id or "").strip()
+    name = str(name or "").strip()
+    if not client or not name or not sid:
+        return {"success": False, "changed": False, "reason": "missing_args"}
+    try:
+        playlist = client.find_playlist_by_name(name)
+    except Exception as exc:
+        logger.debug("[PLAYLISTS] find_playlist_by_name failed", name=name, error=str(exc))
+        playlist = None
+    if not playlist:
+        return {"success": False, "changed": False, "reason": "not_found"}
+    pid = str(playlist.get("id") or "").strip()
+    try:
+        current = client.get_playlist_song_ids(pid)
+    except Exception as exc:
+        logger.debug("[PLAYLISTS] get_playlist_song_ids failed", name=name, error=str(exc))
+        return {"success": False, "changed": False, "reason": "unknown_contents"}
+    if current is None:
+        return {"success": False, "changed": False, "reason": "unknown_contents"}
+    if sid in current:
+        return {"success": True, "changed": False, "reason": "already_present"}
+    result = sync_playlist_by_name(client, name, list(current) + [sid])
+    if result.get("skipped"):
+        return {"success": False, "changed": False, "reason": "import_running"}
+    if not result.get("success"):
+        return {"success": False, "changed": False, "reason": "write_failed"}
+    return {"success": True, "changed": True, "reason": "added"}

@@ -648,9 +648,19 @@
                 <strong class="small">Upload a CSV tracklist</strong>
                 <div class="form-text">
                   The CSV stands in for the MusicBrainz release: tracks the library doesn't have yet
-                  are added to the missing list and can be queued for download. Format:
-                  <code>title</code>, <code>track number,title</code>, or <code>disc,track number,title</code> —
-                  a header row (Title / Artist / Duration / …) works too.
+                  are added to the missing list below, where each can be queued for download.
+                </div>
+                <div class="small mt-2">
+                  <div><strong>Required:</strong> <code>Title</code>
+                    (also <code>Track Name</code>, <code>Name</code>, <code>Song</code>).</div>
+                  <div><strong>Optional:</strong> <code>Artist</code> (track artist),
+                    <code>Track Number</code>, <code>Disc Number</code>,
+                    <code>Length</code> (<code>3:52</code> or seconds), <code>Year</code>.</div>
+                  <div class="text-muted">
+                    Columns are matched by name, in any order. <code>Album Name</code> /
+                    <code>Album Artist</code> / <code>ISRC</code> are ignored — the album is this page.
+                    No header? Positional <code>disc, track number, title</code> works too.
+                  </div>
                 </div>
               </div>
               <div class="d-flex align-items-center gap-2 flex-shrink-0">
