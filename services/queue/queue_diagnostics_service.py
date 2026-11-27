@@ -224,8 +224,9 @@ def _queue_processor_stats() -> dict[str, int]:
     """Queue counts for the card body, in the labels the UI already displays."""
     from services.queue.queue_constraints import (
         ACTIVE_QUEUE_STATUSES,
-        COMPLETED_QUEUE_STATUSES,
-        FAILED_STATUSES,
+        ACTIVE_SECTION,
+        FAILED_SECTION,
+        READY_SECTION,
     )
 
     try:
@@ -236,12 +237,33 @@ def _queue_processor_stats() -> dict[str, int]:
     def _sum(statuses: Any) -> int:
         return sum(int(counts.get(s, 0) or 0) for s in statuses)
 
+    # ⚠️ "QUEUED" MUST MEAN WHAT THE PAGE'S QUEUED PILL MEANS.
+    #
+    # Reported: the processor card said "64 queued" while the filter pills said
+    # "145 Queued". Both read the same `SELECT status, COUNT(*) FROM
+    # download_queue GROUP BY status`; they simply summed different keys.
+    #
+    #   card (was) : histogram['queued']                      -> 64
+    #   pill       : ACTIVE_SECTION - histogram['downloading'] -> 145
+    #
+    # The pill's number is the one the user can reconcile against the list
+    # beneath it, and its label is "Queued" — so the card now reports the same
+    # figure. The narrow "rows literally in status='queued'" count is still
+    # useful, so it is reported separately rather than dropped.
+    queued_like = max(0, _sum(ACTIVE_SECTION) - int(counts.get("downloading", 0) or 0))
+
     return {
-        "queued": int(counts.get("queued", 0) or 0),
+        "queued": queued_like,
+        # Rows in status='queued' specifically — what "queued" meant before, and
+        # what an operator debugging the worker actually wants.
+        "queued_raw": int(counts.get("queued", 0) or 0),
         "active": _sum(ACTIVE_QUEUE_STATUSES),
         "downloading": int(counts.get("downloading", 0) or 0),
-        "failed": _sum(FAILED_STATUSES),
-        "ready": _sum(COMPLETED_QUEUE_STATUSES),
+        # The pill's Failed badge is FAILED_SECTION, not every tombstone — see
+        # queue_constraints: counting removed/cancelled/deleted inflated it with
+        # rows no view could show.
+        "failed": _sum(FAILED_SECTION),
+        "ready": _sum(READY_SECTION),
         "pending_release": int(counts.get("pending_release", 0) or 0),
         "backed_off": int(counts.get("backed_off", 0) or 0),
     }
@@ -382,6 +404,25 @@ def queue_processor_status() -> tuple[dict[str, Any], int]:
         detail.append(
             "scheduler job armed"
             + (f", next tick in {int(nxt)}s" if nxt is not None else "")
+        )
+    elif heartbeat_fresh and not schedule.get("running"):
+        # ⚠️ "SCHEDULER NOT INITIALISED IN THIS PROCESS" IS NORMAL, NOT A FAULT.
+        #
+        # Only the worker that won the leader election builds a scheduler, and
+        # the queue is normally driven by the STANDALONE worker anyway
+        # (SPTNR_QUEUE_PROCESSOR_MANAGED_EXTERNALLY=1), which retires the
+        # scheduler job entirely. So the other hypercorn workers legitimately
+        # have no scheduler — and this endpoint is load-balanced, meaning ~3 in 4
+        # polls reported "scheduler: scheduler not initialised in this process"
+        # while the system was perfectly healthy. The same page then said
+        # something different on refresh, which reads as instability.
+        #
+        # When the heartbeat is fresh the processor IS running, so say that and
+        # mention the scheduler only as the (correct) reason it is not re-armed
+        # here.
+        detail.append(
+            "processor driven by the standalone worker "
+            "(no scheduler in this process)"
         )
     else:
         detail.append(f"scheduler: {schedule.get('reason')}")

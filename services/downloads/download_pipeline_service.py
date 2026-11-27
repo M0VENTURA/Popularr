@@ -1923,6 +1923,44 @@ def _process_release_request(item: dict[str, Any], queue_id: Any) -> dict[str, A
     return {"success": False, "status": "pending_release", "skipped": True}
 
 
+def _wait_for_manual_search_priority() -> None:
+    """Stand aside while a person is waiting for the slskd search slot.
+
+    ⭐ WHY THIS EXISTS. slskd serves ONE search at a time and this worker holds
+    that slot almost continuously — one search per track at 35-145 s each, with
+    the next cycle starting immediately when more rows are ready. An interactive
+    search therefore had to win a race it could not win, and the client gave up
+    with "Search slot did not free up". The user's report was exact: "It used to
+    wait until it freed up."
+
+    Bounded in BOTH directions: the claim itself expires
+    (``PRIORITY_WINDOW_SECONDS``), and this waits at most that window plus a
+    margin, so a crashed browser or a closed tab cannot park the queue. Never
+    raises — a queue that cannot read the flag must carry on.
+    """
+    try:
+        from services.downloads.manual_search_priority import (
+            PRIORITY_WINDOW_SECONDS,
+            priority_remaining_seconds,
+        )
+    except Exception:
+        return
+
+    try:
+        remaining = priority_remaining_seconds()
+        if remaining <= 0:
+            return
+        _cap = float(PRIORITY_WINDOW_SECONDS) + 15.0
+        _sleep_for = min(remaining, _cap)
+        logger.info(
+            "Yielding the Soulseek search slot to a manual search",
+            wait_seconds=round(_sleep_for, 1),
+        )
+        time.sleep(_sleep_for)
+    except Exception as exc:
+        logger.debug("Manual-search priority check failed", error=str(exc))
+
+
 def process_queue_item(item: dict, slskd: SlskdService) -> dict:
     queue_id = item.get("id")
     logger.debug("Processing queue item", queue_id=queue_id)
@@ -2094,6 +2132,16 @@ def process_queue_item(item: dict, slskd: SlskdService) -> dict:
                     shrunken_wait=_shrunken_wait,
                 )
                 
+                # ⚠️ LET A HUMAN HAVE THE SEARCH SLOT.
+                #
+                # slskd serves ONE search at a time. This worker holds it almost
+                # continuously (one search per track, 35-145 s each, next cycle
+                # immediately), so a manual search raced a job that never
+                # paused — the reported "Soulseek search slot did not free up",
+                # which used to wait. The interactive route claims this flag;
+                # yield the slot and re-check shortly.
+                _wait_for_manual_search_priority()
+
                 # Ensure we safely clean up orphaned searches if slskd has old ones
                 results = slskd.search_and_filter(
                     q,

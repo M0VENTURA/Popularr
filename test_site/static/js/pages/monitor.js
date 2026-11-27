@@ -60,10 +60,24 @@
    *
    * The endpoint walks the downloads directory and reads tags out of every
    * audio file, so this is deliberately slower than the 10s queue poll beside
-   * it. A download finishing is visible within half a minute, without paying
-   * for a full directory-and-tags scan every ten seconds.
+   * it.
+   *
+   * ⚠️ MUST STAY WELL ABOVE UNMATCHED_TIMEOUT_MS. It used to be 30 000 — exactly
+   * the default request timeout — so on a slow (network-mounted) downloads root
+   * every scan was abandoned at the 30 s mark and the next one began
+   * immediately: the endpoint was under continuous load and the panel showed
+   * "Request timed out after 30s" every time.
    */
-  const UNMATCHED_REFRESH_MS = 30000;
+  const UNMATCHED_REFRESH_MS = 60000;
+
+  /**
+   * Timeout for one folder scan.
+   *
+   * ⚠️ THE SERVICE BUDGET IS 20 s and it returns a partial list past that, so
+   * 35 s is only reached when something is genuinely wrong. The default 30 s
+   * sat below the point where the server itself gives up.
+   */
+  const UNMATCHED_TIMEOUT_MS = 35000;
 
   function esc(value) {
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
@@ -401,7 +415,10 @@
     unmatchedInFlight = true;
     unmatchedPending = (async () => {
       try {
-        const data = await global.api.getJson('/api/downloads/unmatched-folders');
+        const data = await global.api.getJson(
+          '/api/downloads/unmatched-folders',
+          { timeoutMs: UNMATCHED_TIMEOUT_MS }
+        );
 
         // ⭐ A FAILED READ MUST NOT LOOK LIKE AN EMPTY LIBRARY.
         //
@@ -440,13 +457,31 @@
         // presenting a guess as a tag-derived fact.
         const notice = document.getElementById('unmatchedFoldersNotice');
         if (notice) {
-          notice.innerHTML = data.tags_truncated
-            ? '<div class="list-group-item small text-warning-emphasis bg-dark">'
+          // ⚠️ ``truncated`` is the WALK stopping, ``tags_truncated`` is the TAG
+          // read stopping. They mean different things: the first says folders
+          // are MISSING from this list, the second that some names came from
+          // filenames. Reporting only the second let a partial list read as
+          // "these are all your folders".
+          const parts = [];
+          if (data.truncated) {
+            parts.push(
+              '<div class="list-group-item small text-warning-emphasis bg-dark">'
+              + '<i class="bi bi-exclamation-triangle me-1"></i>'
+              + 'The folders scan ran out of time, so this list is PARTIAL — '
+              + 'folders further down the tree are not shown. Refresh to retry.'
+              + '</div>'
+            );
+          }
+          if (data.tags_truncated) {
+            parts.push(
+              '<div class="list-group-item small text-warning-emphasis bg-dark">'
               + '<i class="bi bi-info-circle me-1"></i>'
               + 'Files were matched faster than their tags could be read, so some '
               + 'artist/album names come from filenames. Refresh to re-read them.'
               + '</div>'
-            : '';
+            );
+          }
+          notice.innerHTML = parts.join('');
         }
 
         if (!folders.length) {
@@ -459,7 +494,9 @@
         }
 
         section.style.display = 'block';
-        if (badge) badge.textContent = `${folders.length} item(s)`;
+        if (badge) badge.textContent = data.truncated
+          ? `${folders.length} item(s) · partial`
+          : `${folders.length} item(s)`;
 
         emptyFolders = folders.filter((f) => f.status !== 'matched' && !(f.audio_count > 0));
         const withContent = folders.filter((f) => f.status === 'matched' || (f.audio_count || 0) > 0);

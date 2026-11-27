@@ -114,9 +114,22 @@ def api_get_grouped_folders() -> Any:
 
 
 @downloads_bp.route("/api/downloads/unmatched-folders")
-def api_get_unmatched_folders() -> Any:
-    """Folders under the downloads dir not tracked as MusicBrainz releases."""
-    return jsonify(get_unmatched_folders())
+async def api_get_unmatched_folders() -> Any:
+    """Folders under the downloads dir not tracked as MusicBrainz releases.
+
+    ⚠️ OFFLOADED. This walks the whole downloads tree and stats every file in
+    every candidate folder — seconds on a local disk, tens of seconds on a
+    network mount. As a plain ``def`` it held a threadpool slot for its full
+    duration; running it inline on the event loop would freeze the worker. Every
+    other heavy route in this file already uses ``to_thread``.
+
+    The service now bounds itself (see ``_FOLDERS_SCAN_BUDGET_SECONDS``), so this
+    always answers inside the client's timeout and reports ``truncated`` when it
+    stopped early.
+    """
+    import asyncio
+
+    return jsonify(await asyncio.to_thread(get_unmatched_folders))
 
 
 @downloads_bp.route("/api/downloads/queue/albums")

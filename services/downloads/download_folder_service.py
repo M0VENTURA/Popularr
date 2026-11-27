@@ -240,6 +240,23 @@ def _read_audio_metadata(folder_path: str, file_name: str) -> dict[str, str]:
 #:     not change while the user is looking at the list.
 _METADATA_READ_BUDGET_SECONDS = 6.0
 _METADATA_CACHE_MAX = 4000
+
+#: ⚠️ TOTAL WALL-TIME BUDGET FOR THE FOLDERS SCAN.
+#:
+#: The tag budget above bounds only mutagen. The DIRECTORY WALK — recursing
+#: three levels with an ``isfile()`` per entry, then a full ``os.walk`` and a
+#: ``stat()`` per file for every candidate folder — was unbounded, and on a
+#: network-mounted ``/downloads`` that alone is 20-60 s. With the client giving
+#: up at 30 s the endpoint simply could not answer.
+#:
+#: 20 s leaves room for the marshalling and the tag pass inside a 30 s client
+#: timeout, and a partial list plus ``truncated: true`` is far more useful than
+#: an error message.
+_FOLDERS_SCAN_BUDGET_SECONDS = 20.0
+
+#: Hard ceiling on candidate folders, so even a fast local disk cannot make one
+#: request walk a tree of thousands of folders.
+_MAX_FOLDER_CANDIDATES = 400
 _metadata_cache: dict[tuple[str, float, int], dict[str, str]] = {}
 _metadata_cache_lock = threading.Lock()
 
@@ -350,7 +367,11 @@ def _assert_single_album_folder(folder_abs: str, downloads_dir: str, archive_dir
     return None
 
 
-def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[str, str]]:
+def _collect_album_folders(
+    folder_abs: str,
+    max_depth: int = 3,
+    deadline: float | None = None,
+) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     try:
         archive_norm = os.path.normpath(resolve_original_archive_dir())
@@ -360,6 +381,11 @@ def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[st
     def _recurse(folder: str, depth: int) -> None:
         if depth > max_depth:
             return
+        # ⚠️ Honour the caller's walk deadline at every level, not just the top
+        # one — a deep tree of small folders is exactly the shape that made the
+        # folders endpoint exceed the client timeout.
+        if deadline is not None and time.monotonic() >= deadline:
+            return
         try:
             sub_entries = sorted(os.listdir(folder))
         except Exception as exc:
@@ -367,10 +393,17 @@ def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[st
             return
 
         def _has_direct_audio(names: list[str]) -> bool:
+            # ⚠️ EXTENSION FIRST, THEN stat(). This built the path and called
+            # os.path.isfile() for EVERY entry — covers, .nfo, .sfv, subtitles —
+            # before looking at the extension. On a network-mounted /downloads
+            # each isfile() is a round trip, so a folder's artwork cost as many
+            # syscalls as its music. The extension test is a string comparison
+            # and rejects the non-audio majority for free.
             for name in names:
+                if os.path.splitext(name)[1].lower() not in SUPPORTED_AUDIO_FORMATS:
+                    continue
                 try:
-                    p = os.path.join(folder, name)
-                    if os.path.isfile(p) and os.path.splitext(name)[1].lower() in SUPPORTED_AUDIO_FORMATS:
+                    if os.path.isfile(os.path.join(folder, name)):
                         return True
                 except Exception:
                     pass
@@ -379,12 +412,13 @@ def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[st
         def _has_disc_audio(disc_names: list[str]) -> bool:
             for name in disc_names:
                 disc = os.path.join(folder, name)
-                if not os.path.isdir(disc):
-                    continue
                 try:
+                    if not os.path.isdir(disc):
+                        continue
                     for fname in os.listdir(disc):
-                        p = os.path.join(disc, fname)
-                        if os.path.isfile(p) and os.path.splitext(fname)[1].lower() in SUPPORTED_AUDIO_FORMATS:
+                        if os.path.splitext(fname)[1].lower() not in SUPPORTED_AUDIO_FORMATS:
+                            continue
+                        if os.path.isfile(os.path.join(disc, fname)):
                             return True
                 except Exception:
                     pass
@@ -422,10 +456,41 @@ def _collect_album_folders(folder_abs: str, max_depth: int = 3) -> list[tuple[st
     return unique
 
 
-def _iter_matched_folder_candidates(downloads_dir: str, archive_dir: str, max_depth: int = 3) -> list[tuple[str, str]]:
+def _iter_matched_folder_candidates(
+    downloads_dir: str,
+    archive_dir: str,
+    max_depth: int = 3,
+    deadline: float | None = None,
+    max_candidates: int = _MAX_FOLDER_CANDIDATES,
+) -> list[tuple[str, str]]:
+    """Candidate album folders under the downloads root.
+
+    ⚠️⚠️ BOUNDED — and that is the whole point.
+
+    Reported: "Matched & Unmatched Folders: Could not load folders: Request
+    timed out after 30s." The tag read was already capped, but THE WALK WAS NOT:
+    every top-level entry was recursed three levels deep with an ``isfile()``
+    probe per directory entry, and then ``_get_files_in_folder`` ran a full
+    ``os.walk`` with one ``stat()`` per file for EVERY candidate. On a
+    network-mounted ``/downloads`` a few thousand of those is 20-60 s on its
+    own, so the endpoint could never answer inside the client's 30 s window no
+    matter how cheap the tags were.
+
+    Two bounds now apply to the walk itself:
+      * ``deadline`` (monotonic) — once passed, the walk stops adding
+        candidates. A partial list is far better than a timeout, and the
+        caller reports that it was truncated;
+      * ``max_candidates`` — a hard ceiling so a pathological tree cannot
+        produce thousands of per-folder file listings.
+    """
     candidates: list[tuple[str, str]] = []
     archive_norm = os.path.normpath(archive_dir)
     root_norm = os.path.normpath(downloads_dir)
+
+    def _expired() -> bool:
+        if deadline is None:
+            return False
+        return time.monotonic() >= deadline
 
     def _is_skipped(full: str, name: str) -> bool:
         if name.startswith(".") or name.startswith("__"):
@@ -441,12 +506,16 @@ def _iter_matched_folder_candidates(downloads_dir: str, archive_dir: str, max_de
         return candidates
 
     for entry in entries:
+        if _expired() or len(candidates) >= max_candidates:
+            break
         full = os.path.join(downloads_dir, entry)
         if not os.path.isdir(full):
             continue
         if _is_skipped(full, entry):
             continue
-        candidates.extend(_collect_album_folders(full, max_depth=max_depth))
+        candidates.extend(
+            _collect_album_folders(full, max_depth=max_depth, deadline=deadline)
+        )
 
     # ⭐ THE DOWNLOADS ROOT IS ITSELF A CANDIDATE.
     #
@@ -456,7 +525,7 @@ def _iter_matched_folder_candidates(downloads_dir: str, archive_dir: str, max_de
     # invisible while the same files one directory deeper showed up. Checked
     # LAST so nested albums keep their natural order, and it only contributes
     # when the root itself holds audio.
-    if _folder_holds_audio(downloads_dir):
+    if len(candidates) < max_candidates and _folder_holds_audio(downloads_dir):
         root_key = os.path.normpath(downloads_dir)
         if all(os.path.normpath(c[0]) != root_key for c in candidates):
             candidates.append((downloads_dir, os.path.basename(root_norm)))
@@ -474,11 +543,14 @@ def _folder_holds_audio(folder_abs: str) -> bool:
         for name in os.listdir(folder_abs):
             if name.startswith(".") or name.startswith("__"):
                 continue
+            # ⚠️ EXTENSION FIRST — see the note in _collect_album_folders. Every
+            # non-audio entry was costing a stat()/isfile() on a possibly
+            # network-mounted path.
+            if os.path.splitext(name)[1].lower() not in SUPPORTED_AUDIO_FORMATS:
+                continue
             path = os.path.join(folder_abs, name)
             try:
-                if os.path.isfile(path) and (
-                    os.path.splitext(name)[1].lower() in SUPPORTED_AUDIO_FORMATS
-                ):
+                if os.path.isfile(path):
                     return True
             except Exception:
                 continue
@@ -556,17 +628,25 @@ def get_unmatched_folders() -> dict[str, Any]:
             return {"success": True, "count": 0, "folders": []}
 
         archive_dir = resolve_original_archive_dir()
-        tracked = _tracked_monitoring_folders()
         imported = _imported_source_paths()
 
+        # ⚠️ ONE QUERY, NOT TWO. ``_tracked_monitoring_folders()`` and the
+        # tracked_releases loop below both called
+        # ``get_active_releases_with_progress()`` — the same aggregate, twice,
+        # per request, on an endpoint that is already the slowest one on the
+        # page. Fetch once and derive both shapes.
         tracked_releases: dict[str, dict[str, Any]] = {}
+        tracked: set[str] = set()
         try:
             for release in get_active_releases_with_progress():
                 folder = release.get("monitoring_folder_path") or release.get("monitoring_folder")
-                if folder:
-                    tracked_releases[os.path.normpath(str(folder))] = release
+                if not folder:
+                    continue
+                key = os.path.normpath(str(folder))
+                tracked.add(key)
+                tracked_releases[key] = release
         except Exception as exc:
-            logger.debug("Tracked-release detail load failed", error=str(exc))
+            logger.debug("Tracked-release load failed", error=str(exc))
 
         try:
             from db.repositories.folder_match_repository import get_all_folder_matches
@@ -579,11 +659,22 @@ def get_unmatched_folders() -> dict[str, Any]:
             match_rows = {}
 
         folders = []
-        # Deadline for tag reading — see _METADATA_READ_BUDGET_SECONDS. Past it,
-        # files are grouped from their NAMES so the endpoint always answers.
+        # ⚠️ ONE DEADLINE FOR THE WHOLE SCAN. The tag budget below used to be the
+        # only bound, and it covered only mutagen — the directory walk that
+        # dominates on a network mount ran unbounded. Both now share this clock,
+        # so the request always answers inside the client's timeout.
+        _scan_deadline = time.monotonic() + _FOLDERS_SCAN_BUDGET_SECONDS
         _metadata_deadline = time.monotonic() + _METADATA_READ_BUDGET_SECONDS
         _tags_truncated = False
-        for full, entry in _iter_matched_folder_candidates(downloads_dir, archive_dir):
+        _scan_truncated = False
+        for full, entry in _iter_matched_folder_candidates(
+            downloads_dir, archive_dir, deadline=_scan_deadline
+        ):
+            # Past the scan budget: stop starting new folders rather than
+            # returning nothing. The list below is complete for what was walked.
+            if time.monotonic() >= _scan_deadline:
+                _scan_truncated = True
+                break
             _norm_full = os.path.normpath(full)
             _tracked_release = tracked_releases.get(_norm_full)
             _is_tracked = _norm_full in tracked
@@ -652,6 +743,13 @@ def get_unmatched_folders() -> dict[str, Any]:
             )
         )
 
+        if _scan_truncated:
+            logger.info(
+                "Folders scan hit its wall-time budget — returning a partial list",
+                budget_seconds=_FOLDERS_SCAN_BUDGET_SECONDS,
+                folders=len(folders),
+            )
+
         return {
             "success": True,
             "count": len(folders),
@@ -660,6 +758,11 @@ def get_unmatched_folders() -> dict[str, Any]:
             # correct, but any group derived from a NAME rather than tags may be
             # approximate. The UI says so instead of presenting a guess as fact.
             "tags_truncated": _tags_truncated,
+            # ⚠️ True when the WALK ran out of time. Distinct from
+            # ``tags_truncated``: this one means folders are missing from the
+            # list entirely, not merely named from their filenames. Reporting it
+            # stops a partial list from reading as "these are all your folders".
+            "truncated": _scan_truncated,
         }
     except Exception as exc:
         logger.error("Error getting unmatched folders", error=str(exc), exc_info=True)

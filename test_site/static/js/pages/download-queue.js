@@ -670,6 +670,12 @@
 
     const stats = pData.queue_stats || {};
     const statLine = [];
+    // ⚠️ LABELS MUST MATCH THE PILLS. This line used to be built from
+    // `stats.queued` (rows literally in status='queued'), while the pill above
+    // read ACTIVE_SECTION minus 'downloading'. On a queue with local-disk and
+    // pending-release rows the two read "64 queued" and "145 Queued" for the
+    // same queue. The server now sends the same figure in `queued`, and
+    // `queued_raw` carries the narrow count for diagnostics.
     if (stats.queued != null) statLine.push(`${Number(stats.queued)} queued`);
     if (stats.downloading != null) statLine.push(`${Number(stats.downloading)} active`);
     if (stats.failed != null) statLine.push(`${Number(stats.failed)} failed`);
@@ -677,7 +683,13 @@
 
     const lines = [];
     if (pData.message) lines.push(esc(pData.message));
-    if (statLine.length) lines.push(`<span class="text-muted">${statLine.join(' · ')}</span>`);
+    if (statLine.length) {
+      const raw = stats.queued_raw;
+      const title = raw != null && Number(raw) !== Number(stats.queued)
+        ? ` title="Queued includes searching/processing/pending rows; ${Number(raw)} are waiting for a first search"`
+        : '';
+      lines.push(`<span class="text-muted"${title}>${statLine.join(' · ')}</span>`);
+    }
     content.innerHTML = lines.join('<br>');
 
     if (restarting) {

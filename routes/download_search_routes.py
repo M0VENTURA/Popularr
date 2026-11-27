@@ -16,6 +16,7 @@ from db.repositories.queue import update_queue_item
 from db.repositories.search_logs import log_slskd_search
 from helpers.config_helpers import get_config, get_search_quality_config
 from helpers.logging_config import log_queue, log_search
+from services.downloads import manual_search_priority
 from services.downloads.slskd_service import SlskdService, rank_search_results
 
 logger = structlog.get_logger(__name__)
@@ -187,6 +188,18 @@ async def slskd_search() -> Any:
             pass
 
         started = time.time()
+        # ⚠️ TELL THE QUEUE WORKER A HUMAN IS WAITING.
+        #
+        # slskd serves ONE search at a time and the worker holds it almost
+        # continuously (one search per track, 35-145 s, next cycle immediately).
+        # Without this the interactive search races a job that never pauses —
+        # the reported "search slot did not free up", which used to wait. The
+        # worker checks this flag before each search and stands aside.
+        try:
+            await asyncio.to_thread(manual_search_priority.claim_priority, query)
+        except Exception:
+            pass
+
         search_id = await asyncio.to_thread(slskd_service.start_search, query, 20)
 
         if search_id:
@@ -216,6 +229,11 @@ async def slskd_search() -> Any:
             query=query,
             web_url=web_url,
         )
+        # Do not leave the queue standing aside for a search that never started.
+        try:
+            await asyncio.to_thread(manual_search_priority.release_priority)
+        except Exception:
+            pass
         return jsonify({
             "error": (
                 "slskd did not accept the search. It is either busy with another "
@@ -372,6 +390,7 @@ def slskd_search_results(search_id: str) -> Any:
         # serialiser on the busiest corrections path. Decide under the lock,
         # log outside it.
         _log_now: list[tuple[str, str]] = []
+        _finished = False
         with _manual_search_lock:
             state_entry = _manual_search_state.get(search_id)
             if state_entry is not None:
@@ -389,6 +408,18 @@ def slskd_search_results(search_id: str) -> Any:
                     state_entry["_terminal_seen"] = _term_count
                     if _term_count >= 2 or count > 0:
                         _manual_search_state.pop(search_id, None)
+                        _finished = True
+
+        # ⚠️ RELEASE THE SLOT CLAIM AS SOON AS THE SEARCH IS DONE.
+        # It expires on its own, but holding it for the full window would park
+        # the queue for a search that has already finished.
+        if _finished:
+            # This handler is a plain ``def`` (Quart runs it in the threadpool),
+            # so the release is a direct call — no await and no to_thread.
+            try:
+                manual_search_priority.release_priority()
+            except Exception:
+                pass
 
         for _q, _notes in _log_now:
             _log_manual_search_event(

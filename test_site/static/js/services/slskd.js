@@ -80,7 +80,19 @@
   /** Terminal-but-empty polls to tolerate before declaring "no results". */
   const TERMINAL_GRACE_POLLS = 8;
   const SLOT_RETRY_INTERVAL_MS = 2000;
-  const SLOT_MAX_RETRIES = 30;
+  /**
+   * How long to wait for the queue worker to give up the search slot.
+   *
+   * ⚠️ 30 ATTEMPTS x 2 s = 60 s, and ONE queue search can run 145 s — so this
+   * was timing out by arithmetic, not because the slot was stuck. That is the
+   * reported "Search slot did not free up", which used to wait.
+   *
+   * The worker now yields explicitly (it reads a priority claim the search
+   * route writes), so the wait is normally one queue search at most. 90
+   * attempts x 2 s = 3 minutes covers the longest single search plus the
+   * hand-off.
+   */
+  const SLOT_MAX_RETRIES = 90;
 
   /**
    * Per-request timeouts.
@@ -269,12 +281,14 @@
       }
       try {
         await global.poller.until(
-          () => global.api.getJson(SLOT_ENDPOINT),
+          () => global.api.getJson(SLOT_ENDPOINT, { timeoutMs: POLL_TIMEOUT_MS }),
           (slot) => slot && slot.slotFree,
           {
             interval: SLOT_RETRY_INTERVAL_MS,
             maxAttempts: SLOT_MAX_RETRIES,
-            timeoutMessage: 'Soulseek search slot did not free up. Try again shortly.',
+            timeoutMessage:
+              'Soulseek search slot stayed busy for 3 minutes. The queue worker '
+              + 'should have yielded — check that slskd is responding.',
           }
         );
       } catch (error) {
