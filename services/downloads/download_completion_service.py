@@ -1946,9 +1946,11 @@ def persist_import_metadata(queue_id: Any, target_path: str) -> bool:
         item = get_queue_item(int(queue_id)) or {}
         if not item:
             return False
-        return bool(
+        outcome = bool(
             _apply_stored_metadata(dict(item), str(target_path), allow_insert=True)
         )
+        _apply_album_lookup_skip_intent(item)
+        return outcome
     except Exception as exc:
         logger.debug(
             "Could not persist import metadata",
@@ -1957,6 +1959,43 @@ def persist_import_metadata(queue_id: Any, target_path: str) -> bool:
             error=str(exc),
         )
         return False
+
+
+def _apply_album_lookup_skip_intent(item: dict[str, Any]) -> None:
+    """Apply an "import as album" skip-lookup intent now that tracks exist.
+
+    The Exportify "import as album" path queues rows with
+    ``metadata.album_lookup_skip = true``. The setter (``set_album_lookup_skip``)
+    is an ``UPDATE tracks`` scoped to the album, so it can only run once the
+    imported file's ``tracks`` row exists — which is exactly here, after
+    ``_apply_stored_metadata`` has inserted/updated it. Without this, the album
+    would be MB/Discogs-searched even though the user asked not to.
+    """
+    try:
+        raw = item.get("metadata")
+        if isinstance(raw, str):
+            import json as _json
+
+            raw = _json.loads(raw or "{}")
+        if not isinstance(raw, dict) or not raw.get("album_lookup_skip"):
+            return
+        album = str(item.get("album") or "").strip()
+        if not album:
+            return
+        album_artist = str(
+            item.get("album_artist") or item.get("artist") or ""
+        ).strip()
+        if not album_artist:
+            return
+        from services.metadata.album_lookup_skip_service import set_album_lookup_skip
+
+        set_album_lookup_skip(album_artist, album, True)
+    except Exception as exc:
+        logger.debug(
+            "Could not apply the album lookup-skip intent",
+            queue_id=item.get("id"),
+            error=str(exc),
+        )
 
 
 def _resolve_track_id_for_import(

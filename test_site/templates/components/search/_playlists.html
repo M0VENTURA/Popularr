@@ -49,23 +49,49 @@
     <form id="csvForm" onsubmit="importPlaylistFromCSV(event)">
       <div class="row g-3">
         <div class="col-12">
+          <label class="form-label d-block">What should this CSV become?</label>
+          <div class="btn-group" role="group" aria-label="Import mode">
+            <input type="radio" class="btn-check" name="csvMode" id="csvModePlaylist" value="playlist" checked>
+            <label class="btn btn-outline-success btn-sm" for="csvModePlaylist">
+              <i class="bi bi-music-note-list"></i> Playlist (match my library)
+            </label>
+            <input type="radio" class="btn-check" name="csvMode" id="csvModeAlbum" value="album">
+            <label class="btn btn-outline-primary btn-sm" for="csvModeAlbum">
+              <i class="bi bi-collection"></i> Album (download every track)
+            </label>
+          </div>
+          <small class="text-muted d-block mt-1" id="csvModeHint">
+            Playlist mode matches each CSV track against your library and builds a Navidrome playlist.
+          </small>
+          <small class="text-muted d-block mt-1" id="csvAlbumHint" style="display:none;">
+            Album mode queues every track into the download queue as ONE new album. A single-artist
+            CSV becomes that artist's album; mixed artists become <strong>Various Artists</strong>.
+            "Do not search album release" is applied automatically, and tracks already in your
+            collection are copied instead of downloaded.
+          </small>
+        </div>
+        <div class="col-12">
           <label for="csvFile" class="form-label">CSV File</label>
           <input type="file" id="csvFile" class="form-control" accept=".csv" required />
           <small class="text-muted">
             <i class="bi bi-info-circle"></i>
-            Only Exportify-exported CSVs are supported. The file must contain at least
-            <code>Track Name</code> and <code>Artist Name(s)</code> columns.
+            Exportify CSVs work as-is. Manual CSVs are fine too — only
+            <code>Track Name</code> and <code>Artist Name(s)</code> are required.
           </small>
         </div>
         <div class="col-12 col-md-6">
-          <label for="csvPlaylistName" class="form-label">Playlist Name</label>
+          <label for="csvPlaylistName" class="form-label">Playlist / Album Name</label>
           <input type="text" id="csvPlaylistName" class="form-control" placeholder="e.g., My Exported Playlist" required />
         </div>
         <div class="col-12 col-md-6">
           <label for="csvPlaylistDescription" class="form-label">Description (optional)</label>
           <input type="text" id="csvPlaylistDescription" class="form-control" placeholder="e.g., Imported from Exportify CSV" />
         </div>
-        <div class="col-12 col-md-6">
+        <div class="col-12 col-md-6" id="csvAlbumNameWrap" style="display:none;">
+          <label for="csvAlbumName" class="form-label">Album name (optional)</label>
+          <input type="text" id="csvAlbumName" class="form-control" placeholder="Defaults to the name above" />
+        </div>
+        <div class="col-12 col-md-6" id="csvTargetUserWrap">
           <label for="csvTargetUser" class="form-label">Assign to User</label>
           <select id="csvTargetUser" class="form-select">
             {% if navidrome_users %}
@@ -79,12 +105,46 @@
         </div>
         <div class="col-12">
           <button type="submit" class="btn btn-primary">
-            <i class="bi bi-upload"></i> Import Playlist
+            <i class="bi bi-upload"></i> <span id="csvSubmitLabel">Import Playlist</span>
           </button>
           <span id="csvImportStatus" class="ms-2 text-muted"></span>
         </div>
       </div>
     </form>
+
+    <details class="mt-3">
+      <summary class="text-muted small"><i class="bi bi-table"></i> CSV column guide (Exportify &amp; manual)</summary>
+      <div class="mt-2 small text-muted">
+        <p class="mb-1">Columns are matched by name, case-insensitively. Only two are required:</p>
+        <ol class="mb-2">
+          <li><code>Track Name</code> (also accepts <code>Name</code>, <code>Title</code>)</li>
+          <li><code>Artist Name(s)</code> (also accepts <code>Artist</code>, <code>Artists</code>)</li>
+        </ol>
+        <p class="mb-1">Optional columns that improve matching, album import and duration checks:</p>
+        <table class="table table-sm table-borderless mb-0" style="max-width: 640px;">
+          <tbody>
+            <tr><td><code>Album Name</code></td><td>Album / <code>Album</code> — used for album grouping and matching.</td></tr>
+            <tr><td><code>Album Artist</code></td><td><code>Album Artist</code> — decides single-artist vs Various Artists.</td></tr>
+            <tr><td><code>Duration (ms)</code></td><td>Milliseconds — enables the library-copy check and length verification. Plain <code>duration</code> is treated as milliseconds.</td></tr>
+            <tr><td><code>ISRC</code></td><td>Exact library match where available.</td></tr>
+            <tr><td><code>Release Date</code></td><td>Year for the imported album.</td></tr>
+            <tr><td><code>Genres</code></td><td>Carried into the queue metadata.</td></tr>
+            <tr><td><code>Track URI</code></td><td>Spotify id (Exportify) — kept for reference.</td></tr>
+          </tbody>
+        </table>
+        <p class="mb-0">Any other Exportify columns (Danceability, Energy, Tempo…) are ignored.</p>
+      </div>
+    </details>
+  </div>
+</div>
+
+<!-- Album import summary -->
+<div id="albumSummarySection" style="display: none;">
+  <div class="alert alert-success" role="alert">
+    <h5 class="alert-heading"><i class="bi bi-check-circle"></i> Album queued</h5>
+    <p class="mb-1" id="albumSummaryText"></p>
+    <p class="mb-0 small">The download queue will fetch these tracks, copy any you already own, and
+      import them as one album. "Do not search album release" is set automatically once they import.</p>
   </div>
 </div>
 
@@ -161,16 +221,15 @@
         <h5 class="mb-0"><i class="bi bi-exclamation-circle-fill text-warning"></i> Missing Tracks</h5>
         <small class="text-muted d-block mt-2">Tracks not found in your library</small>
       </div>
-      {#
-        REMOVED: <button onclick="searchMissingTracks()">Search Missing Tracks</button>
-
-        Same story as openAddTrackModal above — `searchMissingTracks` is not
-        defined in any JS file in either tree, so the button could never do
-        anything. It was also permanently `display: none` because the only code
-        that would have revealed it was the function that does not exist.
-      #}
+      <button class="btn btn-sm btn-warning" onclick="downloadMissingPlaylistTracks()" id="downloadMissingBtn">
+        <i class="bi bi-download"></i> Download Missing
+      </button>
     </div>
     <div class="card-body">
+      <p class="text-muted small mb-2">
+        Downloads each missing track under its own artist and album. Once they import, click
+        <strong>Create Playlist</strong> again to add them to the playlist.
+      </p>
       <div id="missingTracksContainer" style="max-height: 500px; overflow-y: auto;"></div>
     </div>
   </div>

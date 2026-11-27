@@ -151,4 +151,14 @@
 <script src="{{ versioned_static('js/pages/soulseek-search.js') }}"></script>
 <script src="{{ versioned_static('js/pages/download-queue.js') }}"></script>
 <script src="{{ versioned_static('js/pages/discarded-downloads.js') }}"></script>
+{#
+  The Playlist Downloads panel (components/search/_playlists.html) is included
+  on this page, so its controller MUST load here too — otherwise
+  ``importPlaylistFromCSV`` / ``createPlaylist`` / ``downloadMissingTracks`` are
+  undefined and every button in the panel is inert. state/import-state.js owns
+  currentImportData/missingTracksForSearch and MUST precede both consumers.
+#}
+<script src="{{ versioned_static('js/state/import-state.js') }}"></script>
+<script src="{{ versioned_static('js/features/csv-import.js') }}"></script>
+<script src="{{ versioned_static('js/pages/playlist.js') }}"></script>
 {% endblock %}

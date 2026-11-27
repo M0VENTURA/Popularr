@@ -242,18 +242,27 @@ def insert_queue_item(
         _status = str(kwargs.get("status") or "queued")
         if str(kwargs.get("source") or "soulseek").lower() in ("local", "discovered"):
             _status = "unmatched"
-            
+
+        # ⭐ ``metadata`` carries row-scoped INTENT that has no column of its own.
+        # The Exportify "import as album" path stores ``album_lookup_skip`` here so
+        # the flag can be applied to the ``tracks`` rows once they exist (the
+        # setter is an UPDATE on tracks, and the album has none before import).
+        # The release path already writes its album-scoped MB fields here too.
+        _metadata = kwargs.get("metadata")
+        if isinstance(_metadata, dict):
+            _metadata = json.dumps(_metadata)
+
         result = session.execute(
             text("""
                 INSERT INTO download_queue
                     (artist, title, album, source, priority, track_number, disc_number,
                      album_artist, year, release_id, release_mbid, recording_mbid,
                      musicbrainz_releasegroupid, replace_track_id, duration, import_group, import_type,
-                     status, file_path, found_filename, created_at, updated_at)
+                     status, file_path, found_filename, metadata, created_at, updated_at)
                 VALUES (:artist, :title, :album, :source, :priority, :track_number, :disc_number,
                         :album_artist, :year, :release_id, :release_mbid, :recording_mbid,
                         :musicbrainz_releasegroupid, :replace_track_id, :duration, :import_group, :import_type,
-                        :status, :file_path, :found_filename,
+                        :status, :file_path, :found_filename, :metadata,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 RETURNING id
             """),
@@ -275,6 +284,7 @@ def insert_queue_item(
                 "status": _status,
                 "file_path": kwargs.get("file_path"),
                 "found_filename": kwargs.get("found_filename"),
+                "metadata": _metadata,
             },
         )
         new_id = result.scalar()

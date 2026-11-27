@@ -207,6 +207,7 @@ def queue_add(payload: Dict[str, Any]) -> Dict[str, Any]:
         duration=payload.get("duration") or None,
         import_group=payload.get("import_group") or None,
         import_type=payload.get("import_type") or None,
+        metadata=payload.get("metadata") or None,
     )
 
 
@@ -237,6 +238,7 @@ def queue_add_batch(data: Dict[str, Any]) -> Dict[str, Any]:
             duration=item.get("duration"),
             import_group=item.get("import_group") or data.get("import_group"),
             import_type=item.get("import_type") or data.get("import_type"),
+            metadata=item.get("metadata"),
         )
         results.append(result)
         if result.get("already_queued"):

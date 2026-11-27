@@ -736,6 +736,54 @@
     });
   }
 
+  // ── Database cleanup (safe prune) ───────────────────────────────────────
+  function _renderDbCleanup(data, ran) {
+    const el = document.getElementById('dbCleanupResult');
+    if (!el) return;
+    if (!data || data.success === false) {
+      el.innerHTML = `<span class="text-danger">${esc(data && data.error ? data.error : 'Cleanup failed')}</span>`;
+      return;
+    }
+    if (ran) {
+      const r = data.removed || {};
+      el.innerHTML = `<span class="text-success">Removed ${r.orphan_album_art || 0} orphaned artwork row(s) and `
+        + `${r.queue_tombstones || 0} old queue row(s).</span>`;
+    } else {
+      el.innerHTML = `<span class="text-muted">Would remove ${data.orphan_album_art || 0} orphaned artwork row(s) and `
+        + `${data.queue_tombstones || 0} queue row(s) older than ${data.tombstone_days || 30} days.</span>`;
+    }
+  }
+
+  function previewDbCleanup(event) {
+    const button = event && event.currentTarget;
+    return global.buttonState.withBusy(button, 'Checking…', async () => {
+      try {
+        const data = await global.api.getJson('/api/maintenance/cleanup');
+        _renderDbCleanup(data, false);
+      } catch (error) {
+        global.toast.error(error.message);
+      }
+    });
+  }
+
+  function runDbCleanup(event) {
+    const button = event && event.currentTarget;
+    return global.buttonState.withBusy(button, 'Cleaning…', async () => {
+      try {
+        const data = await global.api.postJson('/api/maintenance/cleanup', {
+          dry_run: false,
+          orphan_album_art: true,
+          queue_tombstones: true,
+          tombstone_days: 30,
+        });
+        _renderDbCleanup(data, true);
+        if (global.toast.success) global.toast.success('Database cleanup complete');
+      } catch (error) {
+        global.toast.error(error.message);
+      }
+    });
+  }
+
   // ── Upcoming releases ───────────────────────────────────────────────────
   //
   // REMOVED 2026-11-26. This page rendered its OWN copy of the upcoming
@@ -803,6 +851,8 @@
   global.renderUnmatchedFolders = renderUnmatchedFolders;
   global.discoverFiles = discoverFiles;
   global.processAlbums = processAlbums;
+  global.previewDbCleanup = previewDbCleanup;
+  global.runDbCleanup = runDbCleanup;
   global.refreshUpcomingReleasesMonitor = refreshUpcomingReleases;
   global.checkForUpdatesMonitor = checkForUpdates;
 })(window);

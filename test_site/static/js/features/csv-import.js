@@ -47,6 +47,8 @@
   global._trackPayloads = trackPayloads;
 
   let payloadIndex = 0;
+  // The last import response, so "Download Missing" can act without a re-upload.
+  let lastImportData = null;
 
   function storePayload(payload) {
     const id = payloadIndex++;
@@ -57,6 +59,27 @@
 
   function esc(value) {
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
+  }
+
+  function selectedMode() {
+    const album = document.getElementById('csvModeAlbum');
+    return album && album.checked ? 'album' : 'playlist';
+  }
+
+  /** Show the album-name field only in album mode, and relabel the submit button. */
+  function syncModeUi() {
+    const mode = selectedMode();
+    const albumWrap = document.getElementById('csvAlbumNameWrap');
+    const userWrap = document.getElementById('csvTargetUserWrap');
+    const playlistHint = document.getElementById('csvModeHint');
+    const albumHint = document.getElementById('csvAlbumHint');
+    const label = document.getElementById('csvSubmitLabel');
+    if (albumWrap) albumWrap.style.display = mode === 'album' ? '' : 'none';
+    // A playlist is per-user; an album queue is not.
+    if (userWrap) userWrap.style.display = mode === 'album' ? 'none' : '';
+    if (playlistHint) playlistHint.style.display = mode === 'album' ? 'none' : '';
+    if (albumHint) albumHint.style.display = mode === 'album' ? '' : 'none';
+    if (label) label.textContent = mode === 'album' ? 'Import Album' : 'Import Playlist';
   }
 
   /**
@@ -70,14 +93,17 @@
     const playlistName = document.getElementById('csvPlaylistName').value.trim();
     const playlistDescription = document.getElementById('csvPlaylistDescription').value.trim();
     const targetUser = document.getElementById('csvTargetUser').value.trim();
+    const albumNameEl = document.getElementById('csvAlbumName');
+    const albumName = albumNameEl ? albumNameEl.value.trim() : '';
+    const mode = selectedMode();
     const statusEl = document.getElementById('csvImportStatus');
 
     if (!fileInput.files.length || !playlistName) {
-      global.toast.warning('Please select a CSV file and enter a playlist name');
+      global.toast.warning('Please select a CSV file and enter a name');
       return;
     }
 
-    statusEl.textContent = 'Importing…';
+    statusEl.textContent = mode === 'album' ? 'Queueing album…' : 'Importing…';
     statusEl.className = 'ms-2 text-secondary';
 
     const formData = new FormData();
@@ -85,6 +111,8 @@
     formData.append('playlist_name', playlistName);
     formData.append('playlist_description', playlistDescription);
     formData.append('target_user', targetUser);
+    formData.append('mode', mode);
+    if (albumName) formData.append('album_name', albumName);
 
     try {
       // FormData must NOT get a Content-Type header — the browser sets the
@@ -95,6 +123,13 @@
         body: formData,
       });
       const data = await global.api.parseJsonResponse(response, 'CSV import');
+
+      if (data && data.mode === 'album') {
+        displayAlbumResult(data);
+        statusEl.textContent = 'Album queued';
+        statusEl.className = 'ms-2 text-success';
+        return;
+      }
 
       // One call replaces the two separate assignments; import-state.js
       // derives missingTracksForSearch from the response.
@@ -111,15 +146,43 @@
       document.getElementById('errorSection').style.display = 'block';
       document.getElementById('errorMessage').textContent = error.message;
       document.getElementById('resultsSection').style.display = 'none';
+      const albumSection = document.getElementById('albumSummarySection');
+      if (albumSection) albumSection.style.display = 'none';
     }
+  }
+
+  function displayAlbumResult(data) {
+    const text = document.getElementById('albumSummaryText');
+    if (text) {
+      const comp = data.is_compilation ? ' (Various Artists)' : '';
+      text.textContent =
+        `"${data.album}" by ${data.album_artist}${comp} — ` +
+        `${data.queued} queued, ${data.skipped} already queued, ${data.failed} failed ` +
+        `of ${data.total}.`;
+    }
+    const albumSection = document.getElementById('albumSummarySection');
+    if (albumSection) albumSection.style.display = 'block';
+    const results = document.getElementById('resultsSection');
+    if (results) results.style.display = 'none';
+    const errSection = document.getElementById('errorSection');
+    if (errSection) errSection.style.display = 'none';
+  }
+
+  function fmtDuration(seconds) {
+    const total = Math.round(Number(seconds));
+    if (!Number.isFinite(total) || total <= 0) return '';
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
   }
 
   function buildTrackRow(track, options = {}) {
     const actions = options.actionsHtml || '';
+    const dur = fmtDuration(track.duration_s);
     return `
       <div class="track-row"${options.pid !== undefined ? ` data-pid="${esc(options.pid)}"` : ''}>
         <div class="track-info">
-          <div class="track-title">${esc(track.title)}</div>
+          <div class="track-title">${esc(track.title)}${dur ? ` <span class="text-muted small">${esc(dur)}</span>` : ''}</div>
           <div class="track-artist">${esc(track.artist)}</div>
           <div class="track-album">${esc(track.album || 'Unknown Album')}</div>
         </div>
@@ -128,10 +191,65 @@
   }
 
   /**
+   * Queue every missing track under its OWN artist and album.
+   *
+   * RECOMMENDATION (asked which is cleaner): for a PLAYLIST export, a missing
+   * track belongs on its real album, not forced into one artificial album — a
+   * playlist spans many artists and releases. Each track therefore queues as a
+   * normal single with its own album/artist from the CSV. (Album mode is the
+   * opposite by design: everything becomes one album.)
+   *
+   * Each queued row carries its CSV duration, so a track you already own is
+   * COPIED from your library rather than downloaded (the copy gate needs a known
+   * length to verify).
+   */
+  async function downloadMissingPlaylistTracks() {
+    const missing = (lastImportData && lastImportData.missing_tracks) || [];
+    if (!missing.length) {
+      global.toast.info && global.toast.info('Nothing is missing — every track is in your library.');
+      return;
+    }
+    const btn = document.getElementById('downloadMissingBtn');
+    const run = async () => {
+      const group = ((lastImportData.playlist_name || 'playlist')
+        .replace(/\s+/g, '_').replace(/[^A-Za-z0-9_]/g, '').slice(0, 80)) || 'playlist';
+      const items = missing.map((t) => ({
+        artist: t.artist || '',
+        title: t.title || '',
+        album: t.album || '',
+        album_artist: t.album_artist || t.artist || '',
+        duration: t.duration_s || null,
+        year: t.year || null,
+        source: 'soulseek',
+        import_type: 'song',
+      })).filter((t) => t.title);
+      if (!items.length) return;
+      const data = await global.api.postJson('/api/queue/add-batch', {
+        items,
+        import_group: group,
+        import_type: 'song',
+        source: 'soulseek',
+      });
+      const added = (data && data.added) || 0;
+      const skipped = (data && data.skipped) || 0;
+      if (global.toast.queued) global.toast.queued(`${added} missing track(s)`);
+      else global.toast.success && global.toast.success(`Queued ${added} track(s)`);
+      if (skipped) {
+        global.toast.info && global.toast.info(`${skipped} were already in the queue.`);
+      }
+    };
+    if (btn && global.buttonState && global.buttonState.withBusy) {
+      return global.buttonState.withBusy(btn, 'Queueing…', run);
+    }
+    return run();
+  }
+
+  /**
    * Render the matched / missing summary for an import response.
    * @param {Object} data
    */
   function displayResults(data) {
+    lastImportData = data || null;
     const matched = data.matched_tracks || [];
     const missing = data.missing_tracks || [];
     const total = matched.length + missing.length;
@@ -194,4 +312,13 @@
 
   global.importPlaylistFromCSV = importPlaylistFromCSV;
   global.displayResults = displayResults;
+  global.downloadMissingPlaylistTracks = downloadMissingPlaylistTracks;
+
+  // Wire the mode toggle (the partial is rendered once; the listeners are
+  // idempotent and cheap).
+  const _albumRadio = document.getElementById('csvModeAlbum');
+  const _playlistRadio = document.getElementById('csvModePlaylist');
+  if (_albumRadio) _albumRadio.addEventListener('change', syncModeUi);
+  if (_playlistRadio) _playlistRadio.addEventListener('change', syncModeUi);
+  syncModeUi();
 })(window);

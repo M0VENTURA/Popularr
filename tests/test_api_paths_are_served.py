@@ -52,10 +52,6 @@ _KNOWN_BROKEN: dict[str, str] = {
     "/api/smartplaylist/create":
         "no /api/smartplaylist route exists; the served builder is "
         "/api/playlist/create",
-    "/api/playlist/create-custom":
-        "the served route is /api/playlist/create — NOT changed here because "
-        "the two may differ in payload, and guessing an endpoint for a write is "
-        "worse than leaving a dead button",
     "/api/playlist/download":
         "the served routes are /api/playlist-downloads and "
         "/api/playlist-downloads/create — same caveat as above",

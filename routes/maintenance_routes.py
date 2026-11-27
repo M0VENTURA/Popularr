@@ -21,6 +21,45 @@ logger = structlog.get_logger(__name__)
 maintenance_bp = Blueprint("maintenance", __name__)
 
 
+@maintenance_bp.route("/api/maintenance/cleanup", methods=["GET", "POST"])
+async def api_database_cleanup() -> Any:
+    """Preview or run the SAFE "clear unused rows" cleanup.
+
+    GET  → a dry-run count of what would be removed (never writes).
+    POST → actually remove it. Body (all optional)::
+
+        {"dry_run": false, "orphan_album_art": true,
+         "queue_tombstones": true, "tombstone_days": 30}
+
+    This deliberately NEVER deletes imported/completed queue rows — they are
+    referenced by the folder-match flags, counters, heal and dedupe guards. See
+    ``services.maintenance.db_cleanup_service``.
+    """
+    from services.maintenance.db_cleanup_service import preview_cleanup, run_cleanup
+
+    bodies: dict[str, Any] = {}
+    if request.method == "POST":
+        bodies = (await request.get_json(silent=True)) or {}
+    dry_run = str(bodies.get("dry_run", request.method != "POST")).lower() in (
+        "true", "1", "yes",
+    )
+    try:
+        days = int(bodies.get("tombstone_days") or 30)
+    except (TypeError, ValueError):
+        days = 30
+    try:
+        if dry_run:
+            return jsonify(preview_cleanup(tombstone_days=days))
+        return jsonify(run_cleanup(
+            orphan_album_art=bool(bodies.get("orphan_album_art", True)),
+            queue_tombstones=bool(bodies.get("queue_tombstones", True)),
+            tombstone_days=days,
+        ))
+    except Exception as exc:
+        logger.error("Database cleanup failed", error=str(exc), exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @maintenance_bp.route("/api/maintenance/safe-shutdown", methods=["GET"])
 def api_safe_shutdown_status() -> Any:
     """Report whether it is safe to stop PostgreSQL, and why not if it is not."""

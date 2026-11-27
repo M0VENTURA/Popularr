@@ -112,6 +112,7 @@ def queue_env(monkeypatch):
                 recording_mbid TEXT, musicbrainz_releasegroupid TEXT,
                 replace_track_id TEXT,
                 import_group TEXT, import_type TEXT,
+                metadata TEXT,
                 file_path TEXT, found_filename TEXT,
                 created_at TEXT, updated_at TEXT
             )

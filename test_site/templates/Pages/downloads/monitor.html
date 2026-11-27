@@ -97,8 +97,31 @@
           <div id="unmatchedFoldersList"></div>
         </div>
       </div>
-    </div>
 
+      {# Database cleanup — safe prune of orphaned album art + old queue tombstones #}
+      <div class="card shadow-sm mt-4" id="dbCleanupCard">
+        <div class="card-header bg-dark border-secondary d-flex align-items-center justify-content-between py-3 gap-2 flex-wrap">
+          <h5 class="card-title mb-0 fw-bold"><i class="bi bi-database-x text-secondary me-2"></i>Database Cleanup</h5>
+          <div class="d-flex align-items-center gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="dbCleanupPreviewBtn" onclick="previewDbCleanup(this)">
+              <i class="bi bi-search"></i> Preview
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-danger" id="dbCleanupRunBtn" onclick="runDbCleanup(this)">
+              <i class="bi bi-trash"></i> Clean up
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="text-muted small mb-1">
+            Removes album artwork whose album is no longer in the library, and queue rows that were
+            cancelled / removed / deleted more than 30 days ago. Imported and completed downloads are
+            always kept — they power the folder-match and dedupe logic.
+          </p>
+          <div id="dbCleanupResult" class="small"></div>
+        </div>
+      </div>
+    </div>
+  
     {# Tab 2: Soulseek Search #}
     <div class="tab-pane fade" id="soulseek" role="tabpanel" aria-labelledby="soulseek-tab">
       {% include 'components/search/_soulseek.html' %}

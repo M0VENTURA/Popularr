@@ -327,14 +327,11 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     ("downloads/queue.html", "saveComprehensiveEditedTrack"): (
         "Same _track_edit.html sharing problem."
     ),
-    ("downloads/queue.html", "importPlaylistFromCSV"): (
-        "_playlists.html is shared with downloads/search.html, which DOES load "
-        "features/csv-import.js. Loading it here would pull in that whole page."
-    ),
-    ("downloads/queue.html", "createPlaylist"): (
-        "publishes global.createPlaylist from pages/playlist.js, which does "
-        "not declare its top-level state safely enough to load on this page."
-    ),
+    # ✅ REMOVED 2026-11-26: ("downloads/queue.html", "importPlaylistFromCSV")
+    # and ("downloads/queue.html", "createPlaylist"). The page includes
+    # _playlists.html and now loads state/import-state.js + features/csv-import.js
+    # + pages/playlist.js, so every button in the Playlist Downloads panel
+    # resolves there too.
 }
 
 

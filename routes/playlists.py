@@ -202,12 +202,105 @@ async def api_playlist_import():
 # CSV IMPORT (Exportify → parse → queue-ready)
 # --------------------------------------------------
 
+def _queue_csv_tracks_as_album(tracks: list[dict], album_name: str) -> dict:
+    """Queue every CSV track as ONE new album and return a summary.
+
+    Requested: *"For the album creation. It should add all items to the download
+    queue, and add them as a new album under either an artist (if it's a single
+    artist) or Various Artists (if it's a compilation). The setting to not search
+    album release should automatically be ticked when the album is created."*
+
+    The album artist is a SINGLE value for the whole group (that is what makes it
+    one album), so it is decided here rather than per row:
+      * every track credits the SAME non-generic artist  -> that artist
+      * anything else (mixed artists, or a "Various Artists" credit) -> Various Artists
+
+    Each row keeps its own ``artist`` (the performer) so the queue searches for the
+    right recording; ``album``/``album_artist`` are forced to the one album. Rows
+    carry ``metadata.album_lookup_skip`` so the "Do not search album release" flag
+    is applied once the imported files create their ``tracks`` rows
+    (``persist_import_metadata``), which is the earliest it can exist.
+    """
+    import re as _re
+
+    from helpers.config_helpers import _GENERIC_COMPILATION_ARTISTS
+    from services.queue.queue_processing_service import queue_add_batch
+
+    def _norm(value: str) -> str:
+        return _re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+    credits = []
+    for track in tracks:
+        credit = str(track.get("album_artist") or track.get("artist") or "").strip()
+        if credit:
+            credits.append(credit)
+    distinct = {_norm(c) for c in credits}
+    if len(distinct) == 1:
+        only = credits[0]
+        if _norm(only) not in _GENERIC_COMPILATION_ARTISTS:
+            album_artist = only
+            is_compilation = False
+        else:
+            album_artist = "Various Artists"
+            is_compilation = True
+    else:
+        album_artist = "Various Artists"
+        is_compilation = True
+
+    slug = (_re.sub(r"[^A-Za-z0-9]+", "_", album_name).strip("_")[:80]) or "import"
+    items = []
+    for index, track in enumerate(tracks, start=1):
+        artist = str(track.get("artist") or "").strip()
+        title = str(track.get("title") or "").strip()
+        if not title:
+            continue
+        items.append({
+            "artist": artist or album_artist,
+            "title": title,
+            "album": album_name,
+            "album_artist": album_artist,
+            "track_number": index,
+            "duration": track.get("duration_s"),
+            "year": track.get("year"),
+            "source": "soulseek",
+            "import_type": "song",
+            "import_group": slug,
+            "metadata": {
+                "album_lookup_skip": True,
+                "track_artist": artist or album_artist,
+                "album_artist": album_artist,
+                "release_title": album_name,
+            },
+        })
+
+    result = queue_add_batch({
+        "items": items,
+        "import_group": slug,
+        "import_type": "song",
+        "source": "soulseek",
+    })
+    logging.info(
+        "CSV album import '%s' (%s): %d queued, %d skipped, %d failed",
+        album_name, album_artist,
+        result.get("added", 0), result.get("skipped", 0), result.get("failed", 0),
+    )
+    return {
+        "success": True,
+        "mode": "album",
+        "album": album_name,
+        "album_artist": album_artist,
+        "is_compilation": is_compilation,
+        "total": len(items),
+        "queued": result.get("added", 0),
+        "skipped": result.get("skipped", 0),
+        "failed": result.get("failed", 0),
+        "import_group": slug,
+    }
+
+
 @playlists_bp.route("/api/playlist/import/csv", methods=["POST"])
 async def api_playlist_import_csv():
     """Import a playlist from an Exportify-exported CSV file (multipart).
-
-    Form fields:
-        file                 – CSV file (required)
         playlist_name        – import name (required)
         playlist_description – optional description
         target_user          – optional Navidrome user
@@ -333,6 +426,13 @@ async def api_playlist_import_csv():
                 "total": len(tracks_from_csv),
             })
 
+        # ⭐ ALBUM MODE — queue every track as one new album instead of matching
+        # against the library and building a playlist.
+        mode = str(form.get("mode") or "playlist").strip().lower()
+        if mode == "album":
+            album_name = str(form.get("album_name") or playlist_name).strip() or playlist_name
+            return jsonify(_queue_csv_tracks_as_album(tracks_from_csv, album_name))
+
         # Library matching: ISRC first, then normalised artist+title.
         from db.repositories.tracks import find_library_track
         from sqlalchemy import text as _text
@@ -427,6 +527,66 @@ async def api_playlist_import_csv():
 # --------------------------------------------------
 # CREATE (NSP FILE)
 # --------------------------------------------------
+
+@playlists_bp.route("/api/playlist/create-custom", methods=["POST"])
+async def api_playlist_create_custom():
+    """Create or update a NAVIDROME playlist from the CSV import's matched tracks.
+
+    ⚠️ THE BUTTON POINTED AT A ROUTE THAT DID NOT EXIST. ``csv-import.js``'s
+    ``createPlaylist()`` posts here, so "Create Playlist" always failed with a
+    404. It now creates (or updates in place) a real Navidrome playlist via the
+    Subsonic API, using the library track ids the import already matched.
+    """
+    data = (await request.get_json(silent=True)) or {}
+    name = str(data.get("name") or data.get("playlist_name") or "").strip()
+    user = str(data.get("user") or "").strip()
+    songs = data.get("songs") or data.get("matched_tracks") or []
+    if not name:
+        return jsonify({"success": False, "error": "Playlist name is required"}), 400
+    song_ids = [
+        str((song or {}).get("id") or "").strip()
+        for song in songs
+        if str((song or {}).get("id") or "").strip()
+    ]
+    if not song_ids:
+        return jsonify({"success": False, "error": "No matched tracks to add"}), 400
+
+    try:
+        from services.favourites_service import (
+            get_navidrome_client_for_active_user,
+            get_navidrome_client_for_user,
+        )
+        from services.playlists.playlist_navidrome_service import sync_playlist_by_name
+
+        client = (
+            get_navidrome_client_for_user(user)
+            if user else get_navidrome_client_for_active_user()
+        )
+        if client is None:
+            return jsonify({
+                "success": False,
+                "error": "No Navidrome server is configured for that user.",
+            }), 400
+
+        result = sync_playlist_by_name(client, name, song_ids)
+        if result.get("success") is False:
+            return jsonify({
+                "success": False,
+                "error": result.get("error") or "Navidrome rejected the playlist",
+            }), 502
+        return jsonify({
+            "success": True,
+            "playlist": name,
+            "track_count": len(song_ids),
+            "created": int(result.get("created") or 0),
+            "updated": int(result.get("updated") or 0),
+            "unchanged": int(result.get("unchanged") or 0),
+            "message": f"Playlist '{name}' saved with {len(song_ids)} track(s)",
+        })
+    except Exception as exc:
+        logging.error("Create custom playlist failed: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
 
 @playlists_bp.route("/api/playlist/create", methods=["POST"])
 async def api_playlist_create():
