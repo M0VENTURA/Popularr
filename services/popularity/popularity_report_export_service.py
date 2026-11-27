@@ -58,35 +58,63 @@ def _worker(job: dict[str, Any]) -> None:
         from services.popularity.popularity_report_service import (
             build_collection_popularity_report,
             ensure_playlist_index,
+            playlist_index_has_entries,
             popularity_report_filename,
         )
 
-        # The playlist column is populated by the same index the synchronous
-        # export refreshes. Failure is non-fatal: the report is the point.
-        try:
-            ensure_playlist_index()
-        except Exception as exc:
-            logger.debug("Playlist index refresh failed before report", error=str(exc))
+        # ⚠️⚠️ THE FILE IS THE POINT — DO NOT MAKE IT WAIT FOR A PLAYLIST SYNC.
+        #
+        # Reported: "collection csv seems to take a long time to complete".
+        # The playlist column is DERIVED from the index this refresh maintains,
+        # and the refresh re-fetches every playlist whose changed-stamp moved —
+        # one Navidrome round trip each (~5s per ~1,200-track playlist; the
+        # service's own note records 66 changed playlists taking 5m36s). The
+        # export sat in "pending" through ALL of it before writing a row.
+        #
+        # So: refresh only when the index is EMPTY (a first export needs it, or
+        # the column would be blank), build and publish the CSV, then bring the
+        # index up to date afterwards for the NEXT export. The column can be one
+        # export behind; it is never wrong, only older.
+        if not playlist_index_has_entries():
+            job["phase"] = "Building the playlist index (first export)…"
+            try:
+                ensure_playlist_index()
+            except Exception as exc:
+                logger.debug(
+                    "Playlist index refresh failed before report", error=str(exc)
+                )
 
         job["status"] = "running"
-        report = build_collection_popularity_report()
-        body = "\ufeff" + (report or "")
+        job["phase"] = "Building the CSV…"
+        report = build_collection_popularity_report() or ""
 
         filename = popularity_report_filename()
         filename = _UNSAFE_RE.sub("_", filename) or "popularity-report.csv"
         directory = _export_dir(job["id"])
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, filename)
+        # ⚠️ BOM and body written separately. ``"\ufeff" + report`` copied the
+        # whole multi-megabyte string just to prepend one character.
         with open(path, "w", encoding="utf-8", newline="") as handle:
-            handle.write(body)
+            handle.write("\ufeff")
+            handle.write(report)
 
         job.update({
             "status": "done",
             "path": path,
             "filename": filename,
-            "bytes": len(body.encode("utf-8")),
-            "rows": max(0, body.count("\n") - 1),
+            # Measuring the written file avoids encoding a second full copy of
+            # the CSV purely to learn its size.
+            "bytes": os.path.getsize(path),
+            "rows": max(0, report.count("\n") - 1),
         })
+
+        # Housekeeping AFTER the download is available. Failure is harmless.
+        job["phase"] = "Refreshing the playlist index…"
+        try:
+            ensure_playlist_index()
+        except Exception as exc:
+            logger.debug("Playlist index refresh after report failed", error=str(exc))
     except Exception as exc:
         logger.error("Popularity report export failed", error=str(exc))
         job.update({"status": "error", "error": str(exc)})

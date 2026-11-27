@@ -1719,6 +1719,34 @@ _NEUTRAL_STUDIO_ANNOTATIONS = frozenset({
     "single version",
     "standard version",
     "standard edition",
+    # ⚠️ "NON-ALBUM" / "BONUS TRACK" NAME NO DIFFERENT RECORDING.
+    #
+    # Reported: *"Britney Spears — (I've Just Begun) Having My Fun"* discarded as
+    # *"Different edition — the file is 'non album bonus track' but the queue
+    # item has none"*. The file was
+    #   "…/16. (I've Just Begun) Having My Fun (Non-Album Bonus Track).mp3"
+    # and the queue item (from MusicBrainz) was
+    #   "(I've Just Begun) Having My Fun (Non-album)".
+    #
+    # "Non-album" is not in the edition KEYWORD set, so the queue title yielded no
+    # annotation at all, while the file's trailing bracket yielded
+    # "non album bonus track" — and `edition_annotations_compatible` treats
+    # "one side annotated, the other plain" as a DIFFERENT edition. That rule is
+    # right for "Deluxe Edition" and "Epic Edition", which really do denote other
+    # releases (and often other masters). It is wrong here: a bonus/non-album
+    # track is the SAME recording, and the annotation only says which release it
+    # was issued on.
+    #
+    # These are folded to neutral so an annotated side compares as plain. It does
+    # NOT weaken the edition gate: deluxe / epic / remaster / live / remix all
+    # stay non-neutral and still refuse to collapse onto a plain title.
+    "non album",
+    "non album track",
+    "non album bonus track",
+    "non album bonus tracks",
+    "bonus track",
+    "bonus tracks",
+    "bonus",
     "explicit",
     "explicit version",
     "clean",

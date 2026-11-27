@@ -474,12 +474,28 @@ def _metadata_matches_queue_item(
         _tolerance = _length_tolerance_seconds()
         if _filename_confirms_title:
             _tolerance = max(_tolerance, _FILENAME_CONFIRMED_LENGTH_TOLERANCE_SECONDS)
-        if diff > _tolerance:
+        # ⚠️⚠️ COMPARE THE NUMBER THAT GETS DISPLAYED, NOT THE RAW FLOAT.
+        #
+        # Reported: *"Wrong length — the file is 4:24 but the queue item is 4:29
+        # (5.0s apart, tolerance 5s)"*, and *"they are exactly 5 sec tolerance,
+        # but 5 seconds and under should be approved"*.
+        #
+        # The verdict was `diff > tolerance` on the UNROUNDED difference while
+        # the sentence printed `round(diff, 1)`. A true gap of 5.02s therefore
+        # rounded to "5.0s" and was rejected against a "5s" tolerance — a
+        # message that contradicts itself, and a rejection for 20ms of encoder
+        # rounding that the user had explicitly said should pass.
+        #
+        # Rounding first makes the reported gap and the verdict the SAME number:
+        # anything that displays as within tolerance is accepted, and only a gap
+        # that displays as larger is rejected.
+        _reported_diff = round(float(diff), 1)
+        if _reported_diff > _tolerance:
             # The numbers the report asks for: what the file actually is, and
             # what the queue item expected.
             _reject(
                 "wrong_length",
-                length_difference_seconds=round(float(diff), 1),
+                length_difference_seconds=_reported_diff,
                 length_tolerance_seconds=_tolerance,
             )
             return False  # strong reject

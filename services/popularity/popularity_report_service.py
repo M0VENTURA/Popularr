@@ -312,6 +312,37 @@ _SOURCE_LIST_COLUMNS: frozenset[str] = frozenset({
 })
 
 
+def playlist_index_has_entries() -> bool:
+    """True when the playlist index already holds at least one row.
+
+    ⚠️ WHY THE EXPORT ASKS THIS. ``ensure_playlist_index`` re-fetches every
+    playlist whose ``changed`` stamp moved — one Navidrome round trip each, ~5s
+    per ~1,200-track playlist. A generated-playlist rebuild moves many of those
+    stamps, and the code's own note records a run of 66 changed playlists taking
+    5m36s. "Download Collection CSV" waited for ALL of that before writing a
+    single row, which is the reported "collection csv seems to take a long
+    time".
+
+    The playlist column is DERIVED — it comes from the ``playlist_entries``
+    table this index maintains. When the index already has content the export
+    can read it immediately and refresh afterwards; only a genuinely EMPTY
+    index (a first export) has to be built first, or the column would be blank.
+
+    Cheap: one primary-key-less existence probe.
+    """
+    try:
+        with db_session() as session:
+            row = session.execute(
+                text("SELECT 1 FROM playlist_entries LIMIT 1")
+            ).fetchone()
+        return bool(row)
+    except Exception as exc:
+        logger.debug("Playlist index probe failed", error=str(exc))
+        # Unknown is not "empty": assuming empty would force the full sync we
+        # are trying to avoid. The refresh still runs afterwards either way.
+        return True
+
+
 def _source_list_cell(value: Any) -> str:
     """One CSV cell for a JSONB list of source names.
 

@@ -162,8 +162,12 @@
       out.innerHTML = '<span class="text-danger">Export failed: ' + esc(job.error || 'unknown error') + '</span>';
       return;
     }
+    // ⚠️ SAY WHICH PHASE IT IS IN. The job used to spend its whole life reading
+    // "Building the CSV…" even while it was syncing playlists from Navidrome
+    // (which is the slow part), so a long wait looked like a stuck CSV build.
     out.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>'
-      + 'Building the CSV in the background… you can leave this page.';
+      + esc(job.phase || 'Building the CSV in the background…')
+      + ' you can leave this page.';
   }
 
   async function runPopularityExport() {
