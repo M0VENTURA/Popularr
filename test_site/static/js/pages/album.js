@@ -2387,7 +2387,12 @@
 
     // Payload held in a closure rather than serialised into ten data-*
     // attributes — no escaping needed and no attribute-size limits.
-    const trackArtist = String(trackComp.track_artist || trackComp.mb_artist || '').trim();
+    //
+    // ⚠️ ``trackArtist`` IS DECLARED ABOVE (with the row's badge). Redeclaring it
+    // here was a SyntaxError that killed the WHOLE file at parse time: nothing
+    // below it was defined, so every album-page section and every inline
+    // ``onclick`` handler failed ("openAlbumLookupModal is not defined"). Reuse
+    // the existing binding — do not add a second ``const``.
     const payload = {
       // The TRACK's performer, never the album's artist: on a compilation
       // pageArtist() is "Various Artists", and a queue row searched under it
