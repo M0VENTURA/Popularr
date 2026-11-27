@@ -1916,8 +1916,21 @@ def _persist_album_type_to_tracks(
         release_mbid = ""
         try:
             from services.enrichment.musicbrainz_service import resolve_release_id
-            value = resolve_release_id(release_group_mbid)
+            # ⭐ PASS THE LIBRARY'S TRACK COUNT. Without it this picked the
+            # BIGGEST edition in the group (a deluxe/bonus version), which then
+            # became the album's release id — and every missing-track comparison
+            # measured the library against tracks it was never meant to have.
+            value = resolve_release_id(
+                release_group_mbid, expected_track_count=len(tracks or []) or None
+            )
             release_mbid = str(value or "").strip()
+        except TypeError:
+            # Older/newer signature without the keyword — fall back cleanly.
+            try:
+                from services.enrichment.musicbrainz_service import resolve_release_id
+                release_mbid = str(resolve_release_id(release_group_mbid) or "").strip()
+            except Exception:
+                pass
         except Exception:
             pass
 

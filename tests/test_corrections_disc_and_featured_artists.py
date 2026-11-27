@@ -671,9 +671,16 @@ class TestTheDuplicateArtistReportIgnoresGuestCredits:
             "the duplicate-artist route must collapse guest credits before "
             "deciding whether there is a duplicate"
         )
-        assert "if _has_duplicate_artist_variants(variations_data):" in route_body, (
-            "and the collapsed set must be the thing the decision is made on"
+        # ⚠️ THE DECISION IS MADE ON THE ALBUM-ARTIST SET. It used to be made on
+        # the TRACK-artist collapse, which on a Various Artists compilation is
+        # what produced a 90-name "duplicate artist" group.
+        assert "if _has_duplicate_artist_variants(decision_data):" in route_body, (
+            "the collapsed set must be the thing the decision is made on"
         )
+        assert (
+            "COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) AS artist"
+            in route_body
+        ), "the route must group by ALBUM artist, never the performer"
 
 
 class TestTheDuplicateArtistEndpointEndToEnd:

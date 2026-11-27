@@ -342,6 +342,80 @@ def is_bonus_missing_track(
     return last_present is not None and number > last_present
 
 
+def _prefer_edition_matching_library(
+    mb_release: dict[str, Any],
+    *,
+    artist: str,
+    album: str,
+    library_count: int,
+) -> dict[str, Any]:
+    """An edition of the same release group whose track count matches the library.
+
+    The missing-track list is only meaningful when it is measured against the
+    edition the user actually owns. MusicBrainz release groups routinely hold a
+    standard and one or more deluxe/bonus versions (Planets: 14 / 16 / 17), and
+    the stored release id is whatever ``resolve_release_id`` picked — the
+    LARGEST, so a deluxe edition's bonus cuts were reported as missing album
+    tracks.
+
+    Returns *mb_release* unchanged unless a DIFFERENT edition matches exactly.
+    A tie is broken by preferring the one already stored (i.e. no swap), and any
+    failure degrades to the original release rather than losing the list.
+    """
+    group_mbid = str(mb_release.get("release_group_mbid") or "").strip()
+    current_count = len(mb_release.get("tracks") or [])
+    if not group_mbid or current_count == library_count:
+        return mb_release
+    # ``fetch_musicbrainz_release_metadata`` keys the id as ``release_mbid``
+    # (not ``id``) — comparing the wrong key would always look like a change.
+    current_id = str(
+        mb_release.get("release_mbid") or mb_release.get("id") or ""
+    ).strip()
+    try:
+        from services.enrichment.musicbrainz_service import (
+            fetch_musicbrainz_release_metadata,
+            get_release_group_releases,
+        )
+
+        payload = get_release_group_releases(group_mbid, include_track_counts=True)
+        releases = [
+            rel for rel in (payload.get("releases") or [])
+            if str(rel.get("id") or "").strip()
+        ]
+        exact = [
+            rel for rel in releases
+            if int(rel.get("track_count") or 0) == int(library_count)
+        ]
+        if not exact:
+            return mb_release
+        # Prefer an official release; then the one MB lists first (usually the
+        # original). Never swap to a non-official bootleg just for the count.
+        official = [
+            rel for rel in exact
+            if str(rel.get("status") or "").strip().lower() == "official"
+        ]
+        chosen = (official or exact)[0]
+        chosen_id = str(chosen.get("id") or "").strip()
+        if not chosen_id or chosen_id == current_id:
+            return mb_release
+        replacement = fetch_musicbrainz_release_metadata(chosen_id)
+        if not replacement or not replacement.get("tracks"):
+            return mb_release
+        logger.info(
+            "Missing-track comparison switched to the edition matching the library",
+            artist=artist, album=album,
+            stored_tracks=current_count, library_tracks=library_count,
+            chosen_release=chosen_id,
+        )
+        return replacement
+    except Exception as exc:
+        logger.debug(
+            "Edition matching failed — keeping the stored release",
+            album=album, error=str(exc),
+        )
+        return mb_release
+
+
 def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None) -> dict[str, Any]:
     """Check which tracks are in the MusicBrainz release but missing from the library.
 
@@ -438,7 +512,29 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     if not mb_release:
         return {"missing_tracks": [], "missing_count": 0, "mb_total": 0, "library_count": library_count}
 
-    mb_tracks = mb_release.get("tracks", [])
+    # ⭐⭐ COMPARE AGAINST THE EDITION THE LIBRARY ACTUALLY HOLDS.
+    #
+    # Reported: "Planets" showed 2 missing tracks (#11, #14) and the release
+    # picker offered 17 / 16 / 14-track versions — the library has 14. The
+    # missing list was measured against the 17-TRACK DELUXE edition, so its
+    # bonus cuts read as genuinely-missing album tracks.
+    #
+    # Nothing in this path ever asked "which of these editions has the tracks I
+    # own?" — and the scan's own choice actively favours the biggest:
+    # ``resolve_release_id`` does ``max(..., key=_total_tracks)``. So the stored
+    # id IS the deluxe edition for exactly these albums.
+    #
+    # When an explicit release was requested (the album page's Lookup, or a
+    # user pick) that choice is authoritative and is NOT second-guessed. On the
+    # scan/refresh path, the group is browsed and an edition whose track count
+    # matches the library's wins.
+    if not release_mbid and library_count > 0:
+        mb_release = _prefer_edition_matching_library(
+            mb_release, artist=artist, album=album, library_count=library_count
+        )
+        mb_tracks = mb_release.get("tracks", [])
+    else:
+        mb_tracks = mb_release.get("tracks", [])
     mb_total = len(mb_tracks)
 
     lib_norm = set()

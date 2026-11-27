@@ -125,6 +125,22 @@
     return await response.json();
   }
 
+  /**
+   * Scan types that are NOT scans for THIS gate.
+   *
+   * ⚠️ A NAVIDROME IMPORT IS NOT A SCAN. ``navidrome_scan`` is in
+   * ``progress_service.SCAN_TYPES``, so a running import publishes an
+   * ``active_scans`` entry with ``is_running: true``. Treating that as "a scan is
+   * running" made the Full Scan button ask "cancel this scan and start the new
+   * scan?" for an import that does not block it at all — and accepting that
+   * prompt calls ``/scan/stop-all``, which aborts a legitimate import mid-flight
+   * (reported: "I can't start a full scan while a Navidrome import is happening").
+   *
+   * The dashboard card already excludes these (``IMPORT_ONLY_TYPES``); this gate
+   * was never given the same list.
+   */
+  const NON_BLOCKING_SCANS = new Set(['navidrome_scan']);
+
   /** The scans currently running, newest-first order as the server sends them. */
   async function fetchRunningScans() {
     let data;
@@ -136,7 +152,10 @@
       return null;
     }
     return (data && Array.isArray(data.active_scans))
-      ? data.active_scans.filter((s) => s && s.is_running)
+      ? data.active_scans.filter(
+          (s) => s && s.is_running
+            && !NON_BLOCKING_SCANS.has(String(s.scan_type || ''))
+        )
       : [];
   }
 

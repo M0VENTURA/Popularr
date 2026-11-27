@@ -2324,6 +2324,11 @@
     // outstanding"), leaving no way to see it or act on it.
     const queueStatus = String(trackComp.queue_status || '');
     const isQueued = queueStatus !== '';
+    // ⭐ A BONUS CUT IS LABELLED AS SUCH, NOT AS "MISSING".
+    // It is on a deluxe/bonus edition, not in the album the user owns, so a
+    // yellow "Missing" badge with a live Download button implies the record is
+    // incomplete when it is not.
+    const isBonus = Boolean(trackComp.is_bonus);
     // The track's own performer, shown only when it differs from the ALBUM
     // artist — exactly the rule the library rows use (album_detail.html:
     // `{% if track.artist and track.artist != artist_name %}`). On a various-
@@ -2335,6 +2340,10 @@
       ? `<span class="badge bg-info text-dark ms-2" style="font-size:0.65rem;"`
         + ` title="In the download queue (${esc(queueStatus)})">`
         + `<i class="bi bi-download me-1"></i>${esc(queueStatusLabel(queueStatus))}</span>`
+      : isBonus
+      ? `<span class="badge bg-secondary ms-2" style="font-size:0.65rem;"`
+        + ` title="A bonus/extra track on another edition of this release — not part of the album you own">`
+        + `Bonus</span>`
       : `<span class="badge bg-warning text-dark ms-2" style="font-size:0.65rem;">Missing</span>`;
     const addTitle = isQueued
       ? `Already in the download queue (${esc(queueStatus)})`
@@ -3387,6 +3396,10 @@
       mb_duration: row.duration,
       // An undelivered queue row: listed, but not offered for download twice.
       queue_status: row.queue_status || '',
+      // ⚠️ A BONUS CUT IS NOT A MISSING ALBUM TRACK. This used to be dropped,
+      // so a deluxe edition's extras rendered as "Missing" with a live Download
+      // button — the reported "Planets shows 2 missing, one is a bonus track".
+      is_bonus: Boolean(row.is_bonus),
     };
   }
 
@@ -3530,7 +3543,9 @@
     // where every track was delivered or dismissed otherwise looks exactly
     // like a complete album.
     if (missing.length) renderMissingTracks(missing, tbody);
-    updateMissingHeaderBadge(missing.length, data && data.excluded);
+    updateMissingHeaderBadge(
+      missing.length, data && data.excluded, (data && data.bonus_count) || 0
+    );
   }
 
   /** Render persisted missing rows (deduped) in track order. */
@@ -3606,13 +3621,18 @@
    * `excluded` is appended as "· N not shown" — without it a track dropped by
    * a gate looks exactly like a release that never had that track.
    */
-  function updateMissingHeaderBadge(count, excluded) {
+  function updateMissingHeaderBadge(count, excluded, bonusCount) {
     const badge = document.getElementById('albumMissingHeaderBadge');
     if (!badge) return;
     const hidden = excludedParts(excluded);
-    if (count > 0 || hidden.length) {
+    // ⭐ BONUS ROWS ARE NOT COUNTED AS MISSING. A deluxe edition's extras would
+    // otherwise inflate "N tracks missing" on an album the user owns in full.
+    const bonus = Math.max(0, Number(bonusCount || 0));
+    const core = Math.max(0, Number(count || 0) - bonus);
+    if (core > 0 || bonus > 0 || hidden.length) {
       const bits = [];
-      if (count > 0) bits.push(`${count} track${count === 1 ? '' : 's'} missing`);
+      if (core > 0) bits.push(`${core} track${core === 1 ? '' : 's'} missing`);
+      if (bonus > 0) bits.push(`${bonus} bonus`);
       if (hidden.length) bits.push(`${hidden.join(', ')} not shown`);
       badge.textContent = bits.join(' · ');
       badge.title = hidden.length ? `Not shown: ${hidden.join(', ')}` : '';
@@ -3668,7 +3688,9 @@
       if (data && (data.mb_total || 0) > 0) {
         tbody.querySelectorAll('.mb-missing-row').forEach((r) => r.remove());
         renderMissingTracks(data.missing_tracks || [], tbody);
-        updateMissingHeaderBadge(data.missing_count || 0, data.excluded);
+        updateMissingHeaderBadge(
+          data.missing_count || 0, data.excluded, data.bonus_count || 0
+        );
       }
     } catch (error) {
       // Non-fatal: the owned tracklist still renders — but LOUDLY, because a

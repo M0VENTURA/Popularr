@@ -1091,32 +1091,100 @@ def _collapse_duplicate_artist_rows(
 # DUPLICATE ARTISTS
 # ===========================================================================
 
+def _is_placeholder_artist(value: Any) -> bool:
+    """True for "Various Artists"/"Unknown Artist" — never a merge target."""
+    try:
+        from helpers.normalization_service import is_track_artist_placeholder
+
+        return bool(is_track_artist_placeholder(str(value or "")))
+    except Exception:
+        return str(value or "").strip().casefold() in {
+            "various artists", "various", "va", "v/a", "v.a.",
+            "soundtrack", "unknown artist",
+        }
+
+
 @misc_api_bp.route("/duplicate-artists/<path:artist>", methods=["GET"])
 def api_get_duplicate_artists(artist: str) -> Any:
-    """Get duplicate artists for a specific artist."""
+    """Duplicate spellings of ONE act (same MusicBrainz artist, different names).
+
+    ⚠️⚠️ THIS USED TO GROUP BY THE TRACK ARTIST, LIBRARY-WIDE.
+
+    Reported: a single row listed ~90 "variations" — Red Hot Chili Peppers, Green
+    Day, Gomez, Skulker… — totalling 5174 tracks, with "Merge" offering to
+    collapse them all into one act. Clicking it would have rewritten the TRACK
+    **and** ALBUM artist of every one of those bands (plus their file tags) to
+    "Red Hot Chili Peppers".
+
+    Two defects produced that:
+
+      1. It grouped by ``artist`` (the PERFORMER). On a Various Artists
+         compilation the performer differs on every track, so any row carrying a
+         shared/legacy ``musicbrainz_artistid`` dragged every compilation
+         performer into one group.
+      2. It had NO artist scope: the request names one artist, but the response
+         was library-wide, so one polluted row anywhere joined unrelated acts.
+
+    The panel is about ALBUM-ARTIST identity — "is this act spelled several
+    ways?" — so it now groups by the house album-artist key, scoped to the
+    requested artist, and refuses placeholder identities outright.
+    """
     artist = unquote(artist)
+    #: The house album-artist key — the ONLY identity this panel may group by.
+    _artist_key = "LOWER(TRIM(COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist))))"
     try:
         with db_session() as session:
-            row = session.execute(text("""
-                SELECT DISTINCT musicbrainz_artistid
+            # ⚠️ ALBUM-ARTIST MBID FIRST, performer's only as a fallback.
+            #
+            # ``musicbrainz_albumartistid`` is the album-level credit — the
+            # identity this panel is about. ``musicbrainz_artistid`` is the
+            # PERFORMER's, and on a compilation every performer is a different
+            # person, so it is only used when there is no album-artist id AT ALL
+            # for this artist (older rows that never stored one).
+            #
+            # The grouping below is still by ALBUM-ARTIST NAME, which is what
+            # keeps a compilation from exploding into 90 "variations" even when
+            # the fallback fires.
+            row = session.execute(text(f"""
+                SELECT COALESCE(
+                    NULLIF(TRIM(MAX(musicbrainz_albumartistid)), ''),
+                    NULLIF(TRIM(MAX(musicbrainz_artistid)), '')
+                )
                 FROM tracks
-                WHERE artist = :artist
-                  AND musicbrainz_artistid IS NOT NULL
-                  AND musicbrainz_artistid != ''
-                LIMIT 1
+                WHERE {_artist_key} = LOWER(TRIM(:artist))
+                  AND (
+                       (musicbrainz_albumartistid IS NOT NULL AND TRIM(musicbrainz_albumartistid) <> '')
+                    OR (musicbrainz_artistid IS NOT NULL AND TRIM(musicbrainz_artistid) <> '')
+                  )
             """), {"artist": artist}).fetchone()
-            artist_mbid = str(row[0]) if row else None
+            artist_mbid = str(row[0]) if row and row[0] else None
 
             duplicates = []
             if artist_mbid:
-                rows = session.execute(text("""
-                    SELECT artist, COUNT(*) AS track_count
+                # Group the SPELLINGS of this one act. Two predicates:
+                #   * the album-artist MBID matches, OR
+                #   * the stored name is a case/typography variant of the name
+                #     asked about (the legacy case with no album-artist MBID).
+                #
+                # ⚠️ NOT "the performer MBID matches". That was the compile-every-
+                # compilation bug: a polluted ``musicbrainz_artistid`` on
+                # unrelated acts joined them here.
+                rows = session.execute(text(f"""
+                    SELECT COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) AS artist,
+                           COUNT(*) AS track_count
                     FROM tracks
-                    WHERE musicbrainz_artistid = :mbid
-                    GROUP BY artist
+                    WHERE COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist)) <> ''
+                      AND (
+                            TRIM(musicbrainz_albumartistid) = :mbid
+                         OR {_artist_key} = LOWER(TRIM(:artist))
+                      )
+                    GROUP BY COALESCE(NULLIF(TRIM(album_artist), ''), TRIM(artist))
                     ORDER BY track_count DESC
-                """), {"mbid": artist_mbid}).fetchall()
-                raw_rows = [dict(r._mapping) for r in rows]
+                """), {"mbid": artist_mbid, "artist": artist}).fetchall()
+                raw_rows = [
+                    dict(r._mapping) for r in rows
+                    if not _is_placeholder_artist(r._mapping.get("artist"))
+                ]
 
                 # Collapse guest credits BEFORE deciding whether this is a
                 # duplicate — see ``_collapse_duplicate_artist_rows``. The
@@ -1171,6 +1239,19 @@ async def api_merge_duplicate_artists() -> Any:
 
         if not new_artist:
             return jsonify({"success": False, "error": "new_artist is required"}), 400
+
+        # ⚠️ A PLACEHOLDER IS NEVER A MERGE TARGET. Merging INTO "Various
+        # Artists" would rewrite every listed act's artist and album_artist —
+        # the same class of destruction as the reported 90-band group, just in
+        # the other direction.
+        if _is_placeholder_artist(new_artist):
+            return jsonify({
+                "success": False,
+                "error": (
+                    f"'{new_artist}' is a placeholder, not an artist — it cannot "
+                    "be a merge target."
+                ),
+            }), 400
 
         if isinstance(source_artists, str):
             source_artists = [source_artists]

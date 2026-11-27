@@ -2667,7 +2667,17 @@ def fetch_release_metadata(release_id: str) -> dict[str, Any] | None:
     return _flatten_release(release, release_id)
 
 
-def resolve_release_id(release_id: str) -> str:
+def resolve_release_id(release_id: str, expected_track_count: int | None = None) -> str:
+    """A concrete RELEASE id for a release OR release-group id.
+
+    ⭐ ``expected_track_count`` — prefer the EDITION THE LIBRARY HOLDS.
+    A release group routinely holds a standard and deluxe/bonus versions, and
+    picking the largest (the old behaviour) made every missing-track comparison
+    measure a 14-track library against a 17-track deluxe edition, so the bonus
+    cuts were reported as missing album tracks (reported: "Planets").
+    When the caller knows how many tracks the library has, an edition with
+    exactly that count wins over the biggest one.
+    """
     if not release_id:
         return release_id
 
@@ -2695,6 +2705,21 @@ def resolve_release_id(release_id: str) -> str:
             ]
             candidates = [r for r in (official or releases) if _total_tracks(r) > 0]
             candidates = candidates or (official or releases)
+            # ⭐ AN EDITION MATCHING THE LIBRARY BEATS THE BIGGEST ONE.
+            if expected_track_count and int(expected_track_count) > 0:
+                exact = [
+                    r for r in candidates
+                    if _total_tracks(r) == int(expected_track_count)
+                ]
+                if exact:
+                    # Prefer an official edition, then MB's own order (the
+                    # original is usually first), never a bootleg for the count.
+                    exact_official = [
+                        r for r in exact
+                        if str(r.get("status") or "").strip().lower() == "official"
+                    ]
+                    best = (exact_official or exact)[0]
+                    return str(best.get("id") or "") or release_id
             best = max(candidates, key=_total_tracks)
             resolved = str(best.get("id") or "")
             return resolved or release_id
