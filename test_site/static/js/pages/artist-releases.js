@@ -240,11 +240,100 @@
             + '</div>';
         });
         contentEl.innerHTML = html + '</div>';
+
+        // ⚠️ THE MISSING TRACKS BELONG IN THIS LIST.
+        //
+        // Reported: "The missing tracks also don't show under the track list on
+        // the artist page." This renderer only ever showed `tracks` — the rows
+        // in the collection — so an album expanded to 10 entries while the
+        // badge beside it said "3 missing", and there was nowhere to see WHICH
+        // three. The album page places them inline by disc+track order
+        // (album.js placeMissingRow); do the same here.
+        //
+        // Owned albums only: a missing/upcoming release has no collection rows
+        // to be missing FROM, and its tracklist already came from MusicBrainz.
+        if (!isMissing) appendMissingTracks(item, contentEl);
       })
       .catch(function () {
         tracklistEl.setAttribute('data-loaded', '0'); // allow a retry
         contentEl.innerHTML = '<div class="text-danger small py-2">Error loading tracks.</div>';
       });
+  }
+
+  /**
+   * Append this album's missing tracks to its expanded tracklist.
+   *
+   * ⚠️ BONUS CUTS ARE LABELLED, NOT CALLED "Missing". A deluxe edition's extras
+   * are not an incomplete album, so they get a grey "Bonus" badge — the same
+   * rule (and the same helper) the album page uses. Without the split this list
+   * would contradict the badge above it.
+   */
+  function appendMissingTracks(item, contentEl) {
+    var artist = artistName();
+    var summary = item.querySelector('.release-summary');
+    var album = summary ? (summary.getAttribute('data-album') || '') : '';
+    if (!artist || !album) return;
+
+    // DB-only by default (no `refresh`), so this is a cheap read rather than a
+    // MusicBrainz call — the same endpoint the badge above already used.
+    getJson('/api/album/missing-tracks?artist=' + encodeURIComponent(artist)
+      + '&album=' + encodeURIComponent(album))
+      .then(function (data) {
+        renderMissingInto(contentEl, (data && data.missing_tracks) || []);
+      })
+      .catch(function () { /* cosmetic: the tracklist is already usable */ });
+  }
+
+  function renderMissingInto(contentEl, rows) {
+    if (!rows.length) return;
+    var list = contentEl.querySelector('.list-group');
+    if (!list) return;
+
+    rows.forEach(function (row) {
+      var position = row.track_number || '';
+      var title = row.title || '';
+      var bonus = Boolean(row && row.is_bonus);
+      var queued = String(row.queue_status || '');
+      var badge = queued
+        ? '<span class="badge bg-info text-dark ms-2" style="font-size:0.65rem;"'
+          + ' title="In the download queue (' + esc(queued) + ')">'
+          + '<i class="bi bi-download me-1"></i>' + esc(queued) + '</span>'
+        : bonus
+        ? '<span class="badge bg-secondary ms-2" style="font-size:0.65rem;"'
+          + ' title="A bonus/extra track on another edition of this release — '
+          + 'not part of the album you own">Bonus</span>'
+        : '<span class="badge bg-warning text-dark ms-2" style="font-size:0.65rem;">Missing</span>';
+
+      // The performer, shown only when it is not the album artist — the same
+      // rule the album page uses for compilation tracks.
+      var trackArtist = String(row.track_artist || '').trim();
+      var showArtist = trackArtist && trackArtist.toLowerCase() !== String(artistName() || '').toLowerCase();
+
+      var el = doc.createElement('div');
+      el.className = 'list-group-item d-flex justify-content-between align-items-center'
+        + ' bg-transparent text-muted border-secondary py-1 artist-missing-track';
+      el.innerHTML = '<span class="text-truncate fst-italic">'
+        + (position ? esc(position) + '. ' : '') + esc(title)
+        + (showArtist ? ' <small class="text-muted">— ' + esc(trackArtist) + '</small>' : '')
+        + '</span>'
+        + '<span class="flex-shrink-0">' + badge + '</span>';
+      list.appendChild(el);
+    });
+
+    // Inline placement by disc+track, matching the album page, so a missing
+    // track sits where it belongs instead of in a block at the end.
+    var entries = Array.prototype.slice.call(list.children);
+    entries.sort(function (a, b) {
+      return _positionKey(a) - _positionKey(b);
+    });
+    entries.forEach(function (entry) { list.appendChild(entry); });
+  }
+
+  /** Numeric sort key from a row's leading "N." position, else +Infinity. */
+  function _positionKey(el) {
+    var text = (el.textContent || '').trim();
+    var match = text.match(/^(\d+)\./);
+    return match ? parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
   }
 
   function toggleTracklist(item) {
@@ -672,11 +761,34 @@
         + '&album=' + encodeURIComponent(job.summary.getAttribute('data-album') || '')
         + '&mbid=' + encodeURIComponent(job.mbid))
         .then(function (data) {
-          var count = data && data.missing_count;
-          if (count > 0) {
-            job.badge.textContent = count + ' missing';
-            job.badge.style.display = '';
+          /*
+            ⚠️ BONUS CUTS ARE NOT MISSING TRACKS.
+
+            This used `data.missing_count` raw, so an album owned in full plus a
+            deluxe edition's trailing extras showed "3 missing" here while the
+            album page showed "3 bonus" — the reported mismatch. The split comes
+            from global.missingTracks, which is the same rule the album page
+            applies, and the badge goes green for bonus-only albums so it does
+            not read as a gap.
+          */
+          var text = global.missingTracks
+            ? global.missingTracks.missingBadgeText(data)
+            : '';
+          if (!text) {
+            job.badge.style.display = 'none';
+            return;
           }
+          var counts = global.missingTracks.splitMissingCounts(data);
+          job.badge.textContent = text;
+          job.badge.style.display = '';
+          // A bonus-only album is not an incomplete album: say so in green.
+          var bonusOnly = counts.missing === 0 && counts.bonus > 0;
+          job.badge.classList.toggle('bg-warning', !bonusOnly);
+          job.badge.classList.toggle('text-dark', !bonusOnly);
+          job.badge.classList.toggle('bg-success', bonusOnly);
+          job.badge.title = bonusOnly
+            ? 'Bonus tracks to download — not an album gap'
+            : 'Tracks on the release that are not in your collection';
         })
         .catch(function () { /* cosmetic */ })
         .then(runNext);

@@ -171,7 +171,12 @@
         {#- Populated by static/js/artist-releases.js via /api/album/missing-tracks.
             Hidden until a count arrives, so an album with no gap never shows a
             "0 tracks missing" badge. Owned albums only — an unreleased album has
-            no tracklist for tracks to be missing FROM. -#}
+            no tracklist for tracks to be missing FROM.
+
+            ⚠️ ONE WRITER. artist.js used to fill this span too, with different
+            wording and WITHOUT subtracting bonus cuts, so the same album read
+            "3 tracks missing" here and "3 bonus" on the album page. The rule
+            now lives in utils/missing-tracks.js and both pages read it. -#}
         {% if not is_upcoming %}
         <span class="badge bg-warning text-dark album-missing-tracks-badge" style="display:none;"></span>
         {% endif %}

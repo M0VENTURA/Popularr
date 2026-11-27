@@ -3654,8 +3654,16 @@
     const hidden = excludedParts(excluded);
     // ⭐ BONUS ROWS ARE NOT COUNTED AS MISSING. A deluxe edition's extras would
     // otherwise inflate "N tracks missing" on an album the user owns in full.
-    const bonus = Math.max(0, Number(bonusCount || 0));
-    const core = Math.max(0, Number(count || 0) - bonus);
+    //
+    // ⚠️ THIS RULE NOW LIVES IN utils/missing-tracks.js, because the ARTIST page
+    // asks the same question and did NOT apply it — it used `missing_count` raw,
+    // so the same album read "3 bonus" here and "3 tracks missing" there.
+    const split = global.missingTracks
+      ? global.missingTracks.splitMissingCounts({ missing_count: count, bonus_count: bonusCount })
+      : { missing: Math.max(0, Number(count || 0) - Math.max(0, Number(bonusCount || 0))),
+          bonus: Math.max(0, Number(bonusCount || 0)) };
+    const core = split.missing;
+    const bonus = split.bonus;
     if (core > 0 || bonus > 0 || hidden.length) {
       const bits = [];
       if (core > 0) bits.push(`${core} track${core === 1 ? '' : 's'} missing`);

@@ -38,8 +38,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const slskdInput = document.getElementById('slskdSearchInput');
   if (slskdInput) slskdInput.addEventListener('keypress', e => { if (e.key === 'Enter') performSlskdSearch(); });
-  
-  initCorrectionsAndMissingTracks();
 });
 
 // Bio
@@ -317,26 +315,21 @@ async function loadArtistCoveredBy(artist) {
   });
 }
 
-function initCorrectionsAndMissingTracks() {
-  const artist = getArtistName();
-  if (!artist) return;
-  
-  const mbRows = document.querySelectorAll('.release-item[data-mbid]');
-  mbRows.forEach(row => {
-    const albumName = row.dataset.title;
-    if (!albumName) return;
-    fetch(`/api/album/missing-tracks?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(albumName)}`)
-      .then(r => r.json()).then(data => {
-        if (data.missing_count > 0) {
-          const badge = row.querySelector('.album-missing-tracks-badge');
-          if (badge) {
-            badge.textContent = `${data.missing_count} tracks missing`;
-            badge.style.display = 'inline-block';
-          }
-        }
-      });
-  });
-}
+/*
+  ⚠️ REMOVED — this was a SECOND, undocumented writer of the same badge.
+  `artist-releases.js` already fills `.album-missing-tracks-badge` (the
+  template comment at components/_release_section.html names that one), and
+  this copy fetched every album's missing tracks AGAIN with different wording
+  ("3 tracks missing" vs "3 missing"). Two writers racing on one span also
+  meant whichever resolved last won.
+
+  ⚠️ AND IT COUNTED BONUS CUTS AS MISSING. It read `data.missing_count` raw,
+  so an album owned in full plus a deluxe edition's trailing extras showed
+  "3 tracks missing" here while the album page correctly showed "3 bonus" —
+  the reported "corrections page notes bonus tracks, but the artist page just
+  shows them as missing". The badge is now written in one place, through
+  global.missingTracks, which subtracts them.
+*/
 
 function openEditTrackFromArtistModal(trackId, title) {
   document.getElementById('editArtistTrackId').value = trackId;

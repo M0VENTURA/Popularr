@@ -617,6 +617,15 @@
     server files the /artists sections by the same rules — the two must agree.
   #}
   <script src="{{ versioned_static('js/utils/artist-names.js') }}"></script>
+  {#
+    Missing-track counts (global.missingTracks). Loaded here because THREE
+    surfaces ask the same question — the album page, the artist page's album
+    rows, and the artist page's expanded tracklist — and they disagreed: the
+    album page subtracted bonus cuts from "N tracks missing" and the artist page
+    did not, so an album owned in full showed "3 bonus" on one page and
+    "3 tracks missing" on the other.
+  #}
+  <script src="{{ versioned_static('js/utils/missing-tracks.js') }}"></script>
 
   <script src="{{ versioned_static('js/ui/toast.js') }}"></script>
   <script src="{{ versioned_static('js/ui/modal.js') }}"></script>
