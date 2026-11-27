@@ -58,8 +58,21 @@ ALBUM_CONSISTENCY_FIELDS: list[tuple[str, str]] = [
 ]
 
 
-def get_album_tag_inconsistencies(artist_filter: str | None = None) -> list[dict[str, Any]]:
-    """Return albums that have inconsistent album-level tag values across their tracks."""
+def get_album_tag_inconsistencies(
+    artist_filter: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Albums whose album-level tags disagree across their own tracks.
+
+    ⚠️ ``limit`` EARLY-EXITS THE N+1 DETAIL LOOP.
+
+    The page renders 20 albums but this used to compute EVERY flagged album: one
+    ``GROUP BY`` with 21 ``COUNT(DISTINCT)`` across the whole ``tracks`` table,
+    then **one detail SELECT per flagged album**. On a 67k-track library that is
+    seconds of DB work before a single row is drawn — the reported slow/timing-out
+    corrections page. ``limit`` bounds the per-album detail queries; the caller
+    gets the first N and can show a "more available" note.
+    """
     try:
         track_columns = _table_columns(None, "tracks")
         has_album_artist = "album_artist" in track_columns
@@ -154,6 +167,11 @@ def get_album_tag_inconsistencies(artist_filter: str | None = None) -> list[dict
                         "track_count": tc,
                         "inconsistencies": inconsistencies,
                     })
+                    # ⚠️ Early exit: the remaining flagged albums would each cost
+                    # another detail SELECT (see the docstring). The caller does
+                    # its own paging on this list.
+                    if limit and len(results) >= int(limit):
+                        break
 
         return results
     except Exception as exc:
@@ -161,34 +179,54 @@ def get_album_tag_inconsistencies(artist_filter: str | None = None) -> list[dict
         return []
 
 
-def fix_album_field(album_artist: str, album: str, field: str, value: Any) -> tuple[int, int]:
-    """Apply a single field value to all tracks in an album.
+def fix_album_fields(
+    album_artist: str, album: str, fixes: dict[str, Any]
+) -> tuple[int, int, list[str]]:
+    """Apply SEVERAL album-level fields in ONE pass over the album's files.
 
-    Returns (tracks_updated, files_updated).
+    ⭐ WHY THIS EXISTS. "Fix all (majority)" issued one ``fix_album_field`` POST
+    per inconsistent field, and every POST re-selected the album and rewrote
+    EVERY audio file again. A 12-track album with 10 inconsistent fields paid
+    120 read-modify-write tag passes where 12 would do — and the browser's 30 s
+    timeout fired while the server was still writing.
+
+    One SELECT, one ``UPDATE`` covering every field, one tag pass per file.
+
+    Returns ``(tracks_updated, files_updated, fields_applied)``.
     """
     allowed = {f for f, _ in ALBUM_CONSISTENCY_FIELDS}
-    if field not in allowed:
-        logger.warning("Field not in allowed consistency fields", field=field)
-        return 0, 0
+    clean = {
+        str(field): value
+        for field, value in (fixes or {}).items()
+        if str(field) in allowed
+    }
+    if not clean:
+        return 0, 0, []
 
     try:
         with db_session() as session:
             rows = session.execute(
                 text(
-                    "SELECT id, file_path FROM tracks WHERE COALESCE(NULLIF(album_artist, ''), artist) = :aa AND album = :al"
+                    "SELECT id, file_path FROM tracks "
+                    "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :aa AND album = :al"
                 ),
                 {"aa": album_artist, "al": album},
             ).mappings().all()
             affected = [dict(r) for r in rows]
             if not affected:
-                return 0, 0
+                return 0, 0, []
 
+            # ONE statement, every field. Field names are from the allow-list
+            # above (never user text), so the f-string cannot be injected.
+            set_clause = ", ".join(f"{field} = :v_{field}" for field in clean)
+            params = {f"v_{field}": value for field, value in clean.items()}
+            params.update({"aa": album_artist, "al": album})
             session.execute(
                 text(
-                    f"UPDATE tracks SET {field} = :value "
+                    f"UPDATE tracks SET {set_clause} "
                     "WHERE COALESCE(NULLIF(album_artist, ''), artist) = :aa AND album = :al"
                 ),
-                {"value": value, "aa": album_artist, "al": album},
+                params,
             )
             updated_count = len(affected)
 
@@ -203,40 +241,39 @@ def fix_album_field(album_artist: str, album: str, field: str, value: Any) -> tu
             if not fp:
                 files_failed += 1
                 continue
-            # Resolve before writing: the DB may hold a path relative to the
-            # music root, and the writer returns False for anything that does
-            # not exist on disk.
             resolved = resolve_music_file_path(fp)
             if not resolved:
                 files_failed += 1
-                logger.warning(
-                    "fix_album_field: audio file not resolvable",
-                    file_path=fp, album=album, field=field,
-                )
                 continue
             try:
-                # ⚠️ The RETURN VALUE is checked. This counted `files_updated`
-                # for any call that did not RAISE — so a writer that returned
-                # False (no file, tags disabled, unsupported format) was still
-                # reported as a successful write.
-                if write_tags_to_file(resolved, {field: value}):
+                if write_tags_to_file(resolved, dict(clean)):
                     files_updated += 1
                 else:
                     files_failed += 1
             except Exception as tag_exc:
                 files_failed += 1
                 logger.warning(
-                    "fix_album_field: file tag write failed",
-                    file_path=resolved, field=field, error=str(tag_exc),
+                    "fix_album_fields: file tag write failed",
+                    file_path=resolved, fields=sorted(clean), error=str(tag_exc),
                 )
 
         if files_failed:
             logger.warning(
-                "fix_album_field: some audio files were not updated",
+                "fix_album_fields: some audio files were not updated",
                 album=album, files_updated=files_updated, files_failed=files_failed,
             )
-
-        return updated_count, files_updated
+        return updated_count, files_updated, sorted(clean)
     except Exception as exc:
-        logger.error("fix_album_field failed", error=str(exc), exc_info=True)
-        return 0, 0
+        logger.error("fix_album_fields failed", error=str(exc), exc_info=True)
+        return 0, 0, []
+
+
+def fix_album_field(album_artist: str, album: str, field: str, value: Any) -> tuple[int, int]:
+    """Apply a single field value to all tracks in an album.
+
+    Returns (tracks_updated, files_updated).
+    """
+    updated, files, _applied = fix_album_fields(
+        album_artist, album, {str(field): value}
+    )
+    return updated, files

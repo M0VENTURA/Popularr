@@ -79,6 +79,13 @@
   const artistName = pageData.artistName || '';
   const mbAlbums = Array.isArray(pageData.mbAlbums) ? pageData.mbAlbums : [];
 
+  //: Every correction that rewrites audio-file tags is disk-bound (seconds per
+  //: file on a network mount) and can exceed the 30 s default. Give the write
+  //: calls room so the browser does not abort a request the server is still
+  //: finishing — an abort left the DB/files changed but showed an error, and
+  //: the retry redid the work.
+  const CORRECTION_TIMEOUT_MS = 300000;
+
   function esc(value) {
     return (global.escapeHtml || ((v) => String(v == null ? '' : v)))(value);
   }

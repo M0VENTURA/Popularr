@@ -64,6 +64,24 @@ BLOCKING_CALLS = frozenset({
     "get_conflict_stats",
     "get_artist_corrections",
     "sync_rss_playlists_for_user",
+    # ⚠️ ADDED AFTER A REAL TIMEOUT BUG. The audit only knew these SERVICES when
+    # a handler called them by their own name. The corrections handlers call
+    # thin ``route -> service`` wrappers instead, so the blocking work was one
+    # frame deeper than the scan and COMPLETELY INVISIBLE: ``fix_album_field``
+    # (rewrites every audio file of an album), ``corrections.apply_album_mbid``,
+    # ``merge_albums``, ``clear_disc_number`` and ``delete_track`` all ran on
+    # the event loop and froze the worker. Detecting them here makes the ratchet
+    # able to see this whole class of bug.
+    "fix_album_field",
+    "fix_album_fields",
+    "propose_album_metadata",
+    "fetch_album_recommendations",
+    "fetch_albums_pending_review",
+    "resolve_conflict",
+    "resolve_conflicts_batch",
+    "ignore_conflict",
+    "fetch_pending_conflicts",
+    "count_pending_conflicts",
 })
 
 OFFLOAD_MARKERS = frozenset({"to_thread", "run_in_executor", "run_sync"})
@@ -74,6 +92,8 @@ OFFLOAD_MARKERS = frozenset({"to_thread", "run_in_executor", "run_sync"})
 # ``ui_routes.py::artist_detail`` is deliberately ABSENT - it is fixed.
 # ---------------------------------------------------------------------------
 _KNOWN_OFFENDERS = frozenset({
+    "album_routes.py::api_album_merge_releases",
+    "album_routes.py::api_album_metadata",
     "api_v1/albums.py::bulk_delete_album_tracks",
     "api_v1/artists.py::get_artist",
     "api_v1/tracks.py::apply_track_mb_field",
@@ -82,7 +102,6 @@ _KNOWN_OFFENDERS = frozenset({
     "api_v1/tracks.py::ignore_track_mb_field",
     "downloads.py::api_batch_group",
     "downloads.py::api_queue_upcoming",
-    "metadata.py::api_get_conflict_stats",
     "misc_routes.py::api_apply_country_as_genre",
     "misc_routes.py::api_apply_genres",
     "misc_routes.py::api_bookmarks",
@@ -112,18 +131,16 @@ _KNOWN_OFFENDERS = frozenset({
     "track_routes.py::api_rescan_single_track",
     "track_routes.py::api_track_apply_mb_release",
     "track_routes.py::api_track_audio",
+    "track_routes.py::api_track_bulk_update",
     "track_routes.py::api_track_ignore_mb_field",
     "track_routes.py::api_track_match_missing",
     "track_routes.py::api_track_update_metadata",
-    "ui_routes.py::artist_corrections",
     "ui_routes.py::artist_genre_management",
     "ui_routes.py::artists",
-    "ui_routes.py::correcting",
     "ui_routes.py::dashboard",
     "ui_routes.py::metadata_compare",
     "ui_routes.py::metadata_compare_accept_navidrome",
     "ui_routes.py::metadata_compare_apply_mb",
-    "ui_routes.py::track_detail",
     "upcoming_releases_routes.py::api_add_upcoming_release",
     "upcoming_releases_routes.py::api_match_upcoming_release",
 })
@@ -165,6 +182,29 @@ def _blocking_uses(fn: ast.AST) -> list[tuple[int, str]]:
     return sorted(set(found))
 
 
+#: Whole modules whose every public function is blocking. Corrections handlers
+#: call them through a module alias (``corrections.apply_album_mbid(...)``), and
+#: the last-component match above cannot know that alias. Rewriting audio tags
+#: and deleting files is blocking no matter which name is used.
+BLOCKING_MODULES = frozenset({
+    "corrections",            # routes/artist_routes.py's corrections service
+    "pending_update_service",
+})
+
+
+def _blocking_module_calls(fn: ast.AST) -> list[tuple[int, str]]:
+    """(line, name) for calls into an all-blocking module or an offload-free path."""
+    found: list[tuple[int, str]] = []
+    for n in ast.walk(fn):
+        if not isinstance(n, ast.Call):
+            continue
+        text = ast.unparse(n.func)
+        head = text.split(".")[0]
+        if head in BLOCKING_MODULES:
+            found.append((n.lineno, text))
+    return found
+
+
 def _offenders() -> dict[str, str]:
     """Return {dotted_key: detail} for async handlers blocking with no offload."""
     found: dict[str, str] = {}
@@ -180,7 +220,7 @@ def _offenders() -> dict[str, str]:
                 continue
             if not _is_route_handler(fn) or _has_offload(fn):
                 continue
-            blocking = _blocking_uses(fn)
+            blocking = _blocking_uses(fn) + _blocking_module_calls(fn)
             if not blocking:
                 continue
             names = sorted({name for _, name in blocking})

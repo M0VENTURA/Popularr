@@ -166,26 +166,38 @@ class TestApplyGenresArtist:
 
 
 # ---------------------------------------------------------------------------
-# 4. fix_album_field — checks the writer's result and resolves the path
+# 4. fix_album_fields — checks the writer's result and resolves the path
 # ---------------------------------------------------------------------------
+#
+# NOTE: these guards used to name ``fix_album_field``. That function is now a
+# thin single-field wrapper over ``fix_album_fields`` (which applies several
+# fields in ONE pass over the album's files); the invariants below live in the
+# batch body. Pointing the structural asserts at the wrapper would pass
+# vacuously, so they target the function that actually writes.
 
 class TestFixAlbumField:
     REL = "services/metadata/correction_service.py"
 
     def test_it_checks_the_writers_return_value(self):
-        body = _func_body(self.REL, "fix_album_field")
+        body = _func_body(self.REL, "fix_album_fields")
         assert "if write_tags_to_file(" in body, (
             "files_updated counted every call that did not RAISE, so a writer "
             "returning False was still reported as a successful write"
         )
 
     def test_it_resolves_the_stored_path(self):
-        body = _func_body(self.REL, "fix_album_field")
+        body = _func_body(self.REL, "fix_album_fields")
         assert "resolve_music_file_path" in body
 
     def test_it_reports_partial_failure(self):
-        body = _func_body(self.REL, "fix_album_field")
+        body = _func_body(self.REL, "fix_album_fields")
         assert "files_failed" in body
+
+    def test_the_single_field_wrapper_still_validates_the_field(self):
+        # fix_album_field delegates, so its allow-list must still be enforced
+        # by the batch function it calls.
+        body = _func_body(self.REL, "fix_album_fields")
+        assert "ALBUM_CONSISTENCY_FIELDS" in body
 
 
 # ---------------------------------------------------------------------------

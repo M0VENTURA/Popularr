@@ -181,8 +181,14 @@ def stash_album_recommendations(
 
 
 def _clear_album(artist: str, album: str) -> int:
-    """Drop every stashed recommendation for the album."""
-    try:
+    """Drop every stashed recommendation for the album.
+
+    ⚠️ RETRIES A DEADLOCK. This is an album-wide UPDATE by predicate, and it
+    deadlocked against the bulk ``INSERT … ON CONFLICT`` of the same album's
+    tracks (reported PostgreSQL ``deadlock detected``). The loser redoes the
+    clear.
+    """
+    def _run() -> int:
         with db_session() as session:
             result = session.execute(
                 text("""
@@ -196,6 +202,11 @@ def _clear_album(artist: str, album: str) -> int:
             )
             session.commit()
             return int(result.rowcount or 0)
+
+    try:
+        from db.engine import run_with_deadlock_retry
+
+        return run_with_deadlock_retry(_run)
     except Exception as exc:
         logger.warning(
             "Could not clear pending recommendations",

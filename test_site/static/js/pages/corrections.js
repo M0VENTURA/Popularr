@@ -66,6 +66,10 @@
   'use strict';
 
   const FIX_ENDPOINT = '/api/correcting/fix-album-field';
+  const FIX_ALL_ENDPOINT = '/api/correcting/fix-album-fields';
+  //: A correction rewrites every audio file of the album, which is disk-bound
+  //: (seconds per file on a network mount). The 30 s default is far too short.
+  const CORRECTION_TIMEOUT_MS = 300000;
   const IGNORE_ENDPOINT = '/api/correcting/ignore';
   const UNIGNORE_ENDPOINT = '/api/correcting/unignore';
   const IGNORES_ENDPOINT = '/api/correcting/ignores';
@@ -140,7 +144,7 @@
         // Empty string is meaningful here: it clears the field, and the backend
         // distinguishes it from "not supplied".
         value: value,
-      });
+      }, { timeoutMs: CORRECTION_TIMEOUT_MS });
       hideProgress();
 
       if (data.success) {
@@ -209,32 +213,42 @@
 
     showProgress('Applying fixes…');
 
-    // Sequential on purpose: the endpoint rewrites audio file tags per album,
-    // and firing several at once for the same album races on those files.
-    for (const fix of fixes) {
-      const label = byId('fixProgressText');
-      if (label) label.textContent = `Setting ${fix.field} = "${fix.value || '(empty)'}"…`;
+    // ⭐ ONE REQUEST FOR EVERY FIELD — NOT ONE PER FIELD.
+    //
+    // This used to POST each field in turn, and every POST re-selected the album
+    // and rewrote EVERY audio file again: a 12-track album with 10 inconsistent
+    // fields paid 120 tag rewrites, the browser's 30 s timeout fired mid-loop,
+    // and the server kept writing for the request the browser had abandoned.
+    // The batch endpoint updates every field in one statement and rewrites each
+    // file once.
+    const fixMap = {};
+    fixes.forEach((f) => { fixMap[f.field] = f.value; });
+    const label = byId('fixProgressText');
+    if (label) label.textContent = `Applying ${fixes.length} field(s) in one pass…`;
 
-      try {
-        const data = await global.api.postJson(FIX_ENDPOINT, {
-          album_artist: albumArtist,
-          album,
-          field: fix.field,
-          value: fix.value,
-        });
-        if (!data.success) {
-          hideProgress();
-          global.toast.error(`Could not set "${fix.field}": ${data.error || 'unknown error'}`);
-          return;
-        }
-      } catch (error) {
+    try {
+      const data = await global.api.postJson(
+        FIX_ALL_ENDPOINT,
+        { album_artist: albumArtist, album, fixes: fixMap },
+        // Tag writes are disk-bound; the default 30 s is far too short for an
+        // album on a network mount.
+        { timeoutMs: 300000 }
+      );
+      if (!data.success) {
         hideProgress();
-        global.toast.error(`Could not set "${fix.field}": ${error.message}`);
+        global.toast.error(`Could not apply fixes: ${data.error || 'unknown error'}`);
         return;
       }
+      hideProgress();
+      global.toast.success(
+        `Updated ${data.updated_count || 0} track(s), ${data.files_updated || 0} file(s).`
+      );
+    } catch (error) {
+      hideProgress();
+      global.toast.error(`Could not apply fixes: ${error.message}`);
+      return;
     }
 
-    hideProgress();
     reloadSoon();
   }
 

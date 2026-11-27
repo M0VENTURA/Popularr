@@ -361,17 +361,19 @@ def mark_local_tags_written_for_track_ids(track_ids: Iterable[Any]) -> int:
     })
     if not ids:
         return 0
-    try:
+
+    def _stamp() -> int:
         from sqlalchemy import text
 
         stamped = 0
         with db_session() as session:
             # ⚠️ ONE ROW PER STATEMENT, IN ID ORDER — not one ``IN (...)`` list.
             # A single multi-row UPDATE takes its row locks in scan order, and
-            # the pending-recommendation writer updates the same rows one at a
-            # time; that interleaving is what Postgres killed. Sorted,
-            # single-row statements make every writer acquire in the same order
-            # (and avoid the Postgres-only ``ORDER BY`` that SQLite rejects).
+            # the album-wide writers (pending_mb_updates, the MBID fan-out)
+            # update the same rows by predicate in a different order; that
+            # interleaving is what Postgres killed. Sorted, single-row
+            # statements make every writer acquire in the same order (and avoid
+            # the Postgres-only ``ORDER BY`` that SQLite rejects).
             for track_id in ids:
                 result = session.execute(
                     text(
@@ -386,6 +388,13 @@ def mark_local_tags_written_for_track_ids(track_ids: Iterable[Any]) -> int:
                 stamped += max(int(result.rowcount or 0), 0)
             session.commit()
         return stamped
+
+    try:
+        from db.engine import run_with_deadlock_retry
+
+        # A deadlock is expected under concurrency; the loser just redoes the
+        # stamp. ``ids`` is fixed, so the retry is identical work.
+        return run_with_deadlock_retry(_stamp)
     except Exception as exc:
         logger.debug("Local tag write stamp failed", count=len(ids), error=str(exc))
         return 0

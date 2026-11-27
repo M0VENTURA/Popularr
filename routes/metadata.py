@@ -49,14 +49,20 @@ async def api_pending_recommendations() -> Any:
     ``limit`` caps the number of ALBUMS returned, newest-first; the recency
     ordering itself lives in the service (the timestamp is inside the JSON
     envelope, not a column).
+    ⚠️ OFFLOADED. ``fetch_albums_pending_review`` reads EVERY row with a
+    non-null ``pending_mb_updates`` and only then applies ``limit`` (the sort key
+    is inside the JSON envelope, so it cannot be a SQL ORDER BY). On the event
+    loop that is a full scan of the stashed rows per dashboard load.
     """
+    import asyncio
+
     try:
         limit = min(max(request.args.get("limit", 50, type=int), 1), 200)
     except (TypeError, ValueError):
         limit = 50
 
     try:
-        albums = fetch_albums_pending_review(limit=limit)
+        albums = await asyncio.to_thread(fetch_albums_pending_review, limit=limit)
     except Exception as exc:
         logger.error("Failed to read pending recommendations", error=str(exc))
         return jsonify({"success": False, "error": str(exc), "albums": []}), 500
@@ -82,18 +88,27 @@ def api_get_release_details(release_id: str) -> Any:
 
 @metadata_bp.route("/api/conflicts/pending", methods=["GET"])
 async def api_get_pending_conflicts() -> Any:
-    """Return unresolved metadata conflicts, paginated."""
+    """Return unresolved metadata conflicts, paginated.
+
+    ⚠️ DB work is offloaded to a thread. These are synchronous SQLAlchemy calls;
+    on the event loop they stall the whole hypercorn worker (the corrections
+    page's "timeouts").
+    """
+    import asyncio
+
     try:
         limit = min(request.args.get("limit", 100, type=int), 500)
         offset = max(request.args.get("offset", 0, type=int), 0)
         provider = request.args.get("provider") or None
         artist = request.args.get("artist") or None
 
-        conflicts = fetch_pending_conflicts(
-            limit=limit, offset=offset,
-            provider=provider, artist=artist,
+        conflicts = await asyncio.to_thread(
+            fetch_pending_conflicts,
+            limit=limit, offset=offset, provider=provider, artist=artist,
         )
-        total = count_pending_conflicts(provider=provider, artist=artist)
+        total = await asyncio.to_thread(
+            count_pending_conflicts, provider=provider, artist=artist
+        )
 
         return jsonify({
             "success": True,
@@ -110,8 +125,10 @@ async def api_get_pending_conflicts() -> Any:
 @metadata_bp.route("/api/conflicts/stats", methods=["GET"])
 async def api_get_conflict_stats() -> Any:
     """Return aggregate conflict statistics for the corrections page."""
+    import asyncio
+
     try:
-        stats = get_conflict_stats()
+        stats = await asyncio.to_thread(get_conflict_stats)
         return jsonify({"success": True, **stats})
     except Exception as exc:
         logger.error("Failed to fetch conflict stats", error=str(exc))
@@ -121,6 +138,8 @@ async def api_get_conflict_stats() -> Any:
 @metadata_bp.route("/api/conflicts/resolve", methods=["POST"])
 async def api_resolve_conflict() -> Any:
     """Resolve a single conflict, optionally applying a chosen value."""
+    import asyncio
+
     try:
         data = await request.get_json() or {}
         conflict_id = data.get("conflict_id")
@@ -130,7 +149,8 @@ async def api_resolve_conflict() -> Any:
         accepted_value = data.get("accepted_value")
         resolved_by = data.get("resolved_by", "webui")
 
-        result = resolve_conflict(
+        result = await asyncio.to_thread(
+            resolve_conflict,
             conflict_id=int(conflict_id),
             accepted_value=accepted_value,
             resolved_by=resolved_by,
@@ -145,6 +165,8 @@ async def api_resolve_conflict() -> Any:
 @metadata_bp.route("/api/conflicts/resolve-batch", methods=["POST"])
 async def api_resolve_conflicts_batch() -> Any:
     """Resolve all pending conflicts for a track atomically."""
+    import asyncio
+
     try:
         data = await request.get_json() or {}
         track_id = data.get("track_id")
@@ -157,7 +179,8 @@ async def api_resolve_conflicts_batch() -> Any:
             }), 400
 
         resolved_by = data.get("resolved_by", "webui")
-        result = resolve_conflicts_batch(
+        result = await asyncio.to_thread(
+            resolve_conflicts_batch,
             track_id=track_id,
             resolutions=resolutions,
             resolved_by=resolved_by,
@@ -171,6 +194,8 @@ async def api_resolve_conflicts_batch() -> Any:
 @metadata_bp.route("/api/conflicts/ignore", methods=["POST"])
 async def api_ignore_conflict() -> Any:
     """Mark a conflict as ignored (keep local value)."""
+    import asyncio
+
     try:
         data = await request.get_json() or {}
         conflict_id = data.get("conflict_id")
@@ -178,7 +203,8 @@ async def api_ignore_conflict() -> Any:
             return jsonify({"success": False, "error": "conflict_id is required"}), 400
 
         resolved_by = data.get("resolved_by", "webui")
-        result = ignore_conflict(
+        result = await asyncio.to_thread(
+            ignore_conflict,
             conflict_id=int(conflict_id),
             resolved_by=resolved_by,
         )

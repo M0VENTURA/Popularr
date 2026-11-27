@@ -172,13 +172,23 @@ async def api_set_playlist_exclusions() -> Any:
 # =============================
 # CORRECTIONS
 # =============================
+#
+# ⚠️ EVERY HANDLER BELOW OFFLOADS TO A THREAD. The ``corrections.*`` service
+# functions are SYNCHRONOUS and expensive: they resolve MusicBrainz ids, rewrite
+# audio-file tags for every track of an album, and delete files. Running them on
+# the event loop stalled the whole hypercorn worker for the duration, so every
+# OTHER request in that worker timed out — the reported "timeouts whenever I
+# perform the corrections".
 
 @artist_bp.route("/api/artist/corrections/delete-track", methods=["POST"])
 async def api_artist_corrections_delete_track() -> Any:
+    import asyncio
+
     payload = (await request.get_json(silent=True)) or {}
 
     return _json_response(
-        corrections.delete_track(
+        await asyncio.to_thread(
+            corrections.delete_track,
             track_id=payload.get("track_id", ""),
             delete_file=payload.get("delete_file", True),
         )
@@ -187,8 +197,11 @@ async def api_artist_corrections_delete_track() -> Any:
 
 @artist_bp.route("/api/artist/corrections/clear-disc-number", methods=["POST"])
 async def api_artist_corrections_clear_disc_number() -> Any:
+    import asyncio
+
     payload = (await request.get_json(silent=True)) or {}
-    data, code = corrections.clear_disc_number(
+    data, code = await asyncio.to_thread(
+        corrections.clear_disc_number,
         artist=payload.get("artist", ""),
         album=payload.get("album", ""),
         force=payload.get("force_clear", False),
@@ -198,17 +211,20 @@ async def api_artist_corrections_clear_disc_number() -> Any:
 
 @artist_bp.route("/api/artist/corrections/apply-album-mbid", methods=["POST"])
 async def api_artist_corrections_apply_album_mbid() -> Any:
+    import asyncio
+
     payload = (await request.get_json(silent=True)) or {}
-    data, code = corrections.apply_album_mbid(
-        payload
-    )
+    data, code = await asyncio.to_thread(corrections.apply_album_mbid, payload)
     return jsonify(data), code
 
 
 @artist_bp.route("/api/artist/corrections/merge-albums", methods=["POST"])
 async def api_artist_corrections_merge_albums() -> Any:
+    import asyncio
+
     payload = (await request.get_json(silent=True)) or {}
-    data, code = corrections.merge_albums(
+    data, code = await asyncio.to_thread(
+        corrections.merge_albums,
         artist=payload.get("artist", ""),
         source_albums=payload.get("source_albums", []),
         canonical_name=payload.get("canonical_name", ""),

@@ -618,6 +618,75 @@ _DB_RETRY_BASE_SECONDS = 0.5
 _DB_RETRY_MAX_SECONDS = 10.0
 
 
+def _is_deadlock_error(exc: BaseException) -> bool:
+    """True for PostgreSQL ``deadlock_detected`` (SQLSTATE 40P01).
+
+    ⚠️ A DEADLOCK IS TRANSACTION-SCOPED, NOT A CONNECTION EVENT. ``db_session``
+    retries only SESSION ACQUISITION; a deadlock raised by a statement inside the
+    block aborts the transaction and propagates. The caller must roll back and
+    retry the WHOLE unit of work — which is what ``run_with_deadlock_retry``
+    does. Retrying one statement inside an aborted transaction cannot work.
+    """
+    seen: set[int] = set()
+    current: Any = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        # psycopg2 / psycopg: ``.pgcode`` on the DBAPI error.
+        if str(getattr(current, "pgcode", "") or "") == "40P01":
+            return True
+        text_value = str(current).lower()
+        if "deadlock detected" in text_value:
+            return True
+        current = getattr(current, "orig", None)
+    return False
+
+
+def run_with_deadlock_retry(fn: Any, *, attempts: int = 4) -> Any:
+    """Run ``fn`` — which must open its OWN ``db_session`` — retrying a deadlock.
+
+    ⭐⭐ WHY THIS EXISTS. Reported (PostgreSQL)::
+
+        ERROR: deadlock detected
+        Process 1413: INSERT INTO tracks (…) … ON CONFLICT (id) DO UPDATE …
+        Process 1378: UPDATE tracks SET musicbrainz_album_mbid = …
+                      WHERE … album_artist = 'Adema' AND album = 'Planets'
+
+    Several writers legitimately target "every row of one album" by a
+    predicate. Each acquires row locks in the order the planner scans, and two
+    such writers can take the rows in different physical orders — a cycle
+    Postgres resolves by killing one session. The application-level remedy is
+    to RETRY the losing unit of work; a deadlock is expected under concurrency
+    and the loser simply redoes it.
+
+    ``fn`` must be idempotent-ish: it runs its own transaction, so a retry
+    re-executes from the top. All the writers this wraps (album-wide UPDATEs,
+    a bulk upsert, a stamp) are.
+    """
+    last: BaseException | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - re-raised below
+            if not _is_deadlock_error(exc) or attempt >= attempts - 1:
+                raise
+            last = exc
+            # Jittered exponential backoff so two retrying writers do not
+            # collide again in the same instant.
+            import random
+
+            delay = min(0.15 * (2 ** attempt), 2.0) + random.uniform(0.0, 0.15)
+            logger.warning(
+                "Deadlock detected — retrying the unit of work",
+                attempt=attempt + 1,
+                max_attempts=attempts,
+                retry_in_s=round(delay, 3),
+            )
+            time.sleep(delay)
+    if last is not None:  # pragma: no cover - loop always returns or raises
+        raise last
+    return None
+
+
 @contextmanager
 def db_session(retries: int = _DB_RETRY_ATTEMPTS) -> Generator[Session, None, None]:
     """Sync context manager yielding a Session, auto-committing on success.
@@ -662,7 +731,15 @@ def db_session(retries: int = _DB_RETRY_ATTEMPTS) -> Generator[Session, None, No
                 session.rollback()
             except Exception:
                 pass
-        if _is_transient_db_error(exc):
+        # ⚠️ A DEADLOCK IS NOT A CONNECTION OUTAGE.
+        #
+        # It is transaction-scoped: after the rollback above the connection is
+        # perfectly healthy. Treating it like one — opening the outage breaker
+        # and disposing the WHOLE pool — forced every worker to reconnect at
+        # once, which is both needless and destabilising (a reconnect storm; the
+        # driver's connection ping was where a native crash surfaced). Let the
+        # caller retry the work (``run_with_deadlock_retry``) on the SAME pool.
+        if _is_transient_db_error(exc) and not _is_deadlock_error(exc):
             _note_db_outage(exc)
             if _ENGINE:
                 _ENGINE.dispose()

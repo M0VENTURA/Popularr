@@ -5179,18 +5179,36 @@ async def bookmarks() -> Any:
 
 @ui_bp.route("/correcting")
 async def correcting() -> Any:
+    """Tag Corrections page.
+
+    ⚠️ OFFLOADED + BOUNDED. The scan of every album's consistent fields is heavy
+    (a library-wide GROUP BY plus one detail query per flagged album); on the
+    event loop it stalled the worker, and computing EVERY album to render 20
+    made the page itself slow enough to time out.
+    """
+    import asyncio
+
+    per_page = 20
+    #: How many flagged albums to materialise in one request. Comfortably more
+    #: than one page, bounded so a huge backlog cannot make the page hang.
+    _SCAN_LIMIT = 200
     try:
         page = max(request.args.get("page", 1, type=int), 1)
-        per_page = 20
 
-        inconsistencies = get_album_tag_inconsistencies(artist_filter=None)
+        # Fetch one extra so "there are more" can be reported honestly.
+        inconsistencies = await asyncio.to_thread(
+            get_album_tag_inconsistencies, None, _SCAN_LIMIT + 1
+        )
+        truncated = len(inconsistencies) > _SCAN_LIMIT
+        if truncated:
+            inconsistencies = inconsistencies[:_SCAN_LIMIT]
         total = len(inconsistencies)
         total_pages = max(1, (total + per_page - 1) // per_page)
 
         start = (page - 1) * per_page
         page_items = inconsistencies[start:start + per_page]
 
-        conflict_stats = get_conflict_stats()
+        conflict_stats = await asyncio.to_thread(get_conflict_stats)
 
         return await render_template(
             "pages/corrections.html",
@@ -5199,6 +5217,7 @@ async def correcting() -> Any:
             page=page,
             total_pages=total_pages,
             conflict_stats=conflict_stats,
+            scan_truncated=truncated,
         )
     except Exception as exc:
         logger.error("Corrections page error", error=str(exc), exc_info=True)
@@ -5209,6 +5228,7 @@ async def correcting() -> Any:
             page=1,
             total_pages=1,
             conflict_stats={"total_pending": 0, "by_provider": [], "by_field": []},
+            scan_truncated=False,
             error=str(exc),
         )
 
@@ -5310,7 +5330,18 @@ async def downloads_discover_upcoming() -> Any:
 
 @ui_bp.route("/artist/<path:name>/corrections")
 async def artist_corrections(name: str) -> Any:
-    data, code = get_artist_corrections(unquote(name or "").strip())
+    """Per-artist corrections console.
+
+    ⚠️ OFFLOADED. ``get_artist_corrections`` runs six-plus sequential scans over
+    the artist's tracks (one of them with a per-row ``SequenceMatcher``). On the
+    event loop it stalled the whole worker, which is one half of the reported
+    corrections timeouts.
+    """
+    import asyncio
+
+    data, code = await asyncio.to_thread(
+        get_artist_corrections, unquote(name or "").strip()
+    )
     if code != 200:
         return jsonify(data), code
     return await render_template("pages/artist_corrections.html", **data)

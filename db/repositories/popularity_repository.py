@@ -230,6 +230,8 @@ def _is_transient_db_error(exc: Exception) -> bool:
 
 def run_with_db_lock_retry(operation):
     """Run ``operation`` with retries for lock contention AND transient DB errors."""
+    from db.engine import _is_deadlock_error
+
     for attempt in range(DB_LOCK_MAX_RETRIES):
         try:
             return operation()
@@ -237,12 +239,16 @@ def run_with_db_lock_retry(operation):
             transient = _is_transient_db_error(exc) or "lock" in str(exc).lower()
             if not transient or attempt >= DB_LOCK_MAX_RETRIES - 1:
                 raise
-            # Drop pooled connections so the next attempt uses fresh ones.
-            try:
-                from db.engine import get_engine
-                get_engine().dispose()
-            except Exception:
-                pass
+            # ⚠️ Do NOT dispose the pool for a DEADLOCK. It is transaction-scoped
+            # — the connection is fine after the rollback — and disposing makes
+            # every worker reconnect at once. Only genuine connection errors
+            # warrant fresh connections.
+            if not _is_deadlock_error(exc):
+                try:
+                    from db.engine import get_engine
+                    get_engine().dispose()
+                except Exception:
+                    pass
             time.sleep(DB_LOCK_BASE_DELAY_SECONDS * (attempt + 1))
             continue
     raise RuntimeError("retry loop exhausted")

@@ -37,7 +37,11 @@ from helpers.config_helpers import (
 from services.catalog.album_classification_service import classify_album_type
 from services.enrichment.musicbrainz_service import get_shared_mb_client
 from services.infrastructure.api_rate_limiter import get_rate_limiter
-from services.metadata.correction_service import fix_album_field, get_album_tag_inconsistencies
+from services.metadata.correction_service import (
+    fix_album_field,
+    fix_album_fields,
+    get_album_tag_inconsistencies,
+)
 from services.metadata.tag_file_service import sync_track_tags_to_file, update_file_metadata
 
 logger = structlog.get_logger(__name__)
@@ -1704,8 +1708,17 @@ def api_recent_genre_updates() -> Any:
 
 @misc_api_bp.route("/correcting/fix-album-field", methods=["POST"])
 async def api_correcting_fix_album_field() -> Any:
-    """Apply a single field value to all tracks in an album."""
+    """Apply a single field value to all tracks in an album.
+
+    ⚠️ ``fix_album_field`` is SYNCHRONOUS and expensive: it opens a DB session,
+    updates the album, then rewrites the AUDIO TAGS of every track in it. Running
+    it on the event loop froze the worker for the whole album's disk phase, so
+    every other request in that worker timed out — the reported "timeouts
+    whenever I perform the corrections". Offloaded to a thread.
+    """
     try:
+        import asyncio
+
         payload = (await request.get_json(silent=True)) or {}
         album_artist = (payload.get("album_artist") or "").strip()
         album = (payload.get("album") or "").strip()
@@ -1713,10 +1726,47 @@ async def api_correcting_fix_album_field() -> Any:
         value = payload.get("value")
         if not album or not field:
             return jsonify({"error": "album and field required"}), 400
-        updated, files = fix_album_field(album_artist, album, field, value)
+        updated, files = await asyncio.to_thread(
+            fix_album_field, album_artist, album, field, value
+        )
         return jsonify({"success": True, "updated_count": updated, "files_updated": files})
     except Exception as exc:
         logger.error("Fix album field failed", error=str(exc))
+        return jsonify({"error": str(exc)}), 500
+
+
+@misc_api_bp.route("/correcting/fix-album-fields", methods=["POST"])
+async def api_correcting_fix_album_fields() -> Any:
+    """Apply SEVERAL field values to one album in ONE pass.
+
+    ⚠️ "Fix all (majority)" used to POST once per inconsistent field, and each
+    POST re-selected the album and rewrote EVERY file again. A 12-track album
+    with 10 inconsistent fields meant 120 tag rewrites where 12 suffice — and
+    the browser timed out while the server kept going. One request, one file
+    pass.
+
+    Body: ``{album_artist, album, fixes: {field: value, …}}``.
+    """
+    try:
+        import asyncio
+
+        payload = (await request.get_json(silent=True)) or {}
+        album_artist = (payload.get("album_artist") or "").strip()
+        album = (payload.get("album") or "").strip()
+        fixes = payload.get("fixes")
+        if not album or not isinstance(fixes, dict) or not fixes:
+            return jsonify({"error": "album and fixes required"}), 400
+        updated, files, applied = await asyncio.to_thread(
+            fix_album_fields, album_artist, album, fixes
+        )
+        return jsonify({
+            "success": True,
+            "updated_count": updated,
+            "files_updated": files,
+            "fields_applied": applied,
+        })
+    except Exception as exc:
+        logger.error("Fix album fields failed", error=str(exc))
         return jsonify({"error": str(exc)}), 500
 
 

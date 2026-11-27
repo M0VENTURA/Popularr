@@ -1885,7 +1885,7 @@ def _persist_album_type_to_tracks(
             pass
 
     if release_group_mbid:
-        try:
+        def _fan_out_release_group() -> None:
             with db_session() as session:
                 session.execute(
                     text("""
@@ -1906,6 +1906,13 @@ def _persist_album_type_to_tracks(
                         "replace_release_group": bool(replace_release_group),
                     },
                 )
+
+        try:
+            from db.engine import run_with_deadlock_retry
+
+            # Album-wide UPDATE by predicate — retry a deadlock (see the
+            # release-MBID fan-out below).
+            run_with_deadlock_retry(_fan_out_release_group)
             for track in tracks or []:
                 if replace_release_group or not track.get("musicbrainz_releasegroupid"):
                     track["musicbrainz_releasegroupid"] = release_group_mbid
@@ -1935,7 +1942,7 @@ def _persist_album_type_to_tracks(
             pass
 
         if release_mbid and release_mbid != str(release_group_mbid).strip():
-            try:
+            def _fan_out_release_mbid() -> None:
                 with db_session() as session:
                     session.execute(
                         text("""
@@ -1948,6 +1955,15 @@ def _persist_album_type_to_tracks(
                         """),
                         {"release_mbid": release_mbid, "artist": artist, "album": album},
                     )
+
+            try:
+                from db.engine import run_with_deadlock_retry
+
+                # ⚠️ RETRY A DEADLOCK. This album-wide UPDATE by predicate
+                # deadlocked against the bulk upsert / another fan-out of the
+                # SAME album's rows (reported PostgreSQL ``deadlock detected``
+                # on ``album='Planets'``). The loser redoes the fan-out.
+                run_with_deadlock_retry(_fan_out_release_mbid)
                 for track in tracks or []:
                     if not track.get("musicbrainz_album_mbid"):
                         track["musicbrainz_album_mbid"] = release_mbid
