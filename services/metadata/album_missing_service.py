@@ -645,6 +645,36 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
     except Exception as _owner_exc:
         logger.debug("Cross-album library ownership check failed", error=str(_owner_exc))
 
+    # ── Which MB track each TITLE belongs to ──────────────────────────────
+    #
+    # ⚠️⚠️ A POSITION OCCUPIED BY A DIFFERENT SONG IS NOT EVIDENCE.
+    #
+    # Reported: "Missing tracks doesn't pick up a track if another track has the
+    # wrong track number. A track is track 4, but labelled as one, so it didn't
+    # properly load 1 or 4."
+    #
+    # A mislabelled file takes someone else's slot: track 4's audio tagged as
+    # track 1. The release's track 1 then looks present because position 1 is
+    # occupied — and the pairing rule below could not tell, because the occupant
+    # is a different song with (usually) an unknown length, and an unknown length
+    # is deliberately permissive. So the genuinely missing track 1 was never
+    # offered, which is the report.
+    #
+    # The occupant's TITLE already says whose slot it is, so resolve that first:
+    # if the row sitting at this number matches a DIFFERENT track of the release,
+    # the number belongs to that track, not this one. This is checked before the
+    # position is treated as proof, and it does not loosen the pairing rule
+    # itself — a correctly numbered album, or a row whose title disagrees with
+    # every MB track, behaves exactly as before.
+    _mb_positions_by_title: dict[str, set[tuple[int, str]]] = {}
+    for _mt in mb_tracks:
+        _key = _title_match_key(_mt.get("title") or "")
+        if not _key:
+            continue
+        _mb_positions_by_title.setdefault(_key, set()).add(
+            (_disc_of(_mt.get("disc_number")), str(_mt.get("track_number") or "").strip())
+        )
+
     missing = []
     #: Why the rest of the release is NOT listed — one dict, four gates.
     #: Without it a track dropped by a gate is indistinguishable from one that
@@ -675,15 +705,45 @@ def get_missing_tracks(artist: str, album: str, release_mbid: str | None = None)
             # length does not, and an unknown length stays permissive so an
             # untagged file is not lost.
             _lib_title, _lib_duration, _lib_path = lib_by_position[(mb_disc, mb_num)]
-            if (
-                _lib_duration is None
-                and _lib_path
-                and not _titles_agree_for_pairing(_lib_title, mb_title)
-            ):
-                _lib_duration = _file_duration_seconds(str(_lib_path))
-            position_occupied = _track_number_pairing_allowed(
-                _lib_title, mb_title, _lib_duration, mt.get("duration"),
+
+            # ⚠️⚠️ FIRST: does the occupant belong to ANOTHER track of this
+            # release? A mislabelled file takes a slot that is not its own
+            # (track 4 tagged as track 1), which made track 1 look present and
+            # hid it from the missing list — the reported "a track is track 4,
+            # but labelled as one, so it didn't properly load 1 or 4".
+            #
+            # Answering this does not depend on length at all: the occupant's own
+            # title names its real track, and that track already has its own
+            # position. So the number belongs to the other track, not this one.
+            _occupant_key = _title_match_key(_lib_title)
+            _occupant_positions = _mb_positions_by_title.get(_occupant_key, set())
+            _belongs_to_another = bool(
+                _occupant_key
+                and _occupant_key != norm
+                and any(
+                    position != (mb_disc, mb_num)
+                    for position in _occupant_positions
+                )
             )
+
+            if _belongs_to_another:
+                # The number is taken by a file that names a different song of
+                # this release. This track's OWN copy is not here — fall through
+                # to the title check and, failing that, report it missing.
+                position_occupied = False
+                excluded["mislabelled_position"] = (
+                    excluded.get("mislabelled_position", 0) + 1
+                )
+            else:
+                if (
+                    _lib_duration is None
+                    and _lib_path
+                    and not _titles_agree_for_pairing(_lib_title, mb_title)
+                ):
+                    _lib_duration = _file_duration_seconds(str(_lib_path))
+                position_occupied = _track_number_pairing_allowed(
+                    _lib_title, mb_title, _lib_duration, mt.get("duration"),
+                )
         if position_occupied or norm in lib_norm:
             # ⚠️ Position counts even when the TITLE differs: a wrong track
             # sitting at disc 1 / track 10 makes 10 look present. That is the

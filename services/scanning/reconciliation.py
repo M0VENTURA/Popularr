@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -832,11 +833,16 @@ def local_authority_conflicts(
         # bullet-joined duplicate of itself, it is corruption, not a user edit:
         # skip the protection so the provider's value can repair the row.
         if _looks_like_serialised_debris(existing.get(field)):
-            logger.info(
-                "Ignoring a malformed local value instead of protecting it",
-                field=field,
-                local=str(existing.get(field))[:120],
-            )
+            # ⚠️ LOG ONCE PER VALUE, NOT ONCE PER ROW PER SCAN.
+            #
+            # This is called for every authority field of every imported track.
+            # A library whose composer credits were polluted by an old writer
+            # produced the SAME line hundreds of times per scan — the reported
+            # log wall of "Ignoring a malformed local value …" with the identical
+            # value repeated — which buries everything else and makes a real new
+            # problem impossible to spot. The corruption is still repaired
+            # exactly as before; only the repetition is gone.
+            _note_debris_logged(field, existing.get(field))
             continue
         if existing_value == payload_value:
             continue
@@ -847,6 +853,39 @@ def local_authority_conflicts(
             continue
         conflicts.append(field)
     return conflicts
+
+
+#: Debris values already reported, so a scan logs each ONCE.
+#:
+#: Bounded: a library polluted across many distinct values must not grow this
+#: without limit. Past the cap the set is simply not consulted for new values —
+#: logging resumes rather than silently stopping, which is the safer failure.
+_DEBRIS_LOGGED_MAX = 500
+_debris_logged: set[tuple[str, str]] = set()
+_debris_logged_lock = threading.Lock()
+
+
+def _note_debris_logged(field: str, value: Any) -> None:
+    """Log a malformed local value once per (field, value) pair.
+
+    See the caller: the repair itself is unchanged, and only the repeated log
+    lines are suppressed.
+    """
+    key = (str(field or ""), str(value or ""))
+    try:
+        with _debris_logged_lock:
+            if len(_debris_logged) >= _DEBRIS_LOGGED_MAX:
+                _debris_logged.clear()
+            if key in _debris_logged:
+                return
+            _debris_logged.add(key)
+    except Exception:
+        pass
+    logger.info(
+        "Ignoring a malformed local value instead of protecting it",
+        field=field,
+        local=str(value)[:120],
+    )
 
 
 def _looks_like_serialised_debris(value: Any) -> bool:
