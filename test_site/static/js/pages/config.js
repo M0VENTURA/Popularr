@@ -701,6 +701,25 @@
   }
 
   /**
+   * A warning banner when the job's PLAYLIST phase was deferred.
+   *
+   * ⚠️ Reported: "the covers collection still has 3 star songs in it after
+   * running the rebuild". ``sync_playlist_by_name`` defers every playlist write
+   * while a Navidrome import runs and reports ``skipped`` — which counted as
+   * success, so the job claimed a full rebuild having written nothing. The
+   * server now waits for the import and flags a deferral; this is how the user
+   * finds out that the playlists may not have changed.
+   */
+  function _resyncDeferredNote(result) {
+    if (!result || !result.playlists_deferred) return '';
+    return '<div class="alert alert-warning py-2 mt-2 mb-0">'
+      + '<i class="bi bi-exclamation-triangle me-1"></i>'
+      + esc(result.warning
+        || 'A Navidrome import was running, so playlist updates were deferred.')
+      + '</div>';
+  }
+
+  /**
    * Epoch of the result currently painted into the resync card.
    *
    * ⚠️ THE PREVIEW AND THE APPLY SHARE ONE CARD. On page load BOTH progress
@@ -891,7 +910,8 @@
                 + (restored.genres_changed || 0) + ' track genre set(s) updated, '
                 + (restored.playlists_written || 0) + ' playlist(s) synced'
                 + (restored.seconds ? ' in ' + restored.seconds + 's' : '') + '.'
-                + _resyncWhen(data.last_updated) + '</div>';
+                + _resyncWhen(data.last_updated) + '</div>'
+                + _resyncDeferredNote(restored);
             }
           }
         }
@@ -918,7 +938,8 @@
           + (result.genres_changed || 0) + ' track genre set(s) updated, '
           + (result.playlists_written || 0) + ' playlist(s) synced'
           + (result.seconds ? ' in ' + result.seconds + 's' : '') + '.'
-          + _resyncWhen(data.last_updated) + '</div>';
+          + _resyncWhen(data.last_updated) + '</div>'
+          + _resyncDeferredNote(result);
       }
     } catch (_err) {
       setState('');

@@ -758,6 +758,72 @@ def start_preview_genre_playlist_resync(*, limit_tracks: int | None = None) -> d
 # Public: apply (background)
 # ---------------------------------------------------------------------------
 
+def _wait_for_navidrome_import(
+    timeout_seconds: float = 900.0,
+) -> bool:
+    """Wait (bounded) for a running Navidrome import so playlist syncs are real.
+
+    ⚠️⚠️ WHY THIS IS HERE — "the covers collection still has 3 star songs after
+    running the rebuild".
+
+    ``sync_playlist_by_name`` DEFERS every ``createPlaylist`` / ``updatePlaylist``
+    / ``getPlaylists`` while a Navidrome import is running (see
+    ``services/navidrome/import_gate``) and returns ``skipped``. That deferral is
+    correct — a deferred ``getPlaylists`` returns an empty list, which is
+    indistinguishable from "not there yet", so proceeding would CREATE a second
+    copy of the playlist.
+
+    What was wrong is that ``skipped`` counts as SUCCESS upstream
+    (``_playlist_sync_succeeded``), so this job reported "17 playlist(s) rebuilt"
+    having written nothing at all. Imports run on a schedule and take minutes, so
+    a rebuild started during one silently did nothing and left every playlist —
+    covers included — exactly as it was, 3★ tracks and all.
+
+    Waiting is safe here: this is a background job with no request timeout, and
+    the alternative is a guaranteed no-op. Fails OPEN (returns True) when the gate
+    cannot be read, matching the gate's own policy.
+    """
+    try:
+        from services.navidrome.import_gate import is_import_running_uncached
+    except Exception:
+        return True
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    announced = False
+    while True:
+        try:
+            if not is_import_running_uncached():
+                return True
+        except Exception:
+            return True  # fail open — never block on a broken gate
+        if time.monotonic() >= deadline:
+            return False
+        if not announced:
+            announced = True
+            logger.info(
+                "Genre/playlist resync: waiting for the Navidrome import to finish "
+                "before rebuilding playlists (a sync would be deferred and skipped)"
+            )
+            try:
+                from helpers.logging_config import log_unified
+
+                log_unified(
+                    "Genre/Playlist Resync - waiting for the running Navidrome "
+                    "import to finish before rebuilding playlists…"
+                )
+            except Exception:
+                pass
+            _write_progress(
+                running=True, percent=52.0, phase=PHASE_PLAYLISTS,
+                detail=(
+                    "Waiting for the Navidrome import to finish — a playlist sync "
+                    "would otherwise be skipped…"
+                ),
+                status="running",
+            )
+        time.sleep(2.0)
+
+
 def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str, Any]:
     """Write the genre changes, then rebuild the genre playlists.
 
@@ -878,6 +944,31 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
             running=True, percent=55.0, phase=PHASE_PLAYLISTS,
             detail="Rebuilding genre playlists…", status="running",
         )
+
+        # ⚠️⚠️ A PLAYING IMPORT MAKES EVERY SYNC BELOW A NO-OP.
+        #
+        # ``sync_playlist_by_name`` defers while an import is running and returns
+        # "skipped", which counts as success upstream — so without this wait the
+        # job reported a full rebuild while every playlist, covers included, kept
+        # its old contents ("still has 3 star songs after running the rebuild").
+        import_deferred = not _wait_for_navidrome_import()
+        if import_deferred:
+            logger.warning(
+                "Genre/playlist resync: a Navidrome import is still running after "
+                "the wait window — playlist syncs will be DEFERRED, so the "
+                "playlists may not change"
+            )
+            try:
+                from helpers.logging_config import log_unified
+
+                log_unified(
+                    "⚠️ Genre/Playlist Resync - the Navidrome import did not finish "
+                    "in time, so playlist updates were skipped. Run this again once "
+                    "the import has finished."
+                )
+            except Exception:
+                pass
+
         from services.popularity.stages.finalise_stage import (
             _create_genre_top_track_playlists,
             invalidate_genre_playlist_rows,
@@ -972,12 +1063,22 @@ def apply_genre_playlist_resync(*, limit_tracks: int | None = None) -> dict[str,
             "playlists_written": int(written or 0),
             "seconds": elapsed,
         }
+        if import_deferred:
+            # ⚠️ SAY SO. Reporting a plain "N playlist(s) synced" here would
+            # claim work the import gate prevented.
+            result["playlists_deferred"] = True
+            result["warning"] = (
+                "A Navidrome import was still running, so playlist updates were "
+                "deferred and may not have been applied. Run this again once the "
+                "import has finished."
+            )
         _write_progress(
             running=False, percent=100.0, phase=PHASE_DONE,
             processed=changed, total=changed,
             detail=(
                 f"{changed} track genre set(s) · "
                 f"{result['playlists_written']} playlist(s) synced"
+                + (" · PLAYLISTS DEFERRED (import running)" if import_deferred else "")
             ),
             status="complete", result=result,
         )
