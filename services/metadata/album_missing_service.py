@@ -1382,6 +1382,30 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
                 ),
                 {"artist": artist, "album": album},
             ).scalar() or 0
+
+            # ⚠️ WHAT THE LIBRARY ALREADY HOLDS — the anti-join for the rows
+            # below. A downloaded track must stop rendering as missing the
+            # moment its `tracks` row exists; see the note at the filter.
+            #
+            # Defensive on its own: this is a VIEW improvement, and a failure
+            # here must degrade to "no anti-join" rather than blank the whole
+            # missing list (which the outer handler would do).
+            owned_rows: list[Any] = []
+            try:
+                owned_rows = session.execute(
+                    text(
+                        "SELECT title, track_number, disc_number FROM tracks "
+                        "WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist) "
+                        "  AND LOWER(COALESCE(album, '')) = LOWER(:album) "
+                        "  AND COALESCE(file_path, '') NOT LIKE '%__queued_for_download__%'"
+                    ),
+                    {"artist": artist, "album": album},
+                ).mappings().all()
+            except Exception as _owned_exc:
+                logger.debug(
+                    "Missing-track anti-join unavailable",
+                    artist=artist, album=album, error=str(_owned_exc),
+                )
     except Exception as exc:
         logger.error(
             "Get persisted missing tracks failed",
@@ -1390,6 +1414,68 @@ def get_missing_tracks_from_db(artist: str, album: str) -> dict[str, Any]:
         return {"missing_tracks": [], "missing_count": 0, "mb_total": 0, "library_count": 0}
 
     missing = [dict(r) for r in rows]
+    # ⚠️⚠️ A DOWNLOADED TRACK MUST STOP SHOWING AS MISSING — IMMEDIATELY.
+    #
+    # Reported: "When a missing item is downloaded, it doesn't auto heal. I need
+    # to manually look up a release again."
+    #
+    # This function returns the PERSISTED rows verbatim. Rows are only ever
+    # deleted by ``_persist_missing_tracks``, which runs from a live recompute —
+    # i.e. from a full/metadata scan of the album, or the manual
+    # ``refresh=1`` "Lookup MBID". Nothing runs either after an import, so the
+    # row outlives the download: the page keeps the yellow badge, and because an
+    # ``imported`` queue row deliberately stops matching
+    # ``_queued_status_for_album``, the track even loses its "in queue" tick and
+    # re-renders as a fresh "Missing" row with a live Download button.
+    #
+    # The fix is an ANTI-JOIN against ``tracks`` using the SAME identity the
+    # persistence layer deletes on (``_missing_row_key``): disc + track number +
+    # normalised title, plus the title alone. It needs no MusicBrainz call, so a
+    # page load stays a pure DB read.
+    #
+    # This heals the VIEW; the persisted row is removed by the next recompute
+    # (the scan, or the album's Lookup MBID). Until then the two agree, because
+    # both are filtered by the same test.
+    try:
+        _owned_titles: set[str] = set()
+        _owned_positions: set[tuple[str, str]] = set()
+        for _row in owned_rows:
+            _title_key = _title_match_key(str(_row.get("title") or ""))
+            if _title_key:
+                _owned_titles.add(_title_key)
+            _num = str(_row.get("track_number") or "").strip()
+            if _num and _title_key:
+                _owned_positions.add(
+                    (f"{_disc_of(_row.get('disc_number'))}|{_num}", _title_key)
+                )
+    except Exception:
+        _owned_titles, _owned_positions = set(), set()
+
+    if _owned_titles or _owned_positions:
+        _kept: list[dict[str, Any]] = []
+        _healed = 0
+        for _row in missing:
+            _num = str(_row.get("track_number") or "").strip()
+            _row_title = _title_match_key(str(_row.get("title") or ""))
+            _pos_key = f"{_disc_of(_row.get('disc_number'))}|{_num}"
+            # Title alone is enough: the release's track and the local copy can
+            # legitimately sit at different numbers (a bonus edition, a rip
+            # numbered across the whole set), which is the same rule the live
+            # matcher applies. The position is a second chance, not a gate.
+            if _row_title and _row_title in _owned_titles:
+                _healed += 1
+                continue
+            if _num and (_pos_key, _row_title) in _owned_positions:
+                _healed += 1
+                continue
+            _kept.append(_row)
+        if _healed:
+            logger.info(
+                "Missing-track list healed against the library",
+                artist=artist, album=album, healed=_healed, remaining=len(_kept),
+            )
+        missing = _kept
+
     # ``track_number`` is TEXT here too: ``COALESCE(track_number, '999')``
     # still compares "10" < "2", which is the reported missing-track order
     # after importing from the album page.

@@ -1866,10 +1866,32 @@ def _apply_stored_metadata(
             "release_title", "release_year",
             "disctotal", "recordlabel", "catalognumber", "barcode", "media",
             "isrc", "tracktotal", "musicbrainz_album_mbid",
+            # ⚠️⚠️ THE RELEASE-TRACK ID WAS RESOLVED, WRITTEN TO THE FILE, AND
+            # THEN THROWN AWAY HERE.
+            #
+            # Reported: "the Recording ID and Release Track ID aren't populating
+            # when importing from soulseek." The import fetches the release,
+            # matches this track's position, fills `musicbrainz_releasetrackid`
+            # into `meta`, writes it into the file tags — and this allow-list,
+            # which is what reaches `insert_or_update_track`, did not contain the
+            # column. So `tracks.musicbrainz_releasetrackid` stayed NULL and the
+            # value only appeared later, when a Navidrome import read the tag
+            # back off the file.
+            "musicbrainz_releasetrackid",
+            # The legacy alias the album review reads as "Recording ID". Kept in
+            # step with `recording_mbid` (which IS in this list) so the review
+            # stops proposing a value the import already stored.
+            "mbid",
         }
         for _col in _mb_cols:
             if meta.get(_col) not in (None, ""):
                 _db_payload[_col] = meta[_col]
+
+        # The recording id has two spellings in the schema; a writer that sets
+        # only one leaves the other stale, and the album review reads `mbid`
+        # while everything else reads `recording_mbid`.
+        if _db_payload.get("recording_mbid") and not _db_payload.get("mbid"):
+            _db_payload["mbid"] = _db_payload["recording_mbid"]
 
         if _album_genre_fill and not _db_payload.get("genres"):
             _db_payload["genres"] = _album_genre_fill

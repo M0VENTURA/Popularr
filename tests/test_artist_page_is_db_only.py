@@ -390,10 +390,11 @@ class TestMissingTracksReader:
     def test_an_empty_snapshot_is_zero_not_an_error(self, monkeypatch):
         from services.metadata import album_missing_service as svc
 
-        # Three queries now: rows, library count, and how many the user
-        # dismissed — a page load must still be able to say "N not shown",
-        # because ``ignored`` is never cleared by anything.
-        _patch_session(monkeypatch, svc, _FakeSession([[], [3], [0]]))
+        # The reader now runs FOUR queries: the persisted rows, the library
+        # count, how many the user dismissed, and the anti-join against `tracks`
+        # that drops rows the library has since gained (a downloaded track must
+        # stop showing as missing without a manual Lookup MBID).
+        _patch_session(monkeypatch, svc, _FakeSession([[], [3], [0], []]))
         result = svc.get_missing_tracks_from_db("Artist", "Album")
         assert result == {
             "missing_tracks": [], "missing_count": 0, "mb_total": 3, "library_count": 3,

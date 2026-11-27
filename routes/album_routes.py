@@ -348,11 +348,25 @@ async def api_album_apply_mbid() -> Any:
     mbid = str(data.get("mbid", "") or "").strip()
     rg_mbid = str(data.get("release_group_mbid", "") or "").strip()
     cover_url = data.get("cover_art_url", "")
-    
+    # ⚠️ A manual, explicit override of the FOLDER-BOUNDARY heuristic.
+    #
+    # Reported: "Merge track into release doesn't work if they are in different
+    # folders. As this is a manual option, it should override that." The guard
+    # infers "two albums sharing a name" from the paths, which is a guess — and a
+    # downloaded track in its own folder trips it for a legitimate single album.
+    # Only an explicit request sets this; the default stays strict.
+    allow_cross_folder = bool(data.get("allow_cross_folder"))
+
     if not artist or not album:
         return jsonify({"error": "Missing artist or album"}), 400
-        
-    result, status = _pop_status(apply_mbid_to_album(artist, album, mbid, rg_mbid, cover_url), 200)
+
+    result, status = _pop_status(
+        apply_mbid_to_album(
+            artist, album, mbid, rg_mbid, cover_url,
+            allow_cross_folder=allow_cross_folder,
+        ),
+        200,
+    )
     if status == 200 and result.get("success"):
         from helpers.logging_config import log_unified
         log_unified(f"[ALBUM] Applied MusicBrainz ID to '{artist} - {album}' ({mbid or rg_mbid or 'n/a'})")

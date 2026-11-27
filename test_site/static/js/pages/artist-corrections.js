@@ -768,12 +768,7 @@
 
     return global.buttonState.withBusy(button, '', async () => {
       try {
-        const result = await global.api.postJson('/api/artist/corrections/apply-album-mbid', {
-          artist: artistName,
-          album,
-          mbid,
-        });
-        if (!result.success) throw new Error(result.error || 'Failed to apply MBID');
+        const result = await applyAlbumMbidRequest({ artist: artistName, album, mbid });
         global.toast.success(
           `Applied MBID to ${result.rows_updated || 0} track(s) in "${album}" ` +
           `(${result.files_updated || 0} files updated).`
@@ -783,6 +778,60 @@
         global.toast.error('Could not apply MBID: ' + error.message);
       }
     });
+  }
+
+  /**
+   * POST an album MBID, offering the folder-boundary override on refusal.
+   *
+   * ⚠️ A REFUSAL NAMING MULTIPLE FOLDERS IS A HEURISTIC, NOT A FACT.
+   *
+   * Reported: "Merge track into release doesn't work if they are in different
+   * folders. As this is a manual option, it should override that." The guard
+   * infers "two albums sharing a name" from the file paths, so a track
+   * legitimately downloaded into its own folder trips it. The user has already
+   * clicked Apply, so ask once — naming the folders — and retry with the
+   * override rather than leaving them with an error they cannot get past.
+   */
+  async function applyAlbumMbidRequest(body) {
+    const result = await global.api.postJson(
+      '/api/artist/corrections/apply-album-mbid', body
+    );
+    if (result && result.success !== false) return result;
+
+    const folders = Array.isArray(result && result.folders) ? result.folders : [];
+    const folderRefusal = folders.length > 1
+      || (result && result.reason === 'multiple_folders');
+    if (!folderRefusal) {
+      throw new Error((result && result.error) || 'Failed to apply MBID');
+    }
+
+    const ask = (global.ui && typeof global.ui.confirm === 'function')
+      ? global.ui.confirm
+      : null;
+    if (!ask) throw new Error(result.error || 'Failed to apply MBID');
+
+    const accepted = await ask({
+      title: 'This album spans several folders',
+      message:
+        'The files for this album live in ' + folders.length + ' different '
+        + 'folders, which is normally how two same-named albums are told apart.',
+      items: folders,
+      detail:
+        'You chose this release manually, so it can be applied anyway. The '
+        + 'files keep their own paths — nothing is moved.',
+      tone: 'warning',
+      confirmLabel: 'Apply anyway',
+    });
+    if (!accepted) return null;
+
+    const forced = await global.api.postJson(
+      '/api/artist/corrections/apply-album-mbid',
+      Object.assign({}, body, { allow_cross_folder: true })
+    );
+    if (forced && forced.success === false) {
+      throw new Error(forced.error || 'Failed to apply MBID');
+    }
+    return forced;
   }
 
   /**

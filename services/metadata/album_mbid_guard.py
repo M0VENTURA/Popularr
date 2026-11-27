@@ -312,12 +312,26 @@ def guard_album_mbid(
     mb_artist: str = "",
     mb_album: str = "",
     file_paths: Iterable[Any] | None = None,
+    enforce_folder_boundary: bool = True,
 ) -> dict[str, Any]:
     """One entry point for every caller that is about to trust an album MBID.
 
     ``file_paths`` is optional: the album-page lookup has no file list yet and
     only the text check applies there.  When paths ARE supplied the physical
     boundary is enforced too.
+
+    ⚠️ ``enforce_folder_boundary=False`` IS FOR A MANUAL OVERRIDE ONLY.
+
+    Reported: "Merge track into release doesn't work if they are in different
+    folders. As this is a manual option, it should override that." The boundary
+    is a HEURISTIC — it infers "two albums sharing a name" from the paths — and a
+    heuristic must not be able to veto a person who has just said, explicitly,
+    that these rows are one album. A track legitimately downloaded into its own
+    folder (or an album the user is deliberately consolidating) trips it.
+
+    The TEXT check still runs: the release must still look like this album by
+    artist and title. Only the physical inference is skipped, and the caller is
+    expected to have shown the user what will happen.
     """
     config = get_album_mbid_guard_config()
     if not config.get("enabled", True):
@@ -341,8 +355,17 @@ def guard_album_mbid(
         )
         verdict["folders"] = boundary["folders"]
         if not boundary["ok"]:
-            verdict["ok"] = False
-            verdict["reason"] = boundary["reason"]
+            if enforce_folder_boundary:
+                verdict["ok"] = False
+                verdict["reason"] = boundary["reason"]
+            else:
+                # A manual override: record that the boundary was crossed so the
+                # response can report it, but do not refuse.
+                verdict["folder_boundary_overridden"] = True
+                logger.info(
+                    "Folder boundary overridden by an explicit user action",
+                    artist=artist, album=album, folders=boundary["folders"],
+                )
 
     return verdict
 

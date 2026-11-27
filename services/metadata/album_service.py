@@ -650,7 +650,15 @@ def apply_genres_to_album(artist: str, album: str, genres: list[str]) -> dict[st
 # MBID / DISCOGS
 # =============================================================================
 
-def apply_mbid_to_album(artist: str, album: str, mbid: str, rg_mbid: str, cover_url: str) -> dict[str, Any]:
+def apply_mbid_to_album(
+    artist: str,
+    album: str,
+    mbid: str,
+    rg_mbid: str,
+    cover_url: str,
+    *,
+    allow_cross_folder: bool = False,
+) -> dict[str, Any]:
     """Apply a MusicBrainz album/release-group ID to every track in an album.
 
     Writes BOTH the database columns AND the physical audio file tags — the
@@ -679,6 +687,11 @@ def apply_mbid_to_album(artist: str, album: str, mbid: str, rg_mbid: str, cover_
             mb_artist=mb_text.get("artist", ""),
             mb_album=mb_text.get("title", ""),
             file_paths=file_paths or None,
+            # ⚠️ A MANUAL override only. The folder boundary is a heuristic
+            # ("these paths look like two albums"), and a track downloaded into
+            # its own folder trips it even when the user has just said the rows
+            # are one album. The TEXT check still applies.
+            enforce_folder_boundary=not allow_cross_folder,
         )
         if not verdict["ok"]:
             log_verdict(verdict, artist=artist, album=album, mbid=mbid, rg_mbid=rg_mbid)

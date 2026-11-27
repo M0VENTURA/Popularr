@@ -360,6 +360,12 @@ def apply_album_mbid(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             mb_artist=mb_text.get("artist", ""),
             mb_album=mb_text.get("title", ""),
             file_paths=file_paths or None,
+            # ⚠️ A MANUAL override only. The boundary is a heuristic
+            # ("these paths look like two albums") and must not veto a person
+            # who has explicitly chosen this release for this album. A track
+            # downloaded into its own folder trips it for a legitimate album.
+            # The TEXT check still applies.
+            enforce_folder_boundary=not bool(payload.get("allow_cross_folder")),
         )
         if not verdict["ok"]:
             log_verdict(verdict, artist=artist_name, album=album_name, mbid=album_mbid, rg_mbid=release_group_mbid)
