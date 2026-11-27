@@ -623,22 +623,56 @@
         setTimeout(function () { pollGenrePlaylistPreview(false); }, 1500);
         return;
       }
-      if (silent) return;  // a stale finished row: leave the card untouched
-      if (previewBtn) previewBtn.disabled = false;
 
-      if (data.status === 'failed') {
-        setState('Preview failed');
-        setOut('<div class="alert alert-danger py-2 mb-0">'
-          + esc(data.error || 'Preview failed — see the logs.') + '</div>');
+      const result = data.resync_result || null;
+
+      // ⚠️⚠️ A FINISHED PREVIEW SURVIVES NAVIGATION.
+      //
+      // Reported: "if I navigate away from the page it forgets the preview …
+      // so I don't need to keep running preview". The result was never lost —
+      // it is stored on the progress row server-side
+      // (``scan_states.extra_data.resync_result``) — but this function returned
+      // EARLY in ``silent`` mode ("a stale finished row: leave the card
+      // untouched"), so the one case it discarded was the one worth keeping.
+      //
+      // Restoring it is safe: Apply RECOMPUTES server-side (it never consumes
+      // the preview payload), so an older preview can only ever DESCRIBE the
+      // current state — it cannot cause an outdated write. The completion time
+      // is shown so a day-old preview is obvious rather than trusted blindly.
+      if (silent) {
+        if (data.status === 'complete' && result) {
+          if (_claimResyncCard(data.last_updated)) {
+            renderGenrePlaylistPreview(result, data.seconds, data.last_updated);
+            if (applyBtn) applyBtn.disabled = false;
+            setState('Preview ready');
+          }
+        } else if (data.status === 'failed' && _claimResyncCard(data.last_updated)) {
+          setState('Last preview failed');
+          setOut('<div class="alert alert-danger py-2 mb-0">'
+            + esc(data.error || 'Preview failed — see the logs.')
+            + _resyncWhen(data.last_updated) + '</div>');
+        }
         return;
       }
 
-      const result = data.resync_result || null;
+      if (previewBtn) previewBtn.disabled = false;
+
+      if (data.status === 'failed') {
+        if (!_claimResyncCard(data.last_updated)) return;
+        setState('Preview failed');
+        setOut('<div class="alert alert-danger py-2 mb-0">'
+          + esc(data.error || 'Preview failed — see the logs.')
+          + _resyncWhen(data.last_updated) + '</div>');
+        return;
+      }
+
       if (!result) {
         setState('');
         return;
       }
-      renderGenrePlaylistPreview(result, data.seconds);
+      // Paint only if this result is the newest thing that has happened.
+      if (!_claimResyncCard(data.last_updated)) return;
+      renderGenrePlaylistPreview(result, data.seconds, data.last_updated);
       // The apply may only proceed once the user has SEEN the preview.
       if (applyBtn) applyBtn.disabled = false;
       setState('Preview ready');
@@ -648,8 +682,42 @@
     }
   }
 
+  /**
+   * " · computed <time>" for a restored result, or '' when unknown.
+   *
+   * The preview has no input fingerprint, so its AGE is the honest signal that
+   * it may predate the library's current state. Shown, never enforced.
+   */
+  function _resyncWhen(iso) {
+    if (!iso) return '';
+    const when = new Date(iso);
+    if (isNaN(when.getTime())) return '';
+    return ' <span class="text-muted">· computed '
+      + esc(when.toLocaleString()) + '</span>';
+  }
+
+  /**
+   * Epoch of the result currently painted into the resync card.
+   *
+   * ⚠️ THE PREVIEW AND THE APPLY SHARE ONE CARD. On page load BOTH progress
+   * rows are polled (each is restored independently), and their fetches finish
+   * in whatever order the network gives them — so without this the card would
+   * flicker between "Preview ready" and "Resync complete" depending on timing.
+   * Only the NEWER result may paint: the last thing the user ran is the thing
+   * worth showing.
+   */
+  let _resyncCardStamp = 0;
+
+  function _claimResyncCard(iso) {
+    const parsed = iso ? new Date(iso).getTime() : 0;
+    const stamp = isNaN(parsed) ? 0 : parsed;
+    if (stamp < _resyncCardStamp) return false;
+    _resyncCardStamp = stamp;
+    return true;
+  }
+
   /** Render a completed preview payload into the card. */
-  function renderGenrePlaylistPreview(data, seconds) {
+  function renderGenrePlaylistPreview(data, seconds, completedAt) {
     const out = document.getElementById('genre_playlist_resync_output');
     if (!out) return;
 
@@ -681,6 +749,7 @@
       + (summary.playlists_cleared ? ' (' + summary.playlists_cleared + ' cleared)' : '')
       + (summary.playlists_created ? ' (' + summary.playlists_created + ' created)' : '')
       + ' — +' + (summary.tracks_gained || 0) + ' / -' + (summary.tracks_removed || 0) + ' tracks.'
+      + _resyncWhen(completedAt)
       + '</div>'
       + (playlistRows
         ? '<div class="fw-semibold mt-2">Playlists</div>'
@@ -795,16 +864,46 @@
         setTimeout(function () { pollGenrePlaylistResync(false); }, 1500);
         return;
       }
-      if (silent) return;  // a stale finished row: leave the card untouched
+      // ⚠️ THE SAME RESTORE AS THE PREVIEW. A finished apply reported its
+      // outcome on this progress row; navigating away threw it away, so
+      // returning showed an empty card with no sign the run had happened.
+      // Apply stays DISABLED here on purpose — its preview has been consumed,
+      // so a fresh preview is required before running it again.
+      if (silent) {
+        if (data.status === 'failed' && _claimResyncCard(data.last_updated)) {
+          setState('Last resync failed');
+          if (out) {
+            out.innerHTML = '<div class="alert alert-danger py-2 mb-0">'
+              + esc(data.error || 'Resync failed — see the logs.')
+              + _resyncWhen(data.last_updated) + '</div>';
+          }
+        } else if (data.status === 'complete') {
+          const restored = data.resync_result || null;
+          if (_claimResyncCard(data.last_updated)) {
+            setState('Complete');
+            if (out && restored) {
+              out.innerHTML = '<div class="alert alert-success py-2 mb-0">'
+                + '<strong>Resync complete.</strong> '
+                + (restored.genres_changed || 0) + ' track genre set(s) updated, '
+                + (restored.playlists_written || 0) + ' playlist(s) synced'
+                + (restored.seconds ? ' in ' + restored.seconds + 's' : '') + '.'
+                + _resyncWhen(data.last_updated) + '</div>';
+            }
+          }
+        }
+        return;
+      }
       // Finished (or failed) — restore the buttons.
       if (previewBtn) previewBtn.disabled = false;
       if (applyBtn) applyBtn.disabled = true;  // require a fresh preview
       const result = data.resync_result || null;
+      if (!_claimResyncCard(data.last_updated)) return;
       if (data.status === 'failed') {
         setState('Failed');
         if (out) {
           out.innerHTML = '<div class="alert alert-danger py-2 mb-0">'
-            + esc(data.error || 'Resync failed — see the logs.') + '</div>';
+            + esc(data.error || 'Resync failed — see the logs.')
+            + _resyncWhen(data.last_updated) + '</div>';
         }
         return;
       }
@@ -815,7 +914,7 @@
           + (result.genres_changed || 0) + ' track genre set(s) updated, '
           + (result.playlists_written || 0) + ' playlist(s) synced'
           + (result.seconds ? ' in ' + result.seconds + 's' : '') + '.'
-          + '</div>';
+          + _resyncWhen(data.last_updated) + '</div>';
       }
     } catch (_err) {
       setState('');
