@@ -264,7 +264,7 @@
                                 <div class="mb-3">
                                     <label for="mbid" class="form-label small fw-semibold text-muted mb-1">Recording MBID</label>
                                     <div class="input-group">
-                                        <input type="text" class="form-control" id="mbid" name="recording_mbid" value="{{ track.recording_mbid or track.musicbrainz_trackid or track.mbid or track.beets_mbid or '' }}">
+                                        <input type="text" class="form-control" id="mbid" name="recording_mbid" value="{{ track.recording_mbid or track.musicbrainz_trackid or track.mbid or '' }}">
                                         <button class="btn btn-outline-primary" type="button" data-action="track-lookup-recording">
                                             <i class="bi bi-search"></i> Search
                                         </button>
@@ -430,7 +430,7 @@
                                     </div>
                                 </div>
                                 <hr class="my-3">
-                                {% set _rec = track.beets_mbid or track.mbid or track.musicbrainz_trackid %}
+                                {% set _rec = track.mbid or track.musicbrainz_trackid %}
                                 {% set _rel = track.musicbrainz_album_mbid or track.musicbrainz_albumid %}
                                 {% set _art = track.musicbrainz_artist_id or track.musicbrainz_artistid or track.artist_mbid %}
                                 {% set _rg = track.musicbrainz_releasegroupid %}
@@ -854,12 +854,9 @@
     "album": track.album,
     "artistName": track.artist,
     "duration": track.get("duration"),
-    "beetsMbid": track.get("beets_mbid"),
     "mbid": track.get("mbid"),
     "suggestedMbid": track.get("suggested_mbid"),
-    "beetsAlbumArtist": track.get("beets_album_artist"),
     "albumArtist": track.get("album_artist"),
-    "beetsYear": track.get("beets_year"),
     "year": track.get("year"),
     "lastfmTags": track.get("lastfm_tags"),
     "listenbrainzGenres": track.get("listenbrainz_genres"),

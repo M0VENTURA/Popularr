@@ -87,7 +87,6 @@ CANONICAL_TAG_NAMES: dict[str, str] = {
     "musicbrainz_albumartist_id": "MUSICBRAINZ_ALBUMARTISTID",
     "musicbrainz_trackid": "MUSICBRAINZ_TRACKID",
     "mbid": "MUSICBRAINZ_TRACKID",
-    "beets_mbid": "MUSICBRAINZ_TRACKID",
     "musicbrainz_releasetrackid": "MUSICBRAINZ_RELEASETRACKID",
     "musicbrainz_release_track_id": "MUSICBRAINZ_RELEASETRACKID",
     "musicbrainz_releasegroupid": "MUSICBRAINZ_RELEASEGROUPID",

@@ -4366,26 +4366,16 @@ async def track_detail(track_id: str) -> Any:
                 or ""
             )
 
+        # ⚠️ `beets_mbid` was a third link in these chains and a synthesised
+        # value below. The Beets importer is retired and the column is in no
+        # schema, model or migration, so `track.get("beets_mbid")` is always
+        # None — the link was a no-op that made the fallback order look richer
+        # than it is. `mbid` / `musicbrainz_trackid` are the real sources.
         if not track.get("musicbrainz_trackid"):
-            track["musicbrainz_trackid"] = (
-                track.get("mbid")
-                or track.get("beets_mbid")
-                or ""
-            )
+            track["musicbrainz_trackid"] = track.get("mbid") or ""
 
         if not track.get("mbid"):
-            track["mbid"] = (
-                track.get("musicbrainz_trackid")
-                or track.get("beets_mbid")
-                or ""
-            )
-
-        if not track.get("beets_mbid"):
-            track["beets_mbid"] = (
-                track.get("mbid")
-                or track.get("musicbrainz_trackid")
-                or ""
-            )
+            track["mbid"] = track.get("musicbrainz_trackid") or ""
 
         if not track.get("musicbrainz_artist_id"):
             track["musicbrainz_artist_id"] = (
@@ -4526,8 +4516,11 @@ async def track_detail(track_id: str) -> Any:
                 )
                 mbid_value = form.get(_mbid_field, "").strip() if _mbid_field else None
                 if _mbid_field is not None:
+                    # `beets_mbid` dropped: retired with the Beets importer and
+                    # absent from the schema, so it was skipped by the
+                    # `existing_columns` guard on every save anyway.
                     for column_name in [
-                        "mbid", "beets_mbid", "musicbrainz_trackid", "recording_mbid",
+                        "mbid", "musicbrainz_trackid", "recording_mbid",
                     ]:
                         if column_name in existing_columns:
                             update_values[column_name] = mbid_value or None

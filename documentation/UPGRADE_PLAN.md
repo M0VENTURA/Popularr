@@ -52,7 +52,7 @@ Comprehensive improvement recommendations based on codebase audit (2026-07).
 | `db/repositories/navidrome.py` | ~1 | ❌ Takes external conn — needs caller migration |
 | `db/repositories/metadata.py` | ~58 | ❌ Takes external conn — needs caller migration |
 | **Routes** | | |
-| `routes/beets_routes.py` | 3 | ✅ Migrated |
+| ~~`routes/beets_routes.py`~~ | — | 🗑️ Deleted (2026-11-28; the blueprint was registered nowhere) |
 | `routes/ui_routes.py` | 26 | ✅ Migrated |
 | `routes/misc_routes.py` | 56 | 🔄 Import migrated, functions pending |
 | `routes/track_routes.py` | 14 | ✅ Migrated |

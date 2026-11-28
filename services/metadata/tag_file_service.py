@@ -1318,7 +1318,8 @@ _COLUMN_TO_TAG_FIELD: dict[str, str] = {
     "lyrics": "lyrics",
     "mbid": "mbid",
     "musicbrainz_trackid": "mbid",
-    "beets_mbid": "mbid",
+    # `beets_mbid` dropped: the Beets importer is retired and the column is in
+    # no schema, so nothing can ever post it.
     # ⭐ ``recording_mbid`` is the CANONICAL recording-id column every consumer
     # reads. Without this mapping an edit/save that corrected it was DB-only:
     # the file kept the old MUSICBRAINZ_TRACKID, Navidrome echoed it back, and
