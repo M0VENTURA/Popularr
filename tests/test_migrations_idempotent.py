@@ -44,9 +44,23 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _make_alembic_config(engine_url: str) -> Config:
+    """An Alembic Config pointed at this repo's scripts and ``engine_url``.
+
+    ⚠️ ``%`` MUST BE ESCAPED. ``alembic.ini`` is read by configparser, which
+    treats ``%`` as the start of an interpolation, so a URL containing a bare
+    percent sign raises::
+
+        ValueError: invalid interpolation syntax in 'sqlite:///C%3A%5CUsers…'
+
+    That is exactly what a Windows temp path produces — SQLAlchemy percent-
+    encodes the drive and separators (``C:\\Users\\…`` → ``C%3A%5CUsers…``) —
+    so this suite could never run on Windows at all. ``%%`` is configparser's
+    literal percent, which Alembic turns back into one `%` when it reads the
+    value.
+    """
     cfg = Config(os.path.join(_PROJECT_ROOT, "alembic.ini"))
     cfg.set_main_option("script_location", os.path.join(_PROJECT_ROOT, "migrations"))
-    cfg.set_main_option("sqlalchemy.url", engine_url)
+    cfg.set_main_option("sqlalchemy.url", engine_url.replace("%", "%%"))
     return cfg
 
 

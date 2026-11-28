@@ -7,6 +7,14 @@ a green "Bonus Tracks to Download" label and keep those rows out of the
 "needs fixing" filter.
 
 Idempotent: the table is created by migration 009, so only the column is added.
+
+⚠️ A MISSING TABLE IS A SKIP, NOT AN ADD. ``_columns()`` returns an empty set
+when the table does not exist, so ``"is_bonus" not in _columns(bind)`` was TRUE
+on a database that had been stamped past 009 without the table — and the
+``ALTER TABLE`` then failed with ``no such table``. That is the
+partially-bootstrapped case this repo explicitly supports (``db.schema`` builds
+the tables, alembic only records revisions), so the guard has to ask whether the
+table exists before asking whether the column does.
 """
 
 from __future__ import annotations
@@ -32,9 +40,15 @@ def _columns(bind) -> set[str]:
     }
 
 
+def _table_exists(bind) -> bool:
+    return sa.inspect(bind).has_table("missing_album_tracks")
+
+
 def upgrade() -> None:
     bind = op.get_bind()
-    if "is_bonus" not in _columns(bind):
+    # ⚠️ Both conditions: an absent table has no columns, so checking only the
+    # column would issue an ALTER against a table that is not there.
+    if _table_exists(bind) and "is_bonus" not in _columns(bind):
         op.add_column(
             "missing_album_tracks",
             sa.Column(
@@ -48,5 +62,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    if "is_bonus" in _columns(bind):
+    if _table_exists(bind) and "is_bonus" in _columns(bind):
         op.drop_column("missing_album_tracks", "is_bonus")
