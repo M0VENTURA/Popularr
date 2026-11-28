@@ -44,8 +44,12 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
-REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
+# ⚠️ ONE TREE. These were LIVE_JS / REBUILT_JS pointing at the same file, and the
+# `_live()` half asked for `_buildMissingTrackRow` — an underscore-prefixed name
+# that no longer exists anywhere. The two-tree world ended; the twin was a
+# fossil that only stayed hidden because these tests are SKIPPED without node.
+# See `_rebuilt()` below for the one real implementation.
+ALBUM_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 LIVE_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 REBUILT_TEMPLATE = REPO_ROOT / "test_site" / "templates" / "Pages" / "album_detail.html"
 
@@ -303,16 +307,9 @@ def _probe(module: Path, *, strip_iife: bool, build: str, inject: str, key: str)
     return json.loads(lines[-1])
 
 
-def _live() -> dict:
-    return _probe(
-        LIVE_JS, strip_iife=False,
-        build="_buildMissingTrackRow", inject="_injectMissingTrackRows", key="_missingOrderKey",
-    )
-
-
 def _rebuilt() -> dict:
     return _probe(
-        REBUILT_JS, strip_iife=True,
+        ALBUM_JS, strip_iife=True,
         build="buildMissingRow", inject="injectMissingRows", key="missingOrderKey",
     )
 
@@ -321,31 +318,31 @@ def _rebuilt() -> dict:
 # 1. The row must have the table's columns, and carry duration
 # ===========================================================================
 class TestTheMissingRowHasTheTablesColumns:
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_it_has_exactly_five_cells(self, run):
         assert run()["cells"] == EXPECTED_COLUMNS, (
             "the missing row must emit one cell per <th>; six cells shift every "
             "column after the first and push the action buttons outside the table"
         )
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_no_cell_spans_several_columns(self, run):
         assert run()["hasColspan"] is False, (
             "a colspan on the title is what put the title in the Duration column"
         )
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_the_number_is_in_the_first_cell(self, run):
         assert re.search(r"\b9\b", run()["numberCell"]), (
             "the track number belongs in the '#' column"
         )
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_the_title_is_in_the_second_cell(self, run):
         cell = run()["titleCell"]
         assert "Nine" in cell and "Missing" in cell, cell
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_duration_is_shown_in_the_duration_column(self, run):
         """The reported missing field: ``mb_duration`` is milliseconds."""
         cell = run()["durationCell"]
@@ -359,7 +356,7 @@ class TestTheMissingRowHasTheTablesColumns:
 # 2. Rows must be placed by track number, from both entry points
 # ===========================================================================
 class TestMissingRowsArePlacedByTrackNumber:
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_rows_interleave_in_track_order(self, run):
         """Library 1,3,5 + missing 4,2,9 -> 1,2,3,4,5,9."""
         assert run()["order"] == ["1", "2", "3", "4", "5", "9"], (
@@ -367,20 +364,20 @@ class TestMissingRowsArePlacedByTrackNumber:
             "the track number the table is sorted on"
         )
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_the_order_key_puts_disc_2_after_disc_1(self, run):
         keys = run()["keys"]
         assert keys["d1n2"] < keys["d1n3"] < keys["d1n9"]
         assert keys["d2n1"] > keys["d1n9"], "disc must sort before track number"
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_a_track_with_no_number_sorts_last_rather_than_first(self, run):
         keys = run()["keys"]
         assert keys["noNumber"] > keys["d1n9"], (
             "an unknown number must not jump to the top of the table"
         )
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_an_unknown_disc_defaults_to_disc_one(self, run):
         """Matches the template's ``track.disc_number or 1``."""
         keys = run()["keys"]

@@ -191,7 +191,15 @@ const document = {
   querySelector(sel) { return queryAll(sel, document.body)[0] || null; },
   querySelectorAll(sel) { return queryAll(sel, document.body); },
   createElement(tag) { return makeEl(tag); },
-  addEventListener(ev, fn) { document.listeners[ev] = fn; },
+  // ⚠️ A LIST PER EVENT, not one. album.js registers FOUR separate
+  // `DOMContentLoaded` handlers (the missing-tracks loader, the duplicate flags,
+  // the similar-artists block, the tab restore). Storing a single handler per
+  // event meant each registration REPLACED the last, so only the final one ran
+  // and the missing-tracks loader was never invoked — the suite then reported
+  // "the loader did not run" for a page that wires it correctly.
+  addEventListener(ev, fn) {
+    (document.listeners[ev] || (document.listeners[ev] = [])).push(fn);
+  },
 };
 
 global.document = document;
@@ -210,6 +218,18 @@ global.alert = () => {};
 global.escapeHtml = (v) => String(v == null ? '' : v);
 global.ui = { confirm: async () => true };
 global.toast = { success: () => {}, error: () => {}, info: () => {} };
+// ⚠️ `global.api` IS REQUIRED, and its absence is SILENT.
+//
+// album.js calls `global.api.getJson(...)` (utils/api.js, loaded by base.html)
+// and the missing-tracks loader wraps that in `try { … } catch { return; }` —
+// deliberately, because a failed read must not take the tracklist down. The
+// consequence for this harness is that an unstubbed `api` makes the loader
+// return without fetching anything, and the only symptom is "0 requests".
+// Route it through the same `fetch` the test already instruments.
+global.api = {
+  getJson: (url, opts) => global.fetch(url, opts).then((r) => r.json()),
+  postJson: (url, body, opts) => global.fetch(url, opts).then((r) => r.json()),
+};
 
 // ⚠️ `setTimeout` is deliberately NOT stubbed. An immediate, synchronous
 // version would run the test's assertions BEFORE the loader's promise settles
@@ -237,8 +257,10 @@ const source = require('fs').readFileSync(MODULE, 'utf8');
 // measuring nothing.
 (function () { eval(source); })();
 global.__fireLoad = function () {
-  if (document.listeners['DOMContentLoaded']) document.listeners['DOMContentLoaded']();
-  if (global.listeners && global.listeners['DOMContentLoaded']) global.listeners['DOMContentLoaded']();
+  (document.listeners['DOMContentLoaded'] || []).forEach((fn) => fn());
+  if (global.listeners && global.listeners['DOMContentLoaded']) {
+    (global.listeners['DOMContentLoaded'] || []).forEach((fn) => fn());
+  }
 };
 """
 
@@ -359,9 +381,20 @@ class TestAlbumDetailJsLoadsMissingTracks:
         assert out["badgeShown"] is False
 
     def test_the_rows_include_a_queue_control(self):
-        """The whole point: the tracks must be SELECTABLE to download."""
+        """The whole point: the tracks must be SELECTABLE to download.
+
+        ⚠️ IDENTIFIED BY CLASS, NOT BY AN INLINE HANDLER STRING. The row used to
+        carry `onclick="queueMissingTrack(…)"`, so asserting the function NAME
+        appeared in the markup worked. It is now a `.mb-queue-missing` button
+        bound through a closure (album.js:2421) — the payload lives in the
+        closure, not in a serialised attribute — so the class is the stable
+        contract and the name assertion would be testing an escaping style.
+        """
         out = self._load()
-        assert all("queueMissingTrack" in t for t in out["titles"])
+        assert all("mb-queue-missing" in t for t in out["titles"]), (
+            "every missing row needs its queue control, or the track is listed "
+            "but cannot be downloaded"
+        )
 
     def test_a_duplicate_position_and_title_renders_once(self):
         dup = {
@@ -453,14 +486,12 @@ class TestTheLoaderIsWiredToPageLoad:
     def _album_js(self, path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
 
-    def test_live_tree_wires_it(self):
-        src = self._album_js(REBUILT_STATIC / "pages" / "album.js")
-        assert "window.loadAlbumMissingTracks = function" in src
-        assert re.search(
-            r"DOMContentLoaded[\s\S]{0,400}loadAlbumMissingTracks\(\)", src
-        ), "loadAlbumMissingTracks is defined but never called on page load"
-
-    def test_rebuilt_tree_wires_it(self):
+    def test_it_is_wired_to_page_load(self):
+        """⚠️ ONE TREE. This was a `_live_`/`_rebuilt_` twin asserting an export
+        style (`window.loadAlbumMissingTracks = function`) that album.js no
+        longer uses — it is an `async function` inside the module IIFE, called
+        from the DOMContentLoaded handler. The twin only stayed hidden because
+        these tests skip without node."""
         src = self._album_js(REBUILT_STATIC / "pages" / "album.js")
         assert "async function loadAlbumMissingTracks" in src
         assert re.search(
@@ -505,29 +536,18 @@ class TestTheLoaderReusesTheExistingRowBuilder:
     Tracks" button and the per-row queue button drifted apart before.
     """
 
-    def test_live_tree_reuses_the_builders(self):
-        src = (REBUILT_STATIC / "pages" / "album.js").read_text(encoding="utf-8")
-        loader = src[src.index("window.loadAlbumMissingTracks"):]
-        loader = loader[: loader.index("\n};")] if "\n};" in loader else loader
-        # The loader renders through the SHARED helper (also used by the
-        # Lookup-MBID refresh) instead of hand-rolling rows — the helper is
-        # the one that must reuse the row builder.
-        assert "_renderMissingTracks(" in loader, (
-            "the loader must render through _renderMissingTracks, not hand-roll a row"
-        )
-        helper = src[src.index("function _renderMissingTracks"):]
-        helper = helper[: helper.index("\n}")]
-        assert "_buildMissingTrackRow(" in helper, (
-            "_renderMissingTracks must reuse _buildMissingTrackRow"
-        )
-        assert "ignoreMissingTrack" not in loader or "onclick=" not in loader
+    def test_the_loader_reuses_the_builders(self):
+        """⚠️ ONE TREE — see test_it_is_wired_to_page_load.
 
-    def test_rebuilt_tree_reuses_the_builders(self):
+        The loader renders through the SHARED helper (also used by the
+        Lookup-MBID refresh) instead of hand-rolling rows, and that helper
+        must reuse the row builder — a second hand-written row here is exactly
+        how the "Download Missing Tracks" button and the per-row queue button
+        drifted apart before.
+        """
         src = (REBUILT_STATIC / "pages" / "album.js").read_text(encoding="utf-8")
         loader = src[src.index("async function loadAlbumMissingTracks"):]
         loader = loader[: loader.index("\n  }")] if "\n  }" in loader else loader
-        # Same contract as the live tree: through the SHARED helper, never
-        # hand-rolled rows — and the helper must reuse the row builder.
         assert "renderMissingTracks(" in loader, (
             "the loader must render through renderMissingTracks, not hand-roll a row"
         )

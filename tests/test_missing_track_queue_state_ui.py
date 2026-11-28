@@ -48,8 +48,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
-REBUILT_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
+# ⚠️ ONE TREE. These were LIVE_JS / REBUILT_JS pointing at the same file, and the
+# `_live()` half asked for `_buildMissingTrackRow` / `_updateMissingHeaderBadge`
+# — underscore-prefixed names that exist nowhere. The two-tree world ended; the
+# twin only stayed hidden because these tests are SKIPPED without node.
+ALBUM_JS = REPO_ROOT / "test_site" / "static" / "js" / "pages" / "album.js"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is required to exercise the JS"
@@ -219,17 +222,9 @@ def _probe(module: Path, *, strip_iife: bool, build: str, badge: str, convert: s
     return json.loads(lines[-1])
 
 
-def _live() -> dict:
-    return _probe(
-        LIVE_JS, strip_iife=False,
-        build="_buildMissingTrackRow", badge="_updateMissingHeaderBadge",
-        convert="_missingRowToTrackComp",
-    )
-
-
 def _rebuilt() -> dict:
     return _probe(
-        REBUILT_JS, strip_iife=True,
+        ALBUM_JS, strip_iife=True,
         build="buildMissingRow", badge="updateMissingHeaderBadge",
         convert="missingRowToTrackComp",
     )
@@ -239,7 +234,7 @@ def _rebuilt() -> dict:
 # 1. An undelivered track is listed, with its state
 # ===========================================================================
 class TestAnUndeliveredTrackIsVisible:
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_a_queued_track_carries_its_state_not_the_missing_badge(self, run):
         title = run()["queuedTitle"]
         assert "Forgotten Years" in title, title
@@ -250,7 +245,7 @@ class TestAnUndeliveredTrackIsVisible:
         assert "Queued" in title, title
         assert not re.search(r"bg-warning", title), title
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_its_download_button_is_disabled(self, run):
         btn = run()["queuedBtn"]
         assert "disabled" in btn, (
@@ -258,7 +253,7 @@ class TestAnUndeliveredTrackIsVisible:
         )
         assert "download queue" in btn, btn
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_an_ordinary_missing_track_is_unchanged(self, run):
         """CONTROL — the feature must not repaint tracks that are truly missing."""
         result = run()
@@ -268,7 +263,7 @@ class TestAnUndeliveredTrackIsVisible:
             f"an unqueued track must stay queueable: {result['plainBtn']}"
         )
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_the_converter_forwards_the_queue_status(self, run):
         assert run()["convertedStatus"] == "searching", (
             "the refresh response's queue_status must survive the row conversion, "
@@ -289,7 +284,7 @@ class TestTheQueueBadgeAndTrackArtist:
       different than the album artist)" — the rows only showed the title.
     """
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_an_imported_row_reads_as_in_the_download_queue(self, run):
         title = run()["importedTitle"]
         assert "Beds Are Burning" in title, title
@@ -301,7 +296,7 @@ class TestTheQueueBadgeAndTrackArtist:
             f"the raw 'Imported' badge text must not be the visible label: {title}"
         )
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_a_different_track_artist_is_shown(self, run):
         title = run()["otherArtistTitle"]
         assert "Midnight Oil" in title, (
@@ -310,7 +305,7 @@ class TestTheQueueBadgeAndTrackArtist:
         )
         assert "—" in title, title
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_an_equal_track_artist_is_suppressed(self, run):
         """CONTROL — the library rows hide the artist when it IS the album
         artist (album_detail.html: `{% if track.artist != artist_name %}`), so
@@ -324,7 +319,7 @@ class TestTheQueueBadgeAndTrackArtist:
 # 2. Withheld tracks are reported, so absence is never ambiguous
 # ===========================================================================
 class TestWhatWasWithheldIsReported:
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_the_badge_says_how_many_were_not_shown(self, run):
         text = run()["withExcluded"]["text"]
         assert "2 tracks missing" in text, text
@@ -334,11 +329,11 @@ class TestWhatWasWithheldIsReported:
         )
         assert "dismissed" in text and "already in the library" in text, text
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_the_note_survives_a_zero_missing_count(self, run):
         """Everything delivered/dismissed must NOT read as a complete album."""
         assert "not shown" in run()["onlyExcluded"], run()["onlyExcluded"]
 
-    @pytest.mark.parametrize("run", [_live, _rebuilt], ids=["live", "test_site"])
+    @pytest.mark.parametrize("run", [_rebuilt], ids=["album.js"])
     def test_the_badge_clears_when_nothing_is_hidden(self, run):
         assert run()["cleared"] == "", repr(run()["cleared"])

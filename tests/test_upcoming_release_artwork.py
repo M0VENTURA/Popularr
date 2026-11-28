@@ -313,7 +313,7 @@ class TestTheLiveTreeUsesTheRule:
 
     def test_the_table_row_uses_the_helper(self, live_js: str) -> None:
         body = _function_body(live_js, "renderReleaseRow", "  ")
-        assert "upcomingArtThumb(" in body, "the table row lost its thumbnail"
+        assert "artThumb(" in body, "the table row lost its thumbnail"
         assert 'data-label="Album"' in body, (
             "the thumbnail must live in the Album cell — a new <td> would need a "
             "matching <th>, a data-label and every colspan kept in step"
@@ -328,8 +328,10 @@ class TestTheLiveTreeUsesTheRule:
         """
         body = _function_body(live_js, "renderReleaseRow", "  ")
         album_cell = body[body.index('data-label="Album"') :]
-        assert album_cell.index("upcomingArtThumb(") < album_cell.index(
-            "escapeHtml(release.album_name"
+        # ⚠️ `esc(` not `escapeHtml(`: the service wraps the shared helper as
+        # `esc`. Asserting the long name measured an implementation detail.
+        assert album_cell.index("artThumb(") < album_cell.index(
+            "esc(release.album_name"
         ), "the thumbnail does not precede the album name in its cell"
 
     def test_the_archive_url_is_built_in_exactly_one_place(self, live_js: str) -> None:
@@ -369,7 +371,7 @@ class TestTheThumbnailIsSizedWhereverItRenders:
             "base.html no longer loads the global stylesheet — every assertion "
             "below rests on that"
         )
-        assert ".upcoming-thumb {" in popularr, (
+        assert ".ur-thumb {" in popularr, (
             ".upcoming-thumb is not declared in the globally-loaded stylesheet, so "
             "the dedicated upcoming page and the downloads monitor render an "
             "unsized full-size cover"
@@ -414,56 +416,49 @@ class TestTheLiveDashboardDelegates:
 
     A second copy of the priority order is a second place for it to drift, and
     the dashboard is the page where artwork is seen most often.
+
+    ⚠️ THE DELEGATION IS NOW TOTAL. The dashboard used to keep its own
+    ``_upcomingArtThumb`` / ``_buildUpcomingReleaseRow`` pair that called into the
+    service for the URL only — so the row markup was still duplicated. Both are
+    GONE: the page calls ``UpcomingReleasesService.renderTable`` /
+    ``renderCarousel``, which own the markup as well as the rule. These tests
+    previously sliced function bodies that no longer exist and were skipped
+    without node, so nothing noticed.
     """
 
-    def test_it_asks_the_shared_service(self, live_dashboard_js: str) -> None:
-        body = _function_body(live_dashboard_js, "_upcomingArtThumb", "")
-        assert "UpcomingReleasesService" in body, (
-            "the dashboard must delegate to the shared artwork rule"
+    def test_it_renders_through_the_shared_service(self, live_dashboard_js: str) -> None:
+        assert "UpcomingReleasesService.renderTable(" in live_dashboard_js, (
+            "the dashboard no longer renders its upcoming table through the "
+            "shared service"
         )
-        assert "upcomingArtThumb" in body
+        assert "UpcomingReleasesService.renderCarousel(" in live_dashboard_js, (
+            "the dashboard no longer renders its mobile carousel through the "
+            "shared service"
+        )
 
     def test_it_does_not_reimplement_the_rule(self, live_dashboard_js: str) -> None:
-        """CONTROL: neither half of the rule may be rebuilt here."""
-        body = _function_body(live_dashboard_js, "_upcomingArtThumb", "")
+        """CONTROL: none of the UPCOMING-RELEASE rule may be rebuilt here.
+
+        ⚠️ Scoped to what this class is about. The dashboard legitimately builds
+        `/api/album/…/art?s=160` for the PLAYER — handing it the same URL the row
+        already loaded is what lets the browser reuse the cached art — so a bare
+        `/art?s=` check would flag a different concern entirely.
+        """
         assert "coverartarchive.org" not in live_dashboard_js, (
             "the dashboard names the archive host itself — that is the drift this "
             "delegation exists to prevent"
         )
-        assert "album_in_collection" not in body and "release_group_mbid" not in body, (
-            "the ownership/match decision is being made in the dashboard again"
-        )
-        assert "/art?s=" not in body, (
-            "an inline art URL in the dashboard bypasses the shared rule"
-        )
+        for fragment in ("album_in_collection", "release_group_mbid"):
+            assert fragment not in live_dashboard_js, (
+                f"the dashboard rebuilds part of the upcoming artwork rule "
+                f"({fragment}) — the service owns the ownership/match decision"
+            )
 
-    def test_a_missing_service_means_no_art_rather_than_a_crash(
-        self, live_dashboard_js: str
-    ) -> None:
-        """⚠️ The fallback must be '' and not a URL.
-
-        An unguarded call would throw inside the row builder and take the whole
-        table with it. Falling back to a URL instead would defeat the rule: an
-        unowned, unmatched release has nothing to ask for, so any URL there is a
-        guaranteed failed request.
-        """
-        body = _function_body(live_dashboard_js, "_upcomingArtThumb", "")
-        guard_line = "if (!svc || typeof svc.upcomingArtThumb"
-        guard = body.index(guard_line)
-        # The GUARD STATEMENT itself — sliced to its own line, so a `return ""`
-        # from anywhere else in the function cannot satisfy it.
-        guard_stmt = body[guard : body.index("\n", guard)]
-        assert 'return ""' in guard_stmt, (
-            f"the guard must fall back to no art, got: {guard_stmt.strip()!r}"
+    def test_it_has_no_row_builder_of_its_own(self, live_dashboard_js: str) -> None:
+        """A local `<tr>` builder is how the two shapes drifted apart before."""
+        assert "_buildUpcomingReleaseRow" not in live_dashboard_js, (
+            "the dashboard has a row builder again; the service owns both shapes"
         )
-        call = body.index("return svc.upcomingArtThumb(", guard)
-        assert guard < call, "the guard must precede the call, not follow it"
-
-    def test_the_row_has_a_thumbnail_in_both_its_shapes(self, live_dashboard_js: str) -> None:
-        """The desktop ``<tr>`` and the mobile card are separate markup strings."""
-        body = _function_body(live_dashboard_js, "_buildUpcomingReleaseRow", "")
-        assert "html:" in body and "card:" in body, "the two markup shapes moved or were merged"
-        row_markup = body[body.index("html:") : body.index("card:")]
-        card_markup = body[body.index("card:") :]
-        assert "${rowThumb}" in row_markup, "the desktop table row lost its thumbnail"
-        assert "${cardThumb}" in card_markup, "the mobile card lost its thumbnail"
+        assert "_upcomingArtThumb" not in live_dashboard_js, (
+            "the dashboard has an artwork helper again"
+        )
