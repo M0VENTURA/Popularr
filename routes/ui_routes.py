@@ -5172,9 +5172,136 @@ async def help_page(doc_name: str | None = None) -> Any:
     )
 
 
+#: The three kinds the favourites page groups. Favourite rows are stored under
+#: ``artist_favourite`` / ``track_favourite`` / ``album_favourite`` (and under
+#: ``bookmark_type`` on the current schema), so both the raw and normalised
+#: spellings have to map onto these.
+_BOOKMARK_KINDS = ("artist", "album", "track")
+
+
+def _normalise_bookmark_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One ``bookmarks`` row in the shape the page renders.
+
+    ⚠️ THE TABLE HAS HAD TWO COLUMN SETS. The current schema is
+    ``(bookmark_type, entity_id, name, artist_name, album_name, title)``;
+    databases created by the older app also carry ``(type, artist, album,
+    track_id, url)``. ``CREATE TABLE IF NOT EXISTS`` means a long-lived database
+    keeps whichever it was born with, so nothing below NAMES a column in SQL —
+    the read is ``SELECT *`` and this function picks up both shapes.
+
+    Reported as "the bookmarks page is always empty": the route passed no
+    context at all, so ``{% if bookmarks %}`` was reading Jinja's Undefined and
+    the list branch could never run.
+    """
+    raw_type = str(row.get("type") or row.get("bookmark_type") or "").strip().lower()
+    kind = {
+        "artist_favourite": "artist",
+        "album_favourite": "album",
+        "track_favourite": "track",
+    }.get(raw_type, raw_type)
+
+    name = str(row.get("name") or row.get("title") or "").strip()
+    artist = str(row.get("artist") or row.get("artist_name") or "").strip()
+    album = str(row.get("album") or row.get("album_name") or "").strip()
+    track_id = str(row.get("track_id") or row.get("entity_id") or "").strip()
+
+    if kind == "artist":
+        # Artist favourites store the name in `name` only.
+        artist = artist or name
+        name = name or artist
+    elif kind == "track":
+        # Track favourites store the TRACK ID in `name` (see
+        # routes/track_routes.py's track_favourite writes).
+        if not track_id and name:
+            track_id = name
+
+    return {
+        "id": row.get("id"),
+        "type": kind,
+        "name": name,
+        "artist": artist,
+        "album": album,
+        "track_id": track_id,
+        "created_at": row.get("created_at"),
+    }
+
+
+def _fill_track_bookmark_details(rows: list[dict[str, Any]]) -> None:
+    """Fill title/artist/album for track favourites from ``tracks``.
+
+    A ``track_favourite`` row stores only the id, so without this the Tracks
+    table would list a bare UUID. The IN list is built from bound placeholders
+    (not interpolated values) so it works on any backend.
+    """
+    ids = [r["track_id"] for r in rows if r["type"] == "track" and r["track_id"]][:500]
+    if not ids:
+        return
+    params = {f"tid{i}": value for i, value in enumerate(ids)}
+    placeholders = ", ".join(f":tid{i}" for i in range(len(ids)))
+    try:
+        with db_session() as session:
+            found = session.execute(
+                text(f"SELECT id, title, artist, album FROM tracks WHERE id IN ({placeholders})"),
+                params,
+            ).mappings().all()
+    except Exception as exc:
+        # Decoration only: the row still renders with the id as its label.
+        logger.debug("Could not enrich track bookmarks", error=str(exc))
+        return
+    by_id = {str(row["id"]): row for row in found}
+    for row in rows:
+        if row["type"] != "track":
+            continue
+        track = by_id.get(row["track_id"])
+        if not track:
+            continue
+        row["name"] = track.get("title") or row["name"]
+        row["artist"] = track.get("artist") or row["artist"]
+        row["album"] = track.get("album") or row["album"]
+
+
 @ui_bp.route("/bookmarks")
 async def bookmarks() -> Any:
-    return await render_template("pages/bookmarks.html")
+    """Every favourite, optionally filtered to one kind.
+
+    ⚠️ THIS ROUTE USED TO PASS NO CONTEXT:
+
+        return await render_template("pages/bookmarks.html")
+
+    The template reads ``bookmarks`` and ``filter_type``, so Jinja's Undefined
+    made the list branch unreachable — the page rendered "You don't have any
+    bookmarks yet" unconditionally and all four filter links were dead however
+    they were clicked, while both nav entries pointed straight at it.
+    """
+    requested = (request.args.get("filter") or "").strip().lower()
+    filter_type = requested if requested in _BOOKMARK_KINDS else None
+
+    rows: list[dict[str, Any]] = []
+    error = ""
+    try:
+        with db_session() as session:
+            raw_rows = session.execute(
+                # `SELECT *` on purpose — see _normalise_bookmark_row's note on
+                # the two column sets. No dialect-specific NULLS ordering.
+                text("SELECT * FROM bookmarks ORDER BY created_at DESC LIMIT 500")
+            ).mappings().all()
+        rows = [_normalise_bookmark_row(dict(raw)) for raw in raw_rows]
+        rows = [row for row in rows if row["type"] in _BOOKMARK_KINDS]
+        if filter_type:
+            rows = [row for row in rows if row["type"] == filter_type]
+        _fill_track_bookmark_details(rows)
+    except Exception as exc:
+        # Do not let one bad row take the page down: say it failed, and keep the
+        # filter UI usable.
+        logger.warning("Could not load bookmarks", error=str(exc))
+        error = "Bookmarks could not be loaded. Check the logs for details."
+
+    return await render_template(
+        "pages/bookmarks.html",
+        bookmarks=rows,
+        filter_type=filter_type,
+        error=error,
+    )
 
 
 @ui_bp.route("/correcting")
@@ -5789,9 +5916,12 @@ async def metadata_compare_accept_navidrome() -> Any:
 # The template pages/smart_playlists.html should be deleted with it.
 
 
-@ui_bp.route("/analytics/genres-moods")
-async def analytics_genres_moods_page() -> Any:
-    return await render_template("pages/analytics.html")
+# ⚠️ /analytics/genres-moods is served by routes/analytics.py, which passes the
+# genre/mood/combination data the template renders. A SECOND handler used to
+# live here with the same rule and NO context; analytics_bp is registered
+# before ui_bp (helpers/app_bootstrap.py), so this copy could never run — and
+# had the order ever changed it would have rendered empty cards. Deleted rather
+# than left as a trap.
 
 
 @ui_bp.route("/debug/static")

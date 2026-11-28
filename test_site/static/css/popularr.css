@@ -92,6 +92,10 @@
     --z-navbar: 1030;
     --z-player-bar: 1029;
     --z-search-backdrop: 1028;
+    /* Above the player/bottom-nav (they share 1029) so a page-level action bar
+       sits on the same stack rather than inventing a number. Still below
+       Bootstrap's offcanvas (1045), backdrop (1050) and modal (1055). */
+    --z-quick-bar: 1030;
 
     /* Radius scale — one source for corner rounding.
        --------------------------------------------------------------------
@@ -1128,6 +1132,20 @@ form .form-check-input[name="force"] + .form-check-label {
     .btn-sm { min-height: 0; }
     .btn-group-sm > .btn,
     .btn-group-sm .btn { min-height: 0; }
+}
+
+/* ── Dense tables: the per-row ACTION keeps the touch minimum ──────────────
+   The exemption above is deliberate — compact rows must stay compact — but a
+   table's per-row action is the one `btn-sm` that is TAPPED rather than read:
+   corrections' Fix/Ignore, missing-releases' queue buttons, the queue event
+   log. At ~26px they were the smallest targets in the app. Scoped to a phone,
+   so the desktop density the exemption protects is unchanged. */
+@media (max-width: 767.98px) {
+    .table .btn-sm,
+    .table-responsive .btn-sm {
+        min-height: 44px;
+        min-width: 44px;
+    }
 }
 
 @media (max-width: 991.98px) {

@@ -86,13 +86,11 @@ def test_stylesheet_scan_is_not_vacuous() -> None:
 # Stylesheets that are KNOWN to be unreferenced, with the reason recorded in
 # the file's own header. Keep this list empty if at all possible: an entry is a
 # promise that someone is coming back to delete the file.
-_KNOWN_ORPHANS = {
-    # Its header says outright: "Nothing loads this file. `grep
-    # versioned_static('css/search.css')` across the tree returns nothing."
-    # It is the leftover styling of a superseded search implementation, kept
-    # only as a marker by test_site/templates/Pages/search.html ("Delete both").
-    "search.css",
-}
+_KNOWN_ORPHANS: set[str] = set()
+# `search.css` was the last entry. Its header said outright that nothing loaded
+# it, and templates/Pages/search.html told the reader to "delete both" — that
+# file and `js/pages/library-search.js` are now gone. Keep this empty: an entry
+# is a promise that someone is coming back to delete the file.
 
 
 @pytest.mark.parametrize(

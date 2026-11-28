@@ -39,8 +39,11 @@
     marking and the era 5★ caps — real scans may differ slightly.
   </div>
 
-  <!-- Sticky control panel -->
-  <div class="card shadow-sm mb-3" style="position: sticky; top: 0; z-index: 50; background: var(--secondary-bg, #1e1e1e);">
+  {# Sticky on desktop (offset below the fixed navbar), NOT on a phone: the
+     panel is roughly half a viewport once the scope row, artist input and
+     three sliders are stacked, and it used to pin all of that permanently.
+     Rules live in sandbox.css. #}
+  <div class="card shadow-sm mb-3 sandbox-controls">
     <div class="card-body py-3">
       <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
         <div class="d-flex align-items-center gap-2 flex-wrap">

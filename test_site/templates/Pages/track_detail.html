@@ -161,8 +161,9 @@
         </div>
     </div>
 
-    <!-- Navigation Tabs (Sticky) -->
-    <div class="card mb-4 sticky-top shadow-sm" style="top: 0; z-index: 1000;">
+    {# Sticky, but offset by the fixed navbar — `sticky-top` means `top: 0`
+       and parked this card behind it (track.css's `.track-tabs-card`). #}
+    <div class="card mb-4 track-tabs-card shadow-sm">
         <div class="card-body py-2 px-3">
             {#
               `nav-segmented` (popularr.css) replaces `bg-secondary p-1 rounded`
@@ -826,7 +827,10 @@
             </div>
         </div>
     </div>
-    <div class="d-lg-none" style="height: 68px;"></div>
+    {# The fixed quick bar reserves no space; this spacer does, and it follows
+       the footer stack (bottom nav + player + safe area) instead of the old
+       hard-coded 68px. #}
+    <div class="d-lg-none track-quick-bar-spacer" aria-hidden="true"></div>
 </div>
 
 {#

@@ -20,6 +20,28 @@
    script already sets (text-success / text-danger).
    ========================================================================== */
 
+/* ── Control panel ────────────────────────────────────────────────────────
+   Sticky on desktop so the weights stay reachable while the results list
+   scrolls, but offset by the measured navbar: `top: 0` put it behind the
+   fixed navbar (main is the scrollport and its top edge sits under it).
+
+   NOT sticky on a phone. The panel holds a scope row, an artist field, three
+   sliders and a 2x2 summary — about half a viewport once stacked — and
+   `position: sticky` pinned all of it permanently, leaving a sliver of the
+   results to scroll in. */
+.sandbox-controls {
+  position: sticky;
+  top: var(--navbar-height);
+  z-index: 20;
+  background: var(--secondary-bg, #1e1e1e);
+}
+
+@media (max-width: 767.98px) {
+  .sandbox-controls {
+    position: static;
+  }
+}
+
 /* One row per simulated track.
    Fallback values match popularr.css — see the note in logs.css for why that
    matters (a mis-cased popularr.css made every fallback live). */

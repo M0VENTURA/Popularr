@@ -43,6 +43,14 @@
     </div>
   </div>
 
+  {# The route now reports a read failure instead of rendering an empty list
+     that reads as "you have no favourites". #}
+  {% if error %}
+  <div class="alert alert-danger" role="alert">
+    <i class="bi bi-exclamation-triangle"></i> {{ error }}
+  </div>
+  {% endif %}
+
   {% if bookmarks and bookmarks|length > 0 %}
     <!-- Artists Bookmarks -->
     {% set artist_bookmarks = bookmarks | selectattr('type', 'equalto', 'artist') | list %}

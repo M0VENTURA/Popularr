@@ -203,17 +203,26 @@
           <div class="text-center py-3 text-muted gap_tracklist_loading_${esc(cardId)}">
             <span class="spinner-border spinner-border-sm"></span> Loading tracklist…
           </div>
-          <table class="table table-dark table-sm mb-0 d-none gap_tracklist_table_${esc(cardId)}">
-            <thead>
-              <tr>
-                <th style="width:3rem">#</th>
-                <th>Title</th>
-                <th style="width:5rem">Duration</th>
-                <th style="width:7rem" class="text-end">Action</th>
-              </tr>
-            </thead>
-            <tbody id="tracklist_tbody_${esc(cardId)}"></tbody>
-          </table>
+          <!-- THIS TABLE HAD NO RESPONSIVE WRAPPER. It was the only generated
+               table in the app with none, so on a phone its fixed #/Duration/
+               Action widths pushed the Title column out of the card. A
+               scroller is the right shape here: the rows JS injects are not
+               columnar (the queued one has an empty last cell), so the
+               stacked data-mobile-cards layout would render them unlabelled.
+               (HTML comment, not a Jinja one: this is a JS template literal.) -->
+          <div class="table-responsive">
+            <table class="table table-dark table-sm mb-0 d-none mr-tracklist-table gap_tracklist_table_${esc(cardId)}">
+              <thead>
+                <tr>
+                  <th style="width:3rem">#</th>
+                  <th>Title</th>
+                  <th style="width:5rem">Duration</th>
+                  <th style="width:7rem" class="text-end">Action</th>
+                </tr>
+              </thead>
+              <tbody id="tracklist_tbody_${esc(cardId)}"></tbody>
+            </table>
+          </div>
         </div>
       </div>`;
   }

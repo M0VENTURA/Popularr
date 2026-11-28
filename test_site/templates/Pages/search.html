@@ -15,12 +15,12 @@
   templates/pages/downloads/search_playlists.html, which is itself dead (its
   route redirects to /downloads/search).
 
-  SUPERSEDED FILES FROM AN EARLIER PASS — DELETE THESE:
+  SUPERSEDED FILES FROM AN EARLIER PASS — NOW DELETED:
       static/js/pages/library-search.js   a full second implementation
       static/css/search.css               styles only that implementation used
 
-  They were written before this page was identified as superseded. Keeping them
-  would mean three search implementations, which would drift exactly the way the
+  They were written before this page was identified as superseded, and keeping
+  them would have meant three search implementations drifting apart the way the
   two smart-playlist builders did.
 
   ALTERNATIVE: if /search is not wanted at all, remove the route
@@ -66,7 +66,7 @@
     js/pages/search-entry.js   opens that flyout, pre-filled from ?q=
 
   NOT loaded: js/pages/library-search.js (superseded — see the header) and
-  css/search.css (its styles). Delete both.
+  css/search.css (its styles). Both have been deleted.
 #}
 <script src="{{ versioned_static('js/pages/search-entry.js') }}"></script>
 {% endblock %}

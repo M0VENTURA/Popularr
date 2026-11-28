@@ -318,16 +318,22 @@
       `toLocaleString()` — "10/10/2026, 12:00:00 pm" — would otherwise stay that
       long whatever the column did.
     #}
-    <table id="queueEventsTable" class="table table-sm table-hover m-0" style="display:none;">
-      <thead class="table-dark sticky-top">
-        <tr>
-          <th class="qe-ts-col">Timestamp</th>
-          <th class="qe-type-col">Type</th>
-          <th>Message</th>
-        </tr>
-      </thead>
-      <tbody id="queueEventsBody">
-      </tbody>
-    </table>
+    {# The card body is a VERTICAL scroller only (`overflow-y`), so this table
+       had no horizontal escape at all: three columns of timestamps, types and
+       messages were squeezed into a phone's width and the Message column — the
+       only one carrying information — was crushed. #}
+    <div class="table-responsive">
+      <table id="queueEventsTable" class="table table-sm table-hover m-0" style="display:none;">
+        <thead class="table-dark sticky-top">
+          <tr>
+            <th class="qe-ts-col">Timestamp</th>
+            <th class="qe-type-col">Type</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody id="queueEventsBody">
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>

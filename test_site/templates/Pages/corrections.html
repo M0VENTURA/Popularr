@@ -98,7 +98,9 @@
             </div>
             <div id="conflicts-list" class="d-none">
                 <div class="table-responsive">
-                    <table class="table table-sm table-hover mb-0 correcting-table" id="conflicts-table">
+                    {# `data-mobile-cards`: rows are built by corrections.js, which
+                       also sets data-label on each cell (see the `cell` helper). #}
+                    <table class="table table-sm table-hover mb-0 correcting-table" id="conflicts-table" data-mobile-cards>
                         <thead>
                             <tr>
                                 <th style="width:28%;">Track</th>
@@ -170,7 +172,9 @@
                 <span class="badge bg-secondary ms-2">{{ item.track_count }} tracks</span>
                 <span class="badge bg-warning text-dark ms-1">{{ item.inconsistencies | length }} field{% if item.inconsistencies | length != 1 %}s{% endif %}</span>
             </div>
-            <div class="d-flex gap-2">
+            {# `flex-wrap`: three long-labelled buttons in one row overflowed a
+               phone and pushed the card wider than the viewport. #}
+            <div class="d-flex gap-2 flex-wrap">
                 <button type="button" class="btn btn-sm btn-outline-warning fix-all-btn"
                         data-action="corr-fix-all"
                         data-album-artist="{{ item.album_artist | e }}"
@@ -214,7 +218,7 @@
                         <span class="text-secondary fw-normal mb-mbid-label"></span>
                     </p>
                     <div class="table-responsive">
-                        <table class="table table-sm table-hover mb-0 correcting-table">
+                        <table class="table table-sm table-hover mb-0 correcting-table" data-mobile-cards>
                             <thead>
                                 <tr>
                                     <th style="width:160px;">Field</th>
@@ -242,7 +246,7 @@
                 <div class="ignores-rows d-flex flex-wrap gap-2"></div>
             </div>
             <div class="table-responsive">
-                <table class="table table-hover mb-0 correcting-table">
+                <table class="table table-hover mb-0 correcting-table" data-mobile-cards>
                     <thead>
                         <tr>
                             <th style="width:160px;">Field</th>
@@ -253,8 +257,8 @@
                     <tbody>
                         {% for inc in item.inconsistencies %}
                         <tr>
-                            <td class="fw-semibold align-middle">{{ inc.field_label }}</td>
-                            <td>
+                            <td class="fw-semibold align-middle" data-label="Field">{{ inc.field_label }}</td>
+                            <td data-label="Values found">
                                 <div class="d-flex flex-wrap gap-2 align-items-center">
                                     {% for v in inc['values'] %}
                                     <span class="badge bg-secondary value-badge"
@@ -265,7 +269,7 @@
                                     {% endfor %}
                                 </div>
                             </td>
-                            <td class="text-end align-middle">
+                            <td class="text-end align-middle" data-label="Actions">
                                 <div class="d-flex flex-wrap gap-1 justify-content-end">
                                     {#
                                       Values are rendered highest-count-first, so the FIRST

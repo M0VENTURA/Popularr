@@ -6,19 +6,26 @@ Scope: `test_site/templates/` (31 rendered surfaces), `test_site/static/css/` (1
 
 This is an audit plus a rebuild plan.
 
-**Status after the first pass (config, artist, album):** see
-`Change Logs/Main/2026-11-28-config-artist-album-mobile-and-duplicate-length.md`.
+**Status (two passes done):** see
+`Change Logs/Main/2026-11-28-config-artist-album-mobile-and-duplicate-length.md` and
+`Change Logs/Main/2026-11-28-bookmarks-track-and-mobile-table-pass.md`.
 
-Fixed here — §2.5 (artist `escapeHtml`), §3 config (the phone navigation rail), §6.3
+First pass — §2.5 (artist `escapeHtml`), §3 config (the phone navigation rail), §6.3
 (config), §4.4's artist-avatar key handler, and the album tracklist column widths and
 touch targets. Also found and fixed while working the album page: the duplicate
 Keep/Delete badges could name a wrong-length copy as the keeper (quality was scored
 before length); the artist favourite heart was wired to an element that only exists in
 the dead template, so it could never unfavourite.
 
-Still open from this document — §2.1 (bookmarks always empty), §2.2/§2.3 (track page
-overlay and unstyled tab bar), §2.4 (duplicate analytics route), the downloads trio,
-and everything in §8 from Phase 1 onward.
+Second pass — §2.1 (bookmarks), §2.2/§2.3 (track page overlay, unstyled tab bar and the
+sticky tabs behind the navbar), §2.4 (duplicate analytics route), Phase 2's remaining
+mobile tables (corrections, missing releases, queue events, sandbox, banned words), and
+the dead files listed in §5.2. Changelog:
+`Change Logs/Main/2026-11-28-bookmarks-track-and-mobile-table-pass.md`.
+
+Still open — Phase 1 (the real bundle), the downloads trio, `/metadata-compare`,
+`/activity` and `/downloads/search` error states, `artist_list`'s ~1000 unpaginated
+rows, the dashboard's five 5-second polls, and the four oversized page modules.
 
 ---
 

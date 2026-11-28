@@ -89,7 +89,7 @@ PREVIEWABLE: dict[str, tuple[str, str]] = {
     "queue": ("/downloads", "Needs slskd_config + queue_status_config, supplied below."),
     "monitor": ("/downloads/monitor", "Needs slskd_config + queue_status_config, supplied below."),
     "upcoming": ("/downloads/discover/upcoming", "Needs slskd_config, supplied below."),
-    "bookmarks": ("/bookmarks", "Bookmark rows load client-side; the page itself needs no server context."),
+    "bookmarks": ("/bookmarks", "The rows are SERVER-rendered from the bookmarks table; this preview shows the empty state."),
     "playlist_import_csv": ("/playlists/import-csv", "Reads the uploaded CSV client-side; no server context needed."),
 }
 

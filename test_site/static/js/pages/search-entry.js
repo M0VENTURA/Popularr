@@ -20,9 +20,9 @@
        it pre-filled. Without ?q= we just open the flyout.
 
    A previous pass at this page produced a full second implementation
-   (pages/library-search.js + css/search.css). Those are SUPERSEDED and should
-   be deleted — keeping them would mean three search implementations, and they
-   would drift the same way the two smart-playlist builders did.
+   (pages/library-search.js + css/search.css). Those were SUPERSEDED and have
+   been deleted — keeping them would have meant three search implementations,
+   drifting the same way the two smart-playlist builders did.
    ========================================================================== */
 
 (function (global) {

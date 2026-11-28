@@ -415,9 +415,9 @@
             const shown = value.length > 40 ? value.slice(0, 40) + '…' : value;
             return `
               <tr>
-                <td class="fw-semibold align-middle">${esc(label)}</td>
-                <td><span class="badge bg-info text-dark" title="${esc(value)}">${esc(shown)}</span></td>
-                <td class="text-end align-middle">
+                <td class="fw-semibold align-middle" data-label="Field">${esc(label)}</td>
+                <td data-label="MB value"><span class="badge bg-info text-dark" title="${esc(value)}">${esc(shown)}</span></td>
+                <td class="text-end align-middle" data-label="Action">
                   <button type="button" class="btn btn-sm btn-outline-info fix-btn apply-field-btn"
                           data-action="corr-apply-field"
                           data-album-artist="${esc(albumArtist)}"
@@ -451,24 +451,28 @@
     if (conflict.artist_name) trackParts.push('by ' + conflict.artist_name);
     if (conflict.album_name) trackParts.push('on ' + conflict.album_name);
 
-    const cell = (className, text) => {
+    // `label` becomes data-label, which the stacked-card layout on a phone
+    // prints beside the value. Without it the five cells collapse into five
+    // unlabelled lines — the table is `data-mobile-cards` in the template.
+    const cell = (className, text, label) => {
       const td = document.createElement('td');
       td.className = className;
+      if (label) td.setAttribute('data-label', label);
       if (text != null) td.textContent = text;
       return td;
     };
 
-    tr.appendChild(cell('align-middle small', trackParts.join(' ') || conflict.track_id));
-    tr.appendChild(cell('align-middle fw-semibold small', conflict.field_name));
+    tr.appendChild(cell('align-middle small', trackParts.join(' ') || conflict.track_id, 'Track'));
+    tr.appendChild(cell('align-middle fw-semibold small', conflict.field_name, 'Field'));
 
-    const localCell = cell('align-middle small');
+    const localCell = cell('align-middle small', null, 'Current');
     const localBadge = document.createElement('span');
     localBadge.className = 'badge bg-info text-dark';
     localBadge.textContent = conflict.local_value || '(empty)';
     localCell.appendChild(localBadge);
     tr.appendChild(localCell);
 
-    const remoteCell = cell('align-middle small');
+    const remoteCell = cell('align-middle small', null, 'Provider');
     const remoteBadge = document.createElement('span');
     remoteBadge.className = 'badge bg-warning text-dark';
     remoteBadge.textContent = conflict.remote_value || '(empty)';
@@ -482,7 +486,7 @@
     }
     tr.appendChild(remoteCell);
 
-    const actionCell = cell('text-end align-middle');
+    const actionCell = cell('text-end align-middle', null, 'Actions');
 
     const acceptBtn = document.createElement('button');
     acceptBtn.type = 'button';
