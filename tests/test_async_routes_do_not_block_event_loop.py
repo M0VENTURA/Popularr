@@ -138,9 +138,10 @@ _KNOWN_OFFENDERS = frozenset({
     "ui_routes.py::artist_genre_management",
     "ui_routes.py::artists",
     "ui_routes.py::dashboard",
-    "ui_routes.py::metadata_compare",
-    "ui_routes.py::metadata_compare_accept_navidrome",
-    "ui_routes.py::metadata_compare_apply_mb",
+    # ✅ DELETED 2026-11-28: metadata_compare / _apply_mb / _accept_navidrome.
+    # The page and its three API endpoints are retired (it queried columns that
+    # do not exist — see the redirect's docstring in ui_routes.py); /correcting
+    # covers the same ground through metadata_conflicts.
     "upcoming_releases_routes.py::api_add_upcoming_release",
     "upcoming_releases_routes.py::api_match_upcoming_release",
 })

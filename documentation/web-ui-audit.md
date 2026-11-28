@@ -30,9 +30,18 @@ Third pass — §5.3 / Phase 4: the downloads trio is ONE page. `/downloads` and
 deleted. Changelog:
 `Change Logs/Main/2026-11-28-downloads-trio-collapsed.md`.
 
-Still open — Phase 1 (the real bundle), `/metadata-compare`, `/search`'s stub
-route, `artist_list`'s ~1000 unpaginated rows, the dashboard's five 5-second
-polls, and the four oversized page modules.
+Fourth pass — §6 candidate 5: `/metadata-compare` is retired. It turned out not
+to be merely unbounded: it queried `beets_year`, which is not in the schema,
+models or any migration (the Beets importer lives in `old_system/deprecated/`),
+so it could never render; its "Beets" column was actually `musicbrainz_genres`
+compared against itself; and both write endpoints targeted columns that do not
+exist. It now redirects to `/correcting`, which already protects and reports
+`genres` and `year` through `metadata_conflicts`. Changelog:
+`Change Logs/Main/2026-11-28-metadata-compare-retired.md`.
+
+Still open — Phase 1 (the real bundle), `/search`'s stub route, `artist_list`'s
+~1000 unpaginated rows, the dashboard's five 5-second polls, and the four
+oversized page modules.
 
 ---
 

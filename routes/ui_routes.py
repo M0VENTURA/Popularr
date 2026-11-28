@@ -58,7 +58,9 @@ from services.enrichment.genre_tag_aggregator import (
     get_artist_genre_sources,
     get_track_genre_sources,
 )
-from services.enrichment.musicbrainz_service import MusicBrainzService
+# MusicBrainzService import removed with /metadata-compare's dead endpoints —
+# it was the only user here. MusicBrainz work lives in musicbrainz_routes.py and
+# services/metadata/metadata_proposal_service.py.
 from services.favourites_service import is_favourite as _user_is_favourite
 from services.infrastructure.filesystem_service import resolve_downloads_dir
 from services.metadata.artist_metadata_service import get_artist_members_cached
@@ -5635,295 +5637,36 @@ async def artist_genre_management(name: str) -> Any:
 
 @ui_bp.route("/metadata-compare")
 async def metadata_compare() -> Any:
-    try:
-        with db_session() as session:
-            result = session.execute(text("""
-                SELECT
-                    album,
-                    COALESCE(NULLIF(album_artist, ''), artist) AS artist_name,
-                    year AS navidrome_year,
-                    beets_year,
-                    navidrome_genres,
-                    musicbrainz_genres,
-                    COUNT(*) AS track_count
-                FROM tracks
-                WHERE album IS NOT NULL
-                  AND album != ''
-                  AND COALESCE(NULLIF(album_artist, ''), artist) IS NOT NULL
-                  AND COALESCE(NULLIF(album_artist, ''), artist) != ''
-                GROUP BY
-                    album,
-                    COALESCE(NULLIF(album_artist, ''), artist),
-                    year,
-                    beets_year,
-                    navidrome_genres,
-                    musicbrainz_genres
-                ORDER BY
-                    LOWER(COALESCE(NULLIF(album_artist, ''), artist)),
-                    LOWER(album)
-            """))
-            rows = [dict(row._mapping) for row in result.fetchall()]
+    """RETIRED — folds into /correcting.
 
-        album_comparisons: list[dict[str, Any]] = []
+    ⚠️ THIS PAGE COULD NOT WORK, in three independent ways. It is kept as a
+    redirect rather than deleted so an old bookmark lands somewhere useful.
 
-        for row in rows:
-            album = row.get("album") or ""
-            artist = row.get("artist_name") or ""
-            nav_year = row.get("navidrome_year")
-            beets_year = row.get("beets_year")
-            nav_genres_raw = row.get("navidrome_genres") or ""
-            beets_genres_raw = row.get("musicbrainz_genres") or ""
-            track_count = int(row.get("track_count") or 0)
+    1. ``beets_year`` DOES NOT EXIST. It is absent from ``db/schema.py``'s
+       ``COLUMN_REGISTRY['tracks']``, from ``db/models.py`` and from every
+       migration — the Beets importer that wrote it lives in
+       ``old_system/deprecated/``. On a current database the query below is an
+       ``UndefinedColumn`` error, caught by the ``except`` and turned into a
+       flash + redirect to the dashboard, so the page could never render.
 
-            nav_genres = [
-                genre.strip()
-                for genre in str(nav_genres_raw).split(",")
-                if genre.strip()
-            ]
+    2. THE "BEETS" COLUMN WAS NOT BEETS. The handler read ``musicbrainz_genres``
+       into it and compared the result against ... ``musicbrainz_genres``, so
+       even with the missing column present it compared one value with itself.
 
-            beets_genres = [
-                genre.strip()
-                for genre in str(beets_genres_raw).split(",")
-                if genre.strip()
-            ]
+    3. BOTH WRITE ACTIONS WERE DEAD. ``apply-musicbrainz`` updated
+       ``beets_year`` and ``mb_override`` (neither exists) — the whole UPDATE
+       threw, so no field was applied. ``accept-navidrome`` set
+       ``metadata_locked = TRUE``, also not a column, so "Keep This Data"
+       silently 500'd.
 
-            has_year_mismatch = str(nav_year or "") != str(beets_year or "")
-            has_genre_mismatch = sorted(g.lower() for g in nav_genres) != sorted(
-                g.lower() for g in beets_genres
-            )
-
-            if has_year_mismatch or has_genre_mismatch:
-                album_comparisons.append({
-                    "album": album,
-                    "artist": artist,
-                    "track_count": track_count,
-                    "navidrome": {
-                        "year": nav_year,
-                        "genres": nav_genres,
-                    },
-                    "beets": {
-                        "year": beets_year,
-                        "genres": beets_genres,
-                    },
-                })
-
-        return await render_template(
-            "pages/metadata_compare.html",
-            album_comparisons=album_comparisons,
-        )
-
-    except Exception as exc:
-        logger.error("metadata-compare error", error=str(exc), exc_info=True)
-        await flash(f"Error loading metadata comparison: {exc}", "danger")
-        return redirect(url_for("ui.dashboard"))
-
-
-@ui_bp.route("/api/metadata-compare/search-musicbrainz", methods=["POST"])
-async def metadata_compare_search_mb() -> Any:
-    data = (await request.get_json(silent=True)) or {}
-    artist = str(data.get("artist") or "").strip()
-    album = str(data.get("album") or "").strip()
-
-    if not artist or not album:
-        return jsonify({"error": "artist and album required"}), 400
-
-    try:
-        svc = MusicBrainzService()
-        results: list[dict[str, Any]] = []
-        raw_results = None
-
-        if hasattr(svc, "search_releases"):
-            raw_results = svc.search_releases(artist=artist, album=album)
-        elif hasattr(svc, "search_album"):
-            raw_results = svc.search_album(artist=artist, album=album)
-        elif hasattr(svc, "search_release"):
-            raw_results = svc.search_release(artist=artist, album=album)
-
-        if raw_results:
-            if isinstance(raw_results, dict):
-                raw_results = [raw_results]
-
-            for item in raw_results:
-                if not isinstance(item, dict):
-                    continue
-
-                release_date = (
-                    item.get("first-release-date")
-                    or item.get("first_release_date")
-                    or item.get("date")
-                    or item.get("release_date")
-                    or ""
-                )
-
-                year = item.get("year")
-                if not year and release_date:
-                    year = str(release_date).split("-")[0]
-
-                genres = (
-                    item.get("genres")
-                    or item.get("tags")
-                    or item.get("musicbrainz_genres")
-                    or []
-                )
-
-                if isinstance(genres, str):
-                    genres = [
-                        genre.strip()
-                        for genre in genres.split(",")
-                        if genre.strip()
-                    ]
-
-                results.append({
-                    "id": item.get("id") or item.get("mbid") or item.get("release_id"),
-                    "title": item.get("title") or item.get("album") or album,
-                    "album": item.get("album") or item.get("title") or album,
-                    "artist": item.get("artist") or item.get("artist-credit") or artist,
-                    "artist-credit": item.get("artist-credit") or item.get("artist") or artist,
-                    "first-release-date": release_date,
-                    "year": year,
-                    "genres": genres,
-                    "confidence": item.get("confidence"),
-                })
-
-        if not results and hasattr(svc, "get_suggested_mbid"):
-            suggested = svc.get_suggested_mbid(album, artist)
-            mbid = None
-            confidence = None
-
-            if isinstance(suggested, tuple):
-                mbid = suggested[0] if len(suggested) > 0 else None
-                confidence = suggested[1] if len(suggested) > 1 else None
-            else:
-                mbid = suggested
-
-            if mbid:
-                results.append({
-                    "id": mbid,
-                    "title": album,
-                    "album": album,
-                    "artist": artist,
-                    "artist-credit": artist,
-                    "first-release-date": "",
-                    "year": None,
-                    "genres": [],
-                    "confidence": confidence,
-                })
-
-        return jsonify({
-            "success": True,
-            "results": results,
-        })
-
-    except Exception as exc:
-        logger.error("metadata-compare MB search failed", error=str(exc), exc_info=True)
-        return jsonify({"error": str(exc)}), 500
-
-
-@ui_bp.route("/api/metadata-compare/apply-musicbrainz", methods=["POST"])
-async def metadata_compare_apply_mb() -> Any:
-    data = (await request.get_json(silent=True)) or {}
-    artist = str(data.get("artist") or "").strip()
-    album = str(data.get("album") or "").strip()
-    mb_data = data.get("mb_data") or {}
-
-    if not artist or not album or not isinstance(mb_data, dict):
-        return jsonify({"error": "artist, album, and mb_data required"}), 400
-
-    try:
-        release_date = (
-            mb_data.get("first-release-date")
-            or mb_data.get("first_release_date")
-            or mb_data.get("release_date")
-            or ""
-        )
-
-        year = mb_data.get("year")
-        if not year and release_date:
-            year = str(release_date).split("-")[0]
-
-        genres = mb_data.get("genres") or []
-        if isinstance(genres, str):
-            genres = [
-                genre.strip()
-                for genre in genres.split(",")
-                if genre.strip()
-            ]
-
-        genres_text = ",".join(genres)
-        mbid = (
-            mb_data.get("id")
-            or mb_data.get("mbid")
-            or mb_data.get("release_id")
-            or ""
-        )
-
-        with db_session() as session:
-            result = session.execute(
-                text("""
-                    UPDATE tracks
-                    SET
-                        year = COALESCE(:year, year),
-                        beets_year = COALESCE(:year, beets_year),
-                        musicbrainz_genres = COALESCE(NULLIF(:genres, ''), musicbrainz_genres),
-                        musicbrainz_album_mbid = COALESCE(NULLIF(:mbid, ''), musicbrainz_album_mbid),
-                        mb_override = TRUE
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-                      AND LOWER(COALESCE(album, '')) = LOWER(:album)
-                    RETURNING id
-                """),
-                {
-                    "year": year,
-                    "genres": genres_text,
-                    "mbid": mbid,
-                    "artist": artist,
-                    "album": album,
-                },
-            )
-            updated_ids = [row[0] for row in result.fetchall()]
-
-        return jsonify({
-            "success": True,
-            "message": f"Applied MusicBrainz data to {artist} - {album} ({len(updated_ids)} tracks)",
-            "tracks_updated": len(updated_ids),
-        })
-
-    except Exception as exc:
-        logger.error("metadata-compare apply MB failed", error=str(exc), exc_info=True)
-        return jsonify({"error": str(exc)}), 500
-
-
-@ui_bp.route("/api/metadata-compare/accept-navidrome", methods=["POST"])
-async def metadata_compare_accept_navidrome() -> Any:
-    data = (await request.get_json(silent=True)) or {}
-    artist = str(data.get("artist") or "").strip()
-    album = str(data.get("album") or "").strip()
-
-    if not artist or not album:
-        return jsonify({"error": "artist and album required"}), 400
-
-    try:
-        with db_session() as session:
-            session.execute(
-                text("""
-                    UPDATE tracks
-                    SET metadata_locked = TRUE
-                    WHERE LOWER(COALESCE(NULLIF(album_artist, ''), artist)) = LOWER(:artist)
-                      AND LOWER(COALESCE(album, '')) = LOWER(:album)
-                """),
-                {
-                    "artist": artist,
-                    "album": album,
-                },
-            )
-
-        return jsonify({
-            "success": True,
-            "message": f"Navidrome data locked for {artist} - {album}",
-        })
-
-    except Exception as exc:
-        logger.error("metadata-compare accept navidrome failed", error=str(exc), exc_info=True)
-        return jsonify({"error": str(exc)}), 500
+    Nothing is lost by retiring it: ``services/metadata/conflict_service.py``
+    already treats ``genres`` and ``year`` as PROTECTED_FIELDS and records
+    provider disagreements in ``metadata_conflicts`` — which is exactly what the
+    first half of /correcting renders, with working Accept/Keep. The
+    MusicBrainz side is covered there too, by the per-album lookup and the
+    metadata-proposal review.
+    """
+    return redirect(url_for("ui.correcting"))
 
 
 # REMOVED 2026-09-18: @ui_bp.route("/smart-playlists") -> smart_playlists()

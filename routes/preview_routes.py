@@ -104,7 +104,8 @@ NEEDS_CONTEXT: dict[str, str] = {
     "track_detail": "Needs the full track row plus artwork URL and scan flag lists.",
     "config": "Needs config + config_raw and the sanitised section tree.",
     "setup": "Needs the setup wizard's defaults and PostgreSQL probe state.",
-    "metadata_compare": "Needs its comparison payload from the live route.",
+    # "metadata_compare" removed — the page is retired (/metadata-compare now
+    # redirects to /correcting) and its template is deleted.
     "artist_genres": "Needs artist_name plus the per-source genre breakdown.",
     "artist_corrections": "Needs get_artist_corrections() output for one artist.",
     "help": "Needs the help doc content resolved from disk.",
