@@ -151,3 +151,87 @@ class TestTheScoreDiagnostic:
     def test_the_column_is_reported(self):
         assert "score_diagnostic" in svc.POPULARITY_REPORT_COLUMNS
 
+
+class TestTheGenreDiagnostics:
+    """Genre hygiene flags, added after the 65k-track collection review.
+
+    The review asked for two things the report could not answer:
+
+    * "798 tracks without a final genre … would be worth putting into a
+      diagnostic queue rather than silently ignoring them";
+    * a hard threshold for "more than eight final genres", which is the
+      signature of an album-level blend written onto a compilation track.
+    """
+
+    def _row(self, **overrides):
+        base = {
+            "final_score": 55.0,
+            "raw_score": 55.0,
+            "lastfm_listeners": 50_000,
+            "listenbrainz_listens": 500,
+            "is_live": 0,
+            "exclude_from_stats": False,
+            "genres": "Rock, Alternative Rock",
+        }
+        base.update(overrides)
+        return base
+
+    def test_a_track_with_no_genres_is_flagged(self):
+        assert svc._score_diagnostic(self._row(genres="")) == "no_genres"
+        assert svc._score_diagnostic(self._row(genres=None)) == "no_genres"
+
+    def test_performance_markers_alone_are_still_no_genres(self):
+        """CONTROL: "Cover, Live" is not a genre — the pool drops them, so a
+        track carrying only markers really has no genre."""
+        assert svc._score_diagnostic(self._row(genres="Cover, Live")) == "no_genres"
+
+    def test_a_normal_track_is_not_flagged(self):
+        """CONTROL: the flags must not fire on the overwhelming majority."""
+        assert svc._score_diagnostic(self._row()) == ""
+
+    def test_a_row_without_the_column_is_not_accused_of_having_no_genres(self):
+        """⚠️ A unit fixture that never set ``genres`` is not evidence.
+
+        The report's SELECT always includes the column, so a real row missing it
+        means "no genre resolved". A minimal test row means nothing at all, and
+        flagging it made every existing diagnostics test fail.
+        """
+        row = {
+            "final_score": 55.0,
+            "lastfm_listeners": 50_000,
+            "listenbrainz_listens": 500,
+            "is_live": 0,
+            "exclude_from_stats": False,
+        }
+        assert svc._score_diagnostic(row) == ""
+
+    def test_a_final_score_far_above_raw_is_flagged(self):
+        """The review could not tell WHY these happen; the flag makes them
+        findable so the reason can be recorded."""
+        assert "final_much_above_raw" in svc._score_diagnostic(
+            self._row(raw_score=40.0, final_score=72.6)
+        )
+
+    def test_a_small_raw_to_final_gap_is_not_flagged(self):
+        """CONTROL: the normal remap moves the score a few points."""
+        assert svc._score_diagnostic(
+            self._row(raw_score=51.9, final_score=50.0)
+        ) == ""
+        assert svc._score_diagnostic(
+            self._row(raw_score=50.0, final_score=64.0)
+        ) == ""
+
+    def test_flags_combine_rather_than_mask_each_other(self):
+        """A row can be both famous-and-mis-scored and genre-less; the cell has
+        to carry both or the operator fixes one and finds the other later."""
+        cell = svc._score_diagnostic(
+            self._row(
+                genres="",
+                final_score=9.19,
+                lastfm_listeners=835_000,
+                listenbrainz_listens=2_000,
+            )
+        )
+        assert "popular_but_low_score" in cell
+        assert "no_genres" in cell
+

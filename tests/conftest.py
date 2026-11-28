@@ -172,6 +172,35 @@ def _no_real_navidrome_rescan(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_navidrome_playlist_index(monkeypatch):
+    """The popularity-report routes must not sync playlists from a real server.
+
+    ⚠️ EVERY ONE OF THEM HANGS FOR ~2 MINUTES WITHOUT THIS. The artist, album and
+    collection report routes all call ``ensure_playlist_index()`` so the
+    ``playlists_included_in`` column is not blank. That reaches
+    ``finalise_stage.refresh_playlist_index``, which opens a real Navidrome
+    connection to the fake ``POPULARLR_NAV_URL`` — two attempts per host, each
+    waiting out a DNS failure. A suite of twenty report tests spent over two
+    minutes in ``getaddrinfo``, and every one of them then failed with an empty
+    CSV, which reads as "the report is broken" rather than "the test tried to
+    reach a server that is not there".
+
+    ⚠️ PATCHED AT THE SOURCE, NOT IN THE ROUTES. The routes import
+    ``ensure_playlist_index`` by name at module scope, so patching the service
+    would not affect an already-bound reference. ``refresh_playlist_index`` is
+    the single call they all funnel into, and it is imported lazily inside
+    ``ensure_playlist_index`` — so patching it covers all three routes.
+
+    Reports that assert on the column re-patch this with their own fake.
+    """
+    from services.popularity.stages import finalise_stage as _finalise
+
+    monkeypatch.setattr(
+        _finalise, "refresh_playlist_index", lambda *args, **kwargs: {}
+    )
+
+
+@pytest.fixture(autouse=True)
 def _tag_writes_inline_by_default(request, monkeypatch):
     """Unit tests exercise the INLINE file-tag path unless they opt in.
 

@@ -412,14 +412,57 @@ def _mb_id_diagnostic(row: Any, *, album_has_multiple_releases: bool = False) ->
     return "; ".join(problems)
 
 
+def _has_genre_column(row: Any) -> bool:
+    """True when ``row`` actually carries a ``genres`` column.
+
+    Two row shapes reach :func:`_score_diagnostic`: a SQLAlchemy ``Row`` (from
+    the report query, where ``in`` tests COLUMNS) and a plain dict (from tests
+    and callers, where ``in`` tests KEYS). Neither answer is what a bare
+    ``"genres" in row`` means for the other.
+    """
+    try:
+        keys = getattr(row, "_mapping", None)
+        if keys is not None:
+            return "genres" in keys
+        return "genres" in row
+    except TypeError:
+        return False
+
+
+def _row_value(row: Any, name: str) -> Any:
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        return mapping.get(name)
+    try:
+        return row.get(name)
+    except AttributeError:
+        return None
+
+
 def _score_diagnostic(row: Any) -> str:
-    """Flag the two highest-value score/popularity disagreements.
+    """Flag the score/popularity/genre cases worth a human look.
+
+    Score/popularity disagreements:
 
     * ``popular_but_low_score`` — a widely listened studio track scored below
       30. That shape is the signature of a bad release/recording match, a
       missing playcount treated as zero, or a frozen incomplete scan.
     * ``high_score_low_evidence`` — a score of 90+ with almost no listeners on
       either provider: fallback inflation rather than measured popularity.
+    * ``final_much_above_raw`` — the final score exceeds the raw one by 15+
+      points. Usually legitimate (artist-relative adjustment, single bonus,
+      source reconciliation), but the review could not tell WHY from the
+      report, which makes it unauditable. The flag makes the case findable.
+
+    Genre hygiene (added after the 65k-track review):
+
+    * ``no_genres`` — no musical genre at all. ~1.2% of a real collection, so
+      not a systemic failure, but the review's point stands: these should be
+      reviewable rather than silently ignored.
+    * ``too_many_genres`` — more than :data:`MAX_POOL_GENRES`, the signature of
+      an album-level blend written onto a compilation track before that bug was
+      fixed (968c10d1). The genre playlists clamp these; this reports them so
+      the stale rows can actually be repaired.
 
     Advisory only: the report carries it so the rows can be found, and the
     scoring itself is never changed from here.
@@ -430,13 +473,43 @@ def _score_diagnostic(row: Any) -> str:
         score = float(row.get("final_score") or 0)
         lastfm = float(row.get("lastfm_listeners") or 0)
         listenbrainz = float(row.get("listenbrainz_listens") or 0)
+        raw = float(row.get("raw_score") or 0)
     except (TypeError, ValueError):
         return ""
+
+    problems: list[str] = []
     if lastfm >= 100_000 and score < 30:
-        return "popular_but_low_score"
+        problems.append("popular_but_low_score")
     if score >= 90 and lastfm < 1_000 and listenbrainz < 100:
-        return "high_score_low_evidence"
-    return ""
+        problems.append("high_score_low_evidence")
+    if raw > 0 and score - raw >= 15:
+        problems.append("final_much_above_raw")
+
+    # Genre hygiene. Counted the same way the playlist pool counts, so a row
+    # flagged here is exactly a row the pool had to clamp.
+    #
+    # ⚠️ ONLY WHEN THE COLUMN IS PRESENT. The report's SELECT always includes
+    # ``genres``, so a real row missing it means "no genre resolved". A unit
+    # fixture that never set the key is not evidence of anything, and flagging
+    # it would make every minimal test row read ``no_genres``.
+    if _has_genre_column(row):
+        try:
+            from services.enrichment.genre_aggregation_service import (
+                MAX_POOL_GENRES,
+                playlist_pool_genres,
+            )
+
+            pool = playlist_pool_genres(_row_value(row, "genres"))
+            if not pool:
+                problems.append("no_genres")
+            elif len(pool) > MAX_POOL_GENRES:
+                # Unreachable while the pool clamps; kept so the flag still
+                # fires if the clamp is ever removed.
+                problems.append("too_many_genres")
+        except Exception:
+            pass
+
+    return "; ".join(problems)
 
 
 def build_popularity_report(*, artist: str | None = None, album: str | None = None) -> str:

@@ -399,6 +399,22 @@ def is_playlist_pool_genre(value: Any) -> bool:
     return not is_holiday_family_token(cleaned)
 
 
+#: A track carrying more genres than this cannot be trusted to name a playlist.
+#:
+#: ⭐ REPORTED: "a small number of compilation tracks have clearly inherited an
+#: aggregated genre set from Various Artists … 40 to 66 resolved genres, covering
+#: unrelated styles such as Alternative Rock, Heavy Metal, House, Folk, Hip-Hop,
+#: Soul and Techno simultaneously."
+#:
+#: The album-level overwrite that caused this was fixed in 968c10d1 (2026-09-28),
+#: so those rows are STALE — written before the fix and never re-scanned. The
+#: selector caps at ``max_genres`` (4 by default), so nothing new can reach this
+#: many. This ceiling is therefore a detector as much as a guard: it keeps such a
+#: row from claiming a slot in every genre playlist at once, and the clamp is
+#: logged so the stale rows are findable rather than silently tolerated.
+MAX_POOL_GENRES = 8
+
+
 def playlist_pool_genres(values: Any, limit: int | None = None) -> list[str]:
     """The genres a track POOLS BY for genre playlists.
 
@@ -415,7 +431,7 @@ def playlist_pool_genres(values: Any, limit: int | None = None) -> list[str]:
     consume a slot or name a playlist; the holiday family is dropped for the
     same reason and placed by the seasonal branch instead.
 
-    ``limit=None`` keeps every musical genre.
+    ``limit=None`` keeps every musical genre, up to :data:`MAX_POOL_GENRES`.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -432,6 +448,20 @@ def playlist_pool_genres(values: Any, limit: int | None = None) -> list[str]:
         out.append(name)
         if limit is not None and len(out) >= max(1, int(limit)):
             break
+
+    # ⚠️ THE CEILING APPLIES EVEN WHEN THE CALLER ASKED FOR NO LIMIT. A caller
+    # passing ``limit=None`` means "all the musical genres", which is correct
+    # for a normal track (1-4). It is not correct for a row holding an
+    # aggregated compilation blend, and honouring it there is how one track
+    # ends up in eight unrelated playlists.
+    if len(out) > MAX_POOL_GENRES:
+        logger.warning(
+            "Track genre pool is implausibly large — clamping",
+            found=len(out), kept=MAX_POOL_GENRES,
+            dropped=out[MAX_POOL_GENRES:],
+            hint="likely a stale album-level genre blend written before 968c10d1",
+        )
+        out = out[:MAX_POOL_GENRES]
     return out
 
 
