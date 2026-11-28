@@ -13,10 +13,11 @@ own docs. This suite pins the removal.
 
 WHAT IS DELIBERATELY KEPT
 -------------------------
-* ``services/metadata/tag_names.py`` and ``tag_file_service.py`` still mention
-  ``beets_mbid`` in their comments — those are FILE-TAG synonym notes (Beets and
-  Picard write the same MUSICBRAINZ_TRACKID frame), which is a different thing
-  from the integration and still worth documenting.
+* ``tag_names.py`` still declares ``MUSICBRAINZ_RECORDINGID`` as a synonym of
+  ``MUSICBRAINZ_TRACKID``, with a comment explaining that Picard and beets use
+  that spelling. That is a FILE-TAG synonym — the standardiser must know it to
+  clear stray frames on rewrite — not the retired integration. (The internal
+  ``beets_mbid`` alias WAS removed: nothing can post that column.)
 * The config page's and ``config_helpers``' prose tells users they can run an
   external tagger (Beets, Picard) with Popularr's tag writes switched off. That
   advice is about the read-only mode, not about an integration.
@@ -32,10 +33,17 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ROUTES = REPO_ROOT / "routes"
 
 
+#: This file names the blueprint and the module path in order to forbid them,
+#: so a plain text scan flags the guard itself. Excluded by path, not by
+#: loosening the needle — otherwise the check would stop working.
+_SELF = pathlib.Path(__file__).resolve()
+
+
 def _live_python() -> list[pathlib.Path]:
     return [
         p for p in REPO_ROOT.rglob("*.py")
-        if not any(
+        if p.resolve() != _SELF
+        and not any(
             skip in str(p)
             for skip in ("old_system", "__pycache__", "node_modules", ".git")
         )
@@ -113,17 +121,26 @@ def test_the_page_data_block_does_not_carry_retired_columns(column: str) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_tag_synonym_notes_are_kept() -> None:
-    """CONTROL: ``beets_mbid`` as a FILE-TAG synonym is a different thing.
+def test_the_recording_id_tag_synonym_is_kept() -> None:
+    """CONTROL: a FILE-TAG synonym, not the integration.
 
-    Beets and Picard write the same MUSICBRAINZ_TRACKID frame, so the
-    standardiser must still know the spelling to clear stray frames.
+    Picard (and beets) write the recording id under MUSICBRAINZ_RECORDINGID as
+    well as MUSICBRAINZ_TRACKID. The standardiser must still declare that
+    spelling, or a write leaves two different recording MBIDs in one file under
+    two descriptions — the bug reported on Untouchables.
+
+    ⚠️ This is what the ``beets_mbid`` reference in this module is about: an
+    internal field alias for that same frame, NOT the retired integration. The
+    alias itself was removed (nothing can post that column), but the underlying
+    synonym must stay.
     """
     names = (REPO_ROOT / "services/metadata/tag_names.py").read_text(encoding="utf-8")
-    assert "beets_mbid" in names, (
-        "the tag-synonym note was deleted along with the integration — they are "
-        "unrelated, and losing it means a stray frame is never cleaned up"
+    assert "MUSICBRAINZ_RECORDINGID" in names, (
+        "the MUSICBRAINZ_RECORDINGID synonym was deleted with the integration — "
+        "they are unrelated, and losing it means a stray recording-id frame is "
+        "never cleaned up on rewrite"
     )
+    assert "MUSICBRAINZ_RECORDING_ID" in names, "the second spelling of it went too"
 
 
 def test_the_read_only_advice_is_kept() -> None:

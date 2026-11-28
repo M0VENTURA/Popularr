@@ -120,15 +120,22 @@ The three entries were also removed from
 
 ## Verification
 
-* LSP diagnostics clean on every touched Python file.
-* **The suite was not run** — no `python` on PATH and no Docker here. Before
-  merging:
-  `pytest tests/test_metadata_compare_is_retired.py tests/test_async_routes_do_not_block_event_loop.py tests/test_metadata_compare_version_markers_and_genres.py`
+**Verified by running the suite** (Python 3.14 via the `py` launcher):
 
-  The last one is **unaffected**: despite its name it tests
-  `metadata_proposal_service` and `musicbrainz_service` — the surviving
-  MusicBrainz path — not the retired page. Its name is now misleading and could
-  be renamed to `test_genre_comparison_and_version_markers.py`.
+* `test_metadata_compare_is_retired.py` — passes;
+* `test_async_routes_do_not_block_event_loop.py` — passes, after the three
+  allow-list entries were removed (that file's own ratchet asserts entries are
+  not left behind for handlers that no longer exist);
+* `test_metadata_compare_version_markers_and_genres.py` — **unaffected and
+  passing**. Despite its name it tests `metadata_proposal_service` and
+  `musicbrainz_service` — the surviving MusicBrainz path — not the retired page.
+  Its name is now misleading; renaming it to
+  `test_genre_comparison_and_version_markers.py` would be worth doing.
+
+Full-suite result with this change: **411 failed / 10,722 passed / 317 skipped
+/ 29 errors**, against a baseline of **415 / 10,706 / 317 / 29** measured on the
+same machine with the changes stashed. The 29 errors are pre-existing
+(`test_navidrome_*` needs a table the fixture does not create).
 
 ## Still open
 

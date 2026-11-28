@@ -118,10 +118,22 @@ has no `onclick="jumpToUpcomingReleases()"`, and links
 
 ## Verification
 
-* LSP diagnostics clean on every touched Python/JS file.
-* **The suite was not run** — no `python` on PATH and no Docker here. Before
-  merging:
-  `pytest tests/test_downloads_pages_are_one.py tests/test_discarded_downloads_are_reported.py tests/test_mb_picker_ownership.py tests/test_item_groups_bindactions_this.py tests/test_downloads_inline_handlers_resolve.py tests/test_rebuilt_pages_have_no_dead_buttons.py tests/test_manual_search_button_works_in_test_site.py`
+**Verified by running the suite** (Python 3.14 via the `py` launcher): the
+eight downloads suites pass — 119 passed, 8 skipped (the skips are the
+node-backed click harnesses, and `node` is not installed here).
+
+That covers `test_downloads_pages_are_one.py`,
+`test_discarded_downloads_are_reported.py`, `test_mb_picker_ownership.py`,
+`test_item_groups_bindactions_this.py`,
+`test_downloads_inline_handlers_resolve.py`,
+`test_rebuilt_pages_have_no_dead_buttons.py`,
+`test_manual_search_button_works_in_test_site.py` and
+`test_served_artist_album_track_handlers.py`.
+
+Full-suite result with this change: **411 failed / 10,722 passed / 317 skipped
+/ 29 errors**, against a baseline of **415 / 10,706 / 317 / 29** on the same
+machine with the changes stashed. The 29 errors are pre-existing
+(`test_navidrome_*` needs a table the fixture does not create).
 
 ## Still open
 

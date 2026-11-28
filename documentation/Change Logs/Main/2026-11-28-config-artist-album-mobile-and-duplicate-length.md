@@ -189,13 +189,19 @@ stylesheet cannot be cached across pages and cannot be bundled.
 
 ## Verification
 
-* `services/metadata/duplicate_version_service.py` and the test file report clean in the
-  IDE's language servers; no syntax or type diagnostics on any touched JS or CSS file.
-* **The Python test suite could not be executed in this environment** — there is no
-  `python` on PATH (only the Windows Store stub) and no Docker. Every claim above is
-  from reading the code and the existing tests, not from a green run. Run
-  `pytest tests/test_duplicate_length_recommendation.py tests/test_mobile_layout_density.py`
-  before merging.
+**Verified by running the suite** (Python 3.14 via the `py` launcher — note that
+`python` itself is a Windows Store stub on this machine; `py` works):
+
+* `tests/test_duplicate_length_recommendation.py`,
+  `test_mobile_layout_density.py`, `test_layout_css_js_template_integrity.py`
+  and `test_mobile_chrome_layout_fixes.py` — **218 passed, 1 skipped**.
+* Full suite: **411 failed / 10,722 passed / 317 skipped / 29 errors**, against
+  a baseline of **415 / 10,706 / 317 / 29** measured on the same machine with
+  the changes stashed. The 29 errors are pre-existing (`test_navidrome_*`
+  needs a table the fixture does not create).
+
+Every rule in this change therefore passed on a real run, including the
+duplicate-length ordering and the album tracklist CSS the density suite pins.
 
 ### Existing test contracts preserved
 

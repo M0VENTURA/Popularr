@@ -167,12 +167,23 @@ deleted files as "delete these" / "loaded globally" were corrected.
 
 ## Verification
 
-* LSP diagnostics clean on every touched Python/JS file.
-* **The suite was not executed here** — no `python` on PATH and no Docker in this
-  environment. Run before merging:
-  `pytest tests/test_layout_css_js_template_integrity.py tests/test_mobile_chrome_layout_fixes.py tests/test_downloads_monitor_mobile.py`.
+**Verified by running the suite** (Python 3.14 via the `py` launcher):
+`test_layout_css_js_template_integrity.py`, `test_mobile_chrome_layout_fixes.py`,
+`test_downloads_monitor_mobile.py` and `test_mobile_layout_density.py` all pass.
 
-### Test contracts checked by reading
+This pass also shipped with the `/bookmarks` route calling `db_session()`
+directly from an async handler, which
+`test_async_routes_do_not_block_event_loop.py` caught. It now goes through a
+sync `_load_bookmarks_for_page()` via `asyncio.to_thread`, and
+`tests/test_bookmarks_page_renders_rows.py` drives the real page (the fix
+originally had no test at all).
+
+Full-suite result with this change: **411 failed / 10,722 passed / 317 skipped
+/ 29 errors**, against a baseline of **415 / 10,706 / 317 / 29** on the same
+machine with the changes stashed. The 29 errors are pre-existing
+(`test_navidrome_*` needs a table the fixture does not create).
+
+### Test contracts checked by reading (before the run)
 
 * `test_layout_css_js_template_integrity.py::test_mobile_cards_tables_label_every_cell`
   — every newly opted-in table either has server-rendered `data-label`s or an empty

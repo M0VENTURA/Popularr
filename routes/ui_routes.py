@@ -5255,6 +5255,35 @@ def _fill_track_bookmark_details(rows: list[dict[str, Any]]) -> None:
         row["album"] = track.get("album") or row["album"]
 
 
+def _load_bookmarks_for_page(
+    filter_type: str | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """The bookmark read, off the event loop. Returns ``(rows, error)``.
+
+    Sync on purpose: the async handler calls it through
+    ``asyncio.to_thread``, which is the same pattern the corrections page uses
+    for its library-wide scan.
+    """
+    try:
+        with db_session() as session:
+            raw_rows = session.execute(
+                # `SELECT *` on purpose — see _normalise_bookmark_row's note on
+                # the two column sets. No dialect-specific NULLS ordering.
+                text("SELECT * FROM bookmarks ORDER BY created_at DESC LIMIT 500")
+            ).mappings().all()
+        rows = [_normalise_bookmark_row(dict(raw)) for raw in raw_rows]
+        rows = [row for row in rows if row["type"] in _BOOKMARK_KINDS]
+        if filter_type:
+            rows = [row for row in rows if row["type"] == filter_type]
+        _fill_track_bookmark_details(rows)
+        return rows, ""
+    except Exception as exc:
+        # Do not let one bad row take the page down: say it failed, and keep the
+        # filter UI usable.
+        logger.warning("Could not load bookmarks", error=str(exc))
+        return [], "Bookmarks could not be loaded. Check the logs for details."
+
+
 @ui_bp.route("/bookmarks")
 async def bookmarks() -> Any:
     """Every favourite, optionally filtered to one kind.
@@ -5271,25 +5300,13 @@ async def bookmarks() -> Any:
     requested = (request.args.get("filter") or "").strip().lower()
     filter_type = requested if requested in _BOOKMARK_KINDS else None
 
-    rows: list[dict[str, Any]] = []
-    error = ""
-    try:
-        with db_session() as session:
-            raw_rows = session.execute(
-                # `SELECT *` on purpose — see _normalise_bookmark_row's note on
-                # the two column sets. No dialect-specific NULLS ordering.
-                text("SELECT * FROM bookmarks ORDER BY created_at DESC LIMIT 500")
-            ).mappings().all()
-        rows = [_normalise_bookmark_row(dict(raw)) for raw in raw_rows]
-        rows = [row for row in rows if row["type"] in _BOOKMARK_KINDS]
-        if filter_type:
-            rows = [row for row in rows if row["type"] == filter_type]
-        _fill_track_bookmark_details(rows)
-    except Exception as exc:
-        # Do not let one bad row take the page down: say it failed, and keep the
-        # filter UI usable.
-        logger.warning("Could not load bookmarks", error=str(exc))
-        error = "Bookmarks could not be loaded. Check the logs for details."
+    # ⚠️ OFFLOADED. `db_session()` is synchronous SQLAlchemy, so calling it from
+    # an async handler blocks the whole event loop — a hypercorn worker serves
+    # every request from one loop, so a slow query here freezes unrelated pages
+    # too. Same rule the corrections page above already follows.
+    rows, error = await asyncio.to_thread(
+        _load_bookmarks_for_page, filter_type
+    )
 
     return await render_template(
         "pages/bookmarks.html",

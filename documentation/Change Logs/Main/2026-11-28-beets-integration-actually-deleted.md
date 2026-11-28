@@ -55,11 +55,17 @@ The `#page-data` keys had **no reader** in any script under `static/js`.
 
 Both are still correct, and deleting them would be wrong:
 
-1. **`tag_names.py`'s note that "Picard/beets and some players call the same
-   entity the RECORDING id".** That is about FILE-TAG spelling — Beets and
-   Picard write the same `MUSICBRAINZ_TRACKID` frame as everyone else, so the
-   standardiser must still know the spelling to clear stray frames on rewrite.
-   Nothing to do with the integration.
+1. **`tag_names.py`'s `MUSICBRAINZ_RECORDINGID` synonym**, with its note that
+   "Picard/beets and some players call the same entity the RECORDING id". That
+   is about FILE-TAG spelling — the same recording MBID can sit in a file under
+   two descriptions, and the declared synonym is what clears the stale one on
+   rewrite. Nothing to do with the integration.
+
+   ⚠️ CORRECTION: an earlier draft of this entry said the file "still mentions
+   `beets_mbid`". It does not — `beets_mbid` was the **internal field alias**
+   in `CANONICAL_TAG_NAMES`, which this change removed. The surviving reference
+   is the `MUSICBRAINZ_RECORDINGID` synonym, which is what actually needs
+   protecting, and the guard's control now asserts on that.
 2. **The config page's and `config_helpers.py`'s read-only advice** — "Run an
    external tagger (Beets, MusicBrainz Picard)? Set the master toggle off…".
    That is describing the read-only mode, which is a real feature and names
@@ -87,15 +93,46 @@ cleanup sweep cannot mistake them for leftovers.
 
 ## Verification
 
-* LSP diagnostics clean on every touched file.
-* **The suite was not run** — no `python` on PATH and no Docker here. Before
-  merging:
-  `pytest tests/test_beets_integration_is_gone.py tests/test_tag_name_standardisation.py tests/test_album_review_save_persists.py tests/test_metadata_compare_is_retired.py`
+**The suite WAS run** (Python 3.14 via the `py` launcher).
 
-  The two middle ones exercise the maps I edited: `tag_name_standardisation`
-  asserts specific spellings still resolve, and `album_review_save_persists`
-  asserts every staged field has a tag mapping (it checks that required keys
-  exist, not that extras are absent, so removing an unused key is safe).
+| | Failed | Passed | Skipped | Errors |
+|---|---|---|---|---|
+| Baseline (all changes stashed) | 415 | 10,706 | 317 | 29 |
+| With this change | **411** | **10,722** | 317 | 29 |
+
+Four fewer failures, sixteen more passes, errors identical — no regressions.
+
+The 29 errors are **pre-existing and unrelated**: the `test_navidrome_*` and
+`test_folder_match_*` suites raise `no such table: tracks` because they rely on a
+schema the fixture does not create. Verified identical on a stashed tree.
+
+`tests/test_migrations_idempotent.py` cannot be collected here
+(`ModuleNotFoundError: alembic`) and is excluded from both runs.
+
+## Three bugs the run caught in my own work
+
+1. **The Beets guard failed against its own source.** A plain-text scan for
+   `beets_bp` / `beets_routes` matched the guard file itself. Fixed by excluding
+   the file by resolved path — not by loosening the needle, which would have
+   stopped the check working.
+2. **A control asserted the wrong thing.** It claimed `tag_names.py` still
+   contains `beets_mbid`; it does not — that was the *internal alias* this
+   change removed. The surviving file-tag synonym that actually needs protecting
+   is `MUSICBRAINZ_RECORDINGID`, and the control now asserts on that. The
+   paragraph above was corrected to match.
+3. **`/bookmarks` blocked the event loop.** The new route called `db_session()`
+   directly from an async handler; `test_async_routes_do_not_block_event_loop.py`
+   caught it. Moved into a sync `_load_bookmarks_for_page()` invoked through
+   `asyncio.to_thread`.
+
+## Bookmark tests added
+
+The `/bookmarks` fix had shipped with **no test at all** — nothing in the suite
+touched the page, which is how a route that always rendered the empty state
+survived. `tests/test_bookmarks_page_renders_rows.py` now drives the real route:
+a stored favourite appears, `?filter=` actually filters, an unknown filter does
+not blank the page, the empty state still works (control), a track favourite is
+enriched from `tracks`, and the normaliser handles both column sets.
 
 ## Note on `old_system/`
 
