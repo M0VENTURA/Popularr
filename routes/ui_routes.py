@@ -5386,37 +5386,62 @@ async def banned_words_page() -> Any:
     return await render_template("pages/banned_words.html")
 
 
+def _monitor_url(fragment: str = "") -> str:
+    """``/downloads/monitor`` + the caller's query string + a tab fragment.
+
+    The query string matters: every "Search Soulseek" link in the app is
+    ``/downloads/search?q=…``, and the Soulseek panel reads ``q`` on load. The
+    fragment is what monitor.js uses to switch to the right tab (Bootstrap pills
+    ignore the hash on their own).
+    """
+    query = request.query_string.decode("utf-8", "ignore")
+    base = url_for("ui.downloads_monitor")
+    if query:
+        base = f"{base}?{query}"
+    return base + fragment
+
+
+# ── The downloads pages are ONE page now ────────────────────────────────────
+#
+# /downloads, /downloads/monitor and /downloads/search rendered three templates
+# that were the same page with a tab removed each time:
+#
+#     monitor   folders + Soulseek + playlists + queue
+#     /downloads           Soulseek + playlists + queue
+#     /downloads/search    Soulseek + playlists
+#
+# Only the largest was in the nav, the smaller two carried duplicate copies of
+# every script, and their templates had drifted. They now redirect into the
+# monitor, which keeps a fragment for the tab and the query string for `?q=`.
+
+
 @ui_bp.route("/downloads")
 async def downloads_page() -> Any:
-    cfg = get_config()
-    return await render_template(
-        "pages/downloads/queue.html",
-        slskd_config=cfg.get("slskd", {}),
-    )
+    """Retired: the queue is the first thing on the one downloads page."""
+    return redirect(_monitor_url())
 
 
 @ui_bp.route("/downloads/search")
 async def downloads_search() -> Any:
-    cfg = get_config()
-    return await render_template(
-        "pages/downloads/search.html",
-        slskd_config=cfg.get("slskd", {}),
-    )
+    """Retired: opens the monitor's Soulseek tab with ``?q=`` intact."""
+    return redirect(_monitor_url("#soulseek"))
 
 
 @ui_bp.route("/downloads/search/soulseek")
 async def downloads_search_soulseek() -> Any:
-    return redirect(url_for("ui.downloads_search") + "#soulseek")
+    return redirect(_monitor_url("#soulseek"))
 
 
 @ui_bp.route("/downloads/search/musicbrainz")
 async def downloads_search_musicbrainz() -> Any:
-    return redirect(url_for("ui.downloads_search"))
+    # MusicBrainz has no tab of its own — the picker opens from rows — so this
+    # lands on Soulseek, which is what the old page's tab strip did.
+    return redirect(_monitor_url("#soulseek"))
 
 
 @ui_bp.route("/downloads/search/playlists")
 async def downloads_search_playlists() -> Any:
-    return redirect(url_for("ui.downloads_search") + "#playlists")
+    return redirect(_monitor_url("#playlists"))
 
 
 # REMOVED 2026-09-18: @ui_bp.route("/downloads/manager") -> downloads_manager()
@@ -5434,8 +5459,7 @@ async def downloads_search_playlists() -> Any:
 #
 # Nothing referenced this route: no url_for('ui.downloads_manager') anywhere,
 # and no template linked to /downloads/manager. The downloads hub
-# (@ui_bp.route("/downloads") -> downloads_page -> pages/downloads/queue.html)
-# is the current equivalent.
+# (/downloads/monitor; /downloads redirects there) is the current equivalent.
 #
 # If an existing bookmark matters, the sibling routes above show how the
 # codebase keeps a dead URL alive — this instead of a 404:

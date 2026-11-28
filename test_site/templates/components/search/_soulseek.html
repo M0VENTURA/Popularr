@@ -22,19 +22,16 @@
   services/slskd.js's `search()`.
 
   ── WHY THIS IS THE RIGHT SHAPE, AND THE ONE LOADING CONSEQUENCE ──────────
-  One partial is shared by three pages (downloads/search.html, downloads/queue.html
-  and downloads/monitor.html). In the old tree all three loaded downloads.js, so
-  a single shared `searchSoulseek` served them all. To keep that "one component,
-  one controller" design with the refactored module, every page that includes
-  this partial must load:
+  ONE page includes this partial now — downloads/monitor.html. It used to be
+  shared by three (downloads/search.html, downloads/queue.html and monitor.html);
+  the other two URLs redirect into the monitor. Every page that includes this
+  partial must load:
 
       css/downloads.css
       js/services/slskd.js          (global.slskd.*)
       js/pages/soulseek-search.js   (this panel's controller)
 
-  pages/downloads/search.html already does. queue.html and monitor.html need
-  soulseek-search.js added to their {% block scripts %} — noted in those
-  templates.
+  monitor.html loads all three.
 
   ── WHAT WAS DROPPED ──────────────────────────────────────────────────────
   * The "Results Limit" number input. No controller has ever read it:

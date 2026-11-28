@@ -23,9 +23,16 @@ mobile tables (corrections, missing releases, queue events, sandbox, banned word
 the dead files listed in §5.2. Changelog:
 `Change Logs/Main/2026-11-28-bookmarks-track-and-mobile-table-pass.md`.
 
-Still open — Phase 1 (the real bundle), the downloads trio, `/metadata-compare`,
-`/activity` and `/downloads/search` error states, `artist_list`'s ~1000 unpaginated
-rows, the dashboard's five 5-second polls, and the four oversized page modules.
+Third pass — §5.3 / Phase 4: the downloads trio is ONE page. `/downloads` and
+`/downloads/search` (plus its three legacy sub-paths) now 302 into
+`/downloads/monitor` with the query string and a tab fragment preserved, and
+`monitor.js` opens the tab the fragment names. The two subset templates are
+deleted. Changelog:
+`Change Logs/Main/2026-11-28-downloads-trio-collapsed.md`.
+
+Still open — Phase 1 (the real bundle), `/metadata-compare`, `/search`'s stub
+route, `artist_list`'s ~1000 unpaginated rows, the dashboard's five 5-second
+polls, and the four oversized page modules.
 
 ---
 

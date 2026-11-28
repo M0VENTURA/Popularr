@@ -863,10 +863,33 @@
     });
   }
 
+  /**
+   * Switch to the tab named by the URL fragment.
+   *
+   * ⚠️ BOOTSTRAP PILLS IGNORE THE HASH. `/downloads` and `/downloads/search`
+   * now redirect here (the three URLs this app used to serve are one page with
+   * fewer tabs), keeping their query string and adding `#soulseek` or
+   * `#playlists`. Without this, every "Search Soulseek" link in the app would
+   * land on the default Folders tab with the requested panel hidden.
+   *
+   * `#unmatchedFoldersSection` is deliberately not handled: it lives inside the
+   * default tab, and honorFolderAnchor() scrolls to it once the card exists.
+   */
+  function activateTabFromHash() {
+    if (!global.location || !global.bootstrap || !global.bootstrap.Tab) return;
+    const targetId = String(global.location.hash || '').replace('#', '');
+    if (!targetId) return;
+    const trigger = document.querySelector('[data-bs-target="#' + targetId + '"]');
+    if (!trigger) return;
+    global.bootstrap.Tab.getOrCreateInstance(trigger).show();
+  }
+
   // ── Init ────────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', function () {
     bindActions();
+    activateTabFromHash();
+    global.addEventListener('hashchange', activateTabFromHash);
 
     // Render once for a fast first paint, then keep it current.
     //

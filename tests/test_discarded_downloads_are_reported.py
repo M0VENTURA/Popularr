@@ -450,14 +450,16 @@ class TestTheApiIsServed:
 
 class TestBothTreesRenderTheSection:
     #: (page template, component, script)
+    #: One page now: the downloads trio collapsed into monitor.html, which is
+    #: the only template that renders this section.
     TREES = (
         (
-            "test_site/templates/Pages/downloads/queue.html",
+            "test_site/templates/Pages/downloads/monitor.html",
             "test_site/templates/components/_discarded_downloads.html",
             "js/pages/discarded-downloads.js",
         ),
         (
-            "test_site/templates/Pages/downloads/queue.html",
+            "test_site/templates/Pages/downloads/monitor.html",
             "test_site/templates/components/_discarded_downloads.html",
             "js/pages/discarded-downloads.js",
         ),

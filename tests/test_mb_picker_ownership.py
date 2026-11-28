@@ -14,7 +14,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 PICKER = REPO_ROOT / "test_site/static/js/services/musicbrainz-picker.js"
 PAGE = REPO_ROOT / "test_site/static/js/pages/download-queue.js"
-QUEUE = REPO_ROOT / "test_site/templates/Pages/downloads/queue.html"
+#: One downloads page now — queue.html/search.html redirect into monitor.html.
 MONITOR = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
 
 SHARED_GLOBALS = [
@@ -51,7 +51,7 @@ def test_the_page_script_does_not_redefine_them():
 
 
 def test_the_picker_loads_before_the_page_script():
-    for page in (QUEUE, MONITOR):
+    for page in (MONITOR,):
         text = _read(page)
         picker = text.index("musicbrainz-picker.js")
         script = text.index("js/pages/download-queue.js")

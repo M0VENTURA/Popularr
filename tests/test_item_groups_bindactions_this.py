@@ -232,14 +232,18 @@ class TestManualSearchModalIsWired:
                 f"#{element_id} is not read by slskd.js"
             )
 
-    def test_the_queue_page_loads_both_prerequisites(self):
-        """slskd.js AND the modal partial — either missing and the click is inert."""
-        queue = (
-            REPO_ROOT / "test_site/templates/Pages/downloads/queue.html"
+    def test_the_downloads_page_loads_both_prerequisites(self):
+        """slskd.js AND the modal partial — either missing and the click is inert.
+
+        The downloads pages are one now: queue.html/search.html redirect into
+        monitor.html, which is the only template that can get this wrong.
+        """
+        page = (
+            REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
         ).read_text(encoding="utf-8")
-        assert "services/slskd.js" in queue, "queue.html does not load slskd.js"
-        assert "_soulseek_manual_search.html" in queue, (
-            "queue.html does not include the manual-search modal partial"
+        assert "services/slskd.js" in page, "monitor.html does not load slskd.js"
+        assert "_soulseek_manual_search.html" in page, (
+            "monitor.html does not include the manual-search modal partial"
         )
 
     def test_the_monitor_page_also_gets_a_working_button(self):

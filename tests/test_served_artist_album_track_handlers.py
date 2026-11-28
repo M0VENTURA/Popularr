@@ -316,7 +316,6 @@ class TestTheDeletedPartials:
         "rel",
         [
             "Pages/album_detail.html",
-            "Pages/downloads/queue.html",
             "Pages/downloads/monitor.html",
         ],
     )

@@ -268,13 +268,13 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     # test_the_register_has_no_stale_entries is what forces each deletion, and
     # tests/test_busy_popup.py::test_the_five_handlers_are_not_in_the_obsolete_register
     # keeps this register and that suite from disagreeing about what is dead.
-    # _organize_group.html is shared by album_detail.html and the queue page.
-    # Its controls live in pages/download-queue.js, so the ALBUM page cannot
-    # reach them (and the queue page can, because it loads that script).
+    # _organize_group.html is shared by album_detail.html and the downloads
+    # page. Its controls live in pages/download-queue.js, so the ALBUM page
+    # cannot reach them (and the downloads page can — it loads that script).
     ("album_detail.html", "searchMBForOrganize"): (
-        "_organize_group.html is shared with downloads/queue.html, where these "
-        "come from pages/download-queue.js. The album page loads album.js, "
-        "which does not define them."
+        "_organize_group.html is shared with downloads/monitor.html, where "
+        "these come from pages/download-queue.js. The album page loads "
+        "album.js, which does not define them."
     ),
     ("album_detail.html", "searchDiscogsForOrganize"): (
         "Same _organize_group.html sharing problem as searchMBForOrganize."
@@ -293,17 +293,18 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     # repaired in place to a real monitor page loading pages/monitor.js, so
     # those entries are DELETED — a rebuilt page now carries the monitor ids.
     #
-    # The monitor page shares the SAME partials as downloads/queue.html
-    # (_track_edit / _playlists / _organize_group), so it needs the same
-    # register entries the queue page has.
+    # The monitor page is the ONLY downloads page now (the other two URLs
+    # redirect into it), and it includes _track_edit / _playlists /
+    # _organize_group.
     ("downloads/monitor.html", "addEditTrackGenre"): (
-        "Same _track_edit.html sharing problem as downloads/queue.html."
+        "_track_edit.html needs its own controller here: those handlers live in "
+        "pages/album.js, which this page does not load."
     ),
     ("downloads/monitor.html", "saveComprehensiveEditedTrack"): (
-        "Same _track_edit.html sharing problem as downloads/queue.html."
+        "Same _track_edit.html sharing problem."
     ),
     ("downloads/monitor.html", "saveEditedTrack"): (
-        "Same _track_edit.html sharing problem as downloads/queue.html."
+        "Same _track_edit.html sharing problem."
     ),
     # ✅ REMOVED 2026-11-26: createPlaylist / importPlaylistFromCSV.
     #
@@ -316,22 +317,11 @@ _OBSOLETE_BUTTONS: dict[tuple[str, str], str] = {
     # both handlers resolve. `_playlists.html` is small; the "whole page" cost
     # was the price of a working tab.
 
-    # ── shared partials whose buttons need their controllers ────────────────
-    ("downloads/queue.html", "saveEditedTrack"): (
-        "_track_edit.html is shared with album_detail.html, where these live "
-        "in pages/album.js. This page needs its own track-edit controller."
-    ),
-    ("downloads/queue.html", "addEditTrackGenre"): (
-        "Same _track_edit.html sharing problem."
-    ),
-    ("downloads/queue.html", "saveComprehensiveEditedTrack"): (
-        "Same _track_edit.html sharing problem."
-    ),
-    # ✅ REMOVED 2026-11-26: ("downloads/queue.html", "importPlaylistFromCSV")
-    # and ("downloads/queue.html", "createPlaylist"). The page includes
-    # _playlists.html and now loads state/import-state.js + features/csv-import.js
-    # + pages/playlist.js, so every button in the Playlist Downloads panel
-    # resolves there too.
+    # ✅ queue.html ENTRIES DELETED 2026-11-28: /downloads and /downloads/search
+    # now redirect into downloads/monitor.html, so the three subset-page
+    # entries (saveEditedTrack / addEditTrackGenre /
+    # saveComprehensiveEditedTrack) are covered by monitor.html's own entries
+    # above — the page loads the same _track_edit partial and controllers.
 }
 
 

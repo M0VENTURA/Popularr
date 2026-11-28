@@ -53,7 +53,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PARTIAL = REPO_ROOT / "test_site/templates/components/modals/_soulseek_manual_search.html"
 LIVE_PARTIAL = REPO_ROOT / "test_site/templates/components/modals/_soulseek_manual_search.html"
 
-QUEUE_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/queue.html"
+#: The downloads pages collapsed into monitor.html (the other two URLs redirect).
+QUEUE_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
 REBUILT_MONITOR_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
 LIVE_MONITOR_PAGE = REPO_ROOT / "test_site/templates/Pages/downloads/monitor.html"
 

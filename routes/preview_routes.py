@@ -86,7 +86,8 @@ PREVIEWABLE: dict[str, tuple[str, str]] = {
     "search": ("/search", "Now a thin entry point onto the global search flyout."),
     "logs": ("/logs", "Needs log_dir / log_files, which are built here the same way the live route builds them."),
     "corrections": ("/correcting", "Album tag inconsistencies are computed here via the same service."),
-    "queue": ("/downloads", "Needs slskd_config + queue_status_config, supplied below."),
+    # `/downloads` and `/downloads/search` are 302s into the monitor now, so
+    # there is no second downloads page to preview.
     "monitor": ("/downloads/monitor", "Needs slskd_config + queue_status_config, supplied below."),
     "upcoming": ("/downloads/discover/upcoming", "Needs slskd_config, supplied below."),
     "bookmarks": ("/bookmarks", "The rows are SERVER-rendered from the bookmarks table; this preview shows the empty state."),
@@ -164,7 +165,7 @@ def _discover_pages() -> list[str]:
 def _template_path(slug: str) -> Path | None:
     """On-disk template for a slug, searching the WHOLE tree.
 
-    The tree nests pages in several places — ``Pages/downloads/queue.html``,
+    The tree nests pages in several places — ``Pages/downloads/monitor.html``,
     ``Playlists/index.html`` and ``auth/setup.html`` — while the slug is just the
     bare stem. Checking ``Pages/<slug>.html`` alone reported every nested page as
     missing, which is how four present pages came to be listed as absent.

@@ -34,9 +34,20 @@
     </div>
   </div>
 
+  {# Discarded downloads — ABOVE the tab strip, so it shows whichever tab is
+     open. Moved here from the retired queue.html, which was the only page that
+     rendered it; it was hidden until it had something to report. #}
+  {% include 'components/_discarded_downloads.html' %}
+
   {#
     nav-segmented (popularr.css) replaces the old `bg-secondary p-1 rounded`
-    combination — same convention as Pages/downloads/queue.html.
+    combination — the same treatment the other tab strips use.
+
+    ⚠️ THIS IS THE ONLY DOWNLOADS PAGE. `/downloads` and `/downloads/search`
+    used to render their own templates — one with the queue tab, one with only
+    Soulseek + Playlists — so three URLs served one page with a tab removed
+    each time, and the nav pointed at only the largest. Both now 302 here, and
+    monitor.js switches to the tab named by the fragment they append.
 
     ⚠️ "Matched & Unmatched Folders" IS THE FIRST TAB, and it is the default.
 
@@ -134,7 +145,7 @@
   </div>
 </div>
 
-{# Shared Modals — same set as Pages/downloads/queue.html #}
+{# Shared Modals — the set the downloads panels need #}
 {#
   _slskd_results.html and _manual_match.html are DELETED: nothing opened their
   modals, and their handlers (searchAgainSlskd, searchMatchTargets) exist in no
@@ -156,9 +167,9 @@
   utils/poller.js, ui/toast.js, ui/modal.js, ui/confirm.js,
   ui/button-state.js, services/musicbrainz-picker.js, ui/player.js,
   main.js, ui/search-flyout.js) is NOT repeated here. This page additionally
-  needs the SAME modules as Pages/downloads/queue.html (Soulseek search,
-  playlist downloads and the active queue) PLUS js/pages/monitor.js, which
-  adds the unmatched-folders section and the disk actions:
+  needs the Soulseek search, playlist download and active queue modules PLUS
+  js/pages/monitor.js, which adds the unmatched-folders section and the disk
+  actions:
 
     js/pages/download-queue.js  Provides loadQueueStatus(), which renders
                                 components/search/_queue_status.html's Active
@@ -203,8 +214,22 @@
 <script src="{{ versioned_static('js/services/slskd.js') }}"></script>
 <script src="{{ versioned_static('js/pages/soulseek-search.js') }}"></script>
 <script src="{{ versioned_static('js/pages/download-queue.js') }}"></script>
+<script src="{{ versioned_static('js/pages/discarded-downloads.js') }}"></script>
 <script src="{{ versioned_static('js/state/import-state.js') }}"></script>
 <script src="{{ versioned_static('js/features/csv-import.js') }}"></script>
 <script src="{{ versioned_static('js/pages/playlist.js') }}"></script>
+{#
+  pages/search.js — the delegated row actions for the Playlist Downloads panel
+  (.js-add-track-btn / .js-slskd-search-btn / .js-replace-btn) AND the `?q=`
+  auto-search. Both are needed here now:
+
+  * `?q=` is how every "Search Soulseek" link in the app arrives. Those links
+    point at /downloads/search, which now 302s here with `q` preserved.
+  * Without this file those row buttons were inert on this page: the panel is
+    included, but `_trackPayloads` had no reader.
+  It must load AFTER features/csv-import.js (which fills `_trackPayloads`) and
+  after pages/soulseek-search.js (which publishes `global.downloadsPage`).
+#}
+<script src="{{ versioned_static('js/pages/search.js') }}"></script>
 <script src="{{ versioned_static('js/pages/monitor.js') }}"></script>
 {% endblock %}

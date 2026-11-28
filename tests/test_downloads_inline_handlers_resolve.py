@@ -112,21 +112,22 @@ def test_every_inline_handler_resolves_on_its_page(tree: str) -> None:
     )
 
 
-class TestTheQueuePageJumpButton:
-    """Pins the specific fix so the dead button is not restored."""
+class TestTheDownloadsJumpButton:
+    """Pins the specific fix so the dead button is not restored.
+
+    The button used to live in two templates; the downloads pages are one now
+    (both subsets redirect into monitor.html).
+    """
 
     @pytest.mark.parametrize(
         "rel",
-        [
-            "test_site/templates/Pages/downloads/queue.html",
-            "test_site/templates/Pages/downloads/queue.html",
-        ],
+        ["test_site/templates/Pages/downloads/monitor.html"],
     )
     def test_it_is_a_link_not_a_dead_handler(self, rel: str) -> None:
         src = (REPO_ROOT / rel).read_text(encoding="utf-8")
         live = re.sub(r"\{#.*?#\}", "", src, flags=re.S)
         assert 'onclick="jumpToUpcomingReleases()"' not in live, (
-            f"{rel} still calls a function defined only in monitor.html"
+            f"{rel} calls a function that is not defined in any loaded module"
         )
         assert 'href="/downloads/discover/upcoming"' in live, (
             "the jump button must be a plain link to the upcoming page"
