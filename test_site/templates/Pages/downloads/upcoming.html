@@ -132,6 +132,10 @@
         managed scrape-progress poll.
 #}
 <link rel="stylesheet" href="{{ versioned_static('css/downloads.css') }}">
+{# The main-genre chip palette. Scoped to `.ur-genre` / `.ur-subgenre`, which
+   only this service's rows emit — see the stylesheet's header for why the
+   colour is CSS rather than an API value. #}
+<link rel="stylesheet" href="{{ versioned_static('css/upcoming-genres.css') }}">
 <script src="{{ versioned_static('js/services/musicbrainz-queue.js') }}"></script>
 <script src="{{ versioned_static('js/services/upcoming-releases.js') }}"></script>
 <script src="{{ versioned_static('js/pages/upcoming.js') }}"></script>

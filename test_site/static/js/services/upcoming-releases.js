@@ -302,6 +302,49 @@
   }
 
   /**
+   * Genre labels for one release: coloured main-genre chips + sub-genre chips.
+   *
+   * `release.main_genres` is `[{id, display}]` — at most two, strongest first,
+   * classified on the SERVER from the release group's MusicBrainz genres. The
+   * id becomes a CSS class (`ur-genre--metal`), so the palette lives in
+   * `css/upcoming-genres.css` and a new vocabulary root falls back to the
+   * neutral chip rather than disappearing.
+   *
+   * ⚠️ THE TEXT ALWAYS RENDERS, not just the colour. The chips name the genre
+   * ("Metal"), so the row is readable without distinguishing red from orange —
+   * which matters for colour-blind users and for the phone layout, where the
+   * chips are the only label the row carries.
+   *
+   * `release.sub_genres` rides along as smaller dashed chips and is what makes
+   * "Rock" say WHICH rock. Both lists are empty for an unlabelled release, and
+   * this returns '' rather than an empty chip.
+   */
+  function genreBadges(release) {
+    const main = Array.isArray(release.main_genres) ? release.main_genres : [];
+    const sub = Array.isArray(release.sub_genres) ? release.sub_genres : [];
+    if (!main.length && !sub.length) return '';
+
+    const mainChips = main
+      .filter((g) => g && (g.id || g.display))
+      .map((g) => {
+        // The id is vocabulary-controlled and lower-snake on the server, but
+        // it arrives over JSON — escape it into the class list by ALLOWING
+        // only the shapes a class can hold, rather than trusting it.
+        const id = String(g.id || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+        const cls = id ? ` ur-genre--${id}` : '';
+        return `<span class="ur-genre${esc(cls)}" title="Main genre: ${esc(g.display || id)}">${esc(g.display || id)}</span>`;
+      })
+      .join('');
+
+    const subChips = sub
+      .filter(Boolean)
+      .map((name) => `<span class="ur-subgenre">${esc(name)}</span>`)
+      .join('');
+
+    return mainChips + subChips;
+  }
+
+  /**
    * Build one table row.
    *
    * Buttons carry only `data-release-index`; the release object stays in
@@ -368,7 +411,7 @@
       // mobile card layout, and every `colspan` in this table kept in step —
       // four coupled edits to show a 28px picture. Inside the cell it costs
       // nothing and reads as part of the album.
-      `<td data-label="Album">${artThumb(release)}${esc(release.album_name || '')}${typeBadge(release)}${linkedBadge(release)}</td>` +
+      `<td data-label="Album">${artThumb(release)}${esc(release.album_name || '')}${typeBadge(release)}${linkedBadge(release)}${genreBadges(release)}</td>` +
       `<td data-label="Date"><small>${esc(release.release_date || 'TBA')} ${dateBadge}</small></td>` +
       `<td data-label="Source">${sourceBadge(release)}</td>` +
       `<td data-label="MBID">${mbidCell(release, isCandidate)}</td>` +
@@ -677,6 +720,12 @@
             `<span class="ur-card-date">${esc(release.release_date || 'TBA')}</span>` +
             linkedBadge(release) +
           '</div>' +
+          // The chips go on their OWN line in the card: the card is narrow
+          // enough that an inline chip would push the album title into an
+          // ellipsis (see upcoming-genres.css).
+          (genreBadges(release)
+            ? `<div class="ur-card-genres">${genreBadges(release)}</div>`
+            : '') +
         '</article>'
       );
     }).join('');
@@ -775,6 +824,7 @@
     renderTable,
     renderCarousel,
     renderProgressBadge,
+    genreBadges,
     search,
     autoMatch,
     confirmCandidate,

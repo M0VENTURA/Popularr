@@ -18,6 +18,7 @@ and persisted into the ``upcoming_releases`` table.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import unicodedata
@@ -32,6 +33,10 @@ from api_clients.musicbrainz_http import (
     escape_lucene_special_chars,
 )
 from db.engine import db_session
+from services.catalog.upcoming_genre_labels import (
+    describe_release_genres,
+    genre_names_by_vote,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -676,6 +681,18 @@ def _serialise_release_group(
         ).strip().lower(),
     }
 
+    # Genre labels, when the search already carried them. The discovery query
+    # does not ask for ``inc=genres``, so this is usually empty and the row gets
+    # labelled by the match path instead — but a caller that DOES include genres
+    # (the collection pass can) labels fifty rows with no extra requests rather
+    # than one request each.
+    names = genre_names_by_vote(
+        release_group.get("genres") or release_group.get("tags") or []
+    )
+    if names:
+        item["musicbrainz_genres"] = names
+        item["main_genres"] = describe_release_genres(names)["main_genres"]
+
     if include_artist:
         item["artist"] = _release_group_artist(
             release_group
@@ -1185,6 +1202,17 @@ _UPDATE_RELEASE_SQL = text(
 )
 
 
+#: The discovery upsert.
+#:
+#: ⚠️ ``musicbrainz_genres`` / ``main_genres`` are updated with COALESCE, not
+#: ``= EXCLUDED.x``. A re-discovery of an already-labelled row carries no genres
+#: — the discovery search does not request ``inc=genres`` — so a plain assign
+#: would overwrite a label the match path had just resolved with NULL. Filling
+#: in only is the correct direction.
+#:
+#: ⚠️ AND NO ``#`` COMMENTS INSIDE THE STRING. This is one SQL literal, so a
+#: Python-style ``#`` line is shipped to the server and SQLite rejects it with
+#: ``unrecognized token: "#"``. Explanations belong out here.
 _INSERT_RELEASE_SQL = text(
     """
     INSERT INTO upcoming_releases (
@@ -1203,7 +1231,9 @@ _INSERT_RELEASE_SQL = text(
         mbid_last_checked_at,
         status,
         last_seen_at,
-        updated_at
+        updated_at,
+        musicbrainz_genres,
+        main_genres
     )
     VALUES (
         :artist,
@@ -1224,7 +1254,9 @@ _INSERT_RELEASE_SQL = text(
         :checked_at,
         'discovered',
         CURRENT_TIMESTAMP,
-        CURRENT_TIMESTAMP
+        CURRENT_TIMESTAMP,
+        :musicbrainz_genres,
+        :main_genres
     )
 
     ON CONFLICT (artist_name, album_name, primary_type)
@@ -1303,6 +1335,15 @@ _INSERT_RELEASE_SQL = text(
         END,
 
         mbid_last_checked_at = EXCLUDED.mbid_last_checked_at,
+        musicbrainz_genres = COALESCE(
+            EXCLUDED.musicbrainz_genres,
+            upcoming_releases.musicbrainz_genres
+        ),
+        main_genres = COALESCE(
+            EXCLUDED.main_genres,
+            upcoming_releases.main_genres
+        ),
+
         updated_at = CURRENT_TIMESTAMP
     """
 )
@@ -1379,6 +1420,20 @@ def _prepare_release_for_persistence(
         "release_group_mbid": release_group_mbid,
         "mbid_source": str(mbid_source or MBID_SOURCE_NAME),
         "checked_at": checked_at,
+        # Genre labels are usually absent here — the discovery search does not
+        # request ``inc=genres``. They are passed as None (not "") so the upsert's
+        # COALESCE fills them in only when the search did carry them, and never
+        # overwrites a label the match path already resolved.
+        "musicbrainz_genres": (
+            json.dumps(release["musicbrainz_genres"], ensure_ascii=False)
+            if release.get("musicbrainz_genres")
+            else None
+        ),
+        "main_genres": (
+            json.dumps(release["main_genres"], ensure_ascii=False)
+            if release.get("main_genres")
+            else None
+        ),
     }
 
 

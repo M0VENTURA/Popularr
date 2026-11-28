@@ -76,6 +76,12 @@
   'use strict';
 
   const STATUS_POLL_MS = 5000;
+  //: Poll pace while NOTHING is running. The dashboard was polling four
+  //: endpoints every 5 seconds forever — ~2,900 requests an hour on a page
+  //: someone leaves open, to discover that nothing has changed. Idle is the
+  //: overwhelmingly common state, so it gets the slow pace and the fast one is
+  //: kept for when something is actually moving.
+  const STATUS_POLL_IDLE_MS = 60000;
   const UPCOMING_REFRESH_MS = 30 * 60 * 1000;
 
   let statusPoller = null;
@@ -400,6 +406,16 @@
 
     const active = data.active_scans || [];
     updateScanStatusBar(active);
+
+    // ── Adaptive poll pace ─────────────────────────────────────────────
+    // Fast while something is running (progress moves, the user is watching),
+    // slow when the library is idle (nothing can change on its own). Set from
+    // here because this response is the authoritative answer to "is anything
+    // happening" — the other three endpoints cannot tell you that.
+    if (statusPoller) {
+      const busy = active.some((scan) => scan && scan.is_running);
+      statusPoller.setInterval(busy ? STATUS_POLL_MS : STATUS_POLL_IDLE_MS);
+    }
 
     // ── The scanner card's two states ──────────────────────────────────
     //
@@ -1289,7 +1305,10 @@
 
     updateAll();
     statusPoller = global.poller.create({
-      interval: STATUS_POLL_MS,
+      // Start at the IDLE pace: `updateAll()` above has just run, and the first
+      // `updateActiveScans()` reply raises the pace to 5s if a scan is running.
+      // Starting fast would spend the first minute at 5s on an idle library.
+      interval: STATUS_POLL_IDLE_MS,
       immediate: false,
       onTick: updateAll,
     });

@@ -1,0 +1,106 @@
+/* ==========================================================================
+   static/css/upcoming-genres.css
+   Main-genre labels on the upcoming-releases rows.
+
+   WHY THE COLOUR LIVES HERE AND NOT IN THE API
+   -------------------------------------------
+   The backend answers `main_genres: [{"id": "metal", "display": "Metal"}]`.
+   The id -> colour mapping is CSS so that a palette change is a stylesheet
+   change, not a server deploy — and so the two legibility problems below can be
+   solved with the tokens the rest of the theme already uses.
+
+   TWO RULES THIS FILE OBEYS
+   -------------------------
+   1. **A label is never colour-ONLY.** Every chip carries its genre name, so a
+      colour-blind user (or anyone glancing at a printed page) reads "Metal",
+      not "the red one". The colour is an accelerator, never the message.
+   2. **Contrast is fixed, not inherited.** These are solid fills with dark text,
+      because the app's surfaces are near-black and the muted Bootstrap badge
+      variants wash out against them at 12px.
+
+   The `-subtle` classes are the default; the row uses the strong fill only for
+   the FIRST (primary) genre so a row still has one unambiguous colour.
+   ========================================================================== */
+
+/* ── Base chip ─────────────────────────────────────────────────────────────
+   `.ur-genre` is the main-genre label; `.ur-subgenre` is the smaller secondary
+   chip. Both are inline so they flow after the album name without pushing it
+   onto its own line. */
+.ur-genre {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.3rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  vertical-align: baseline;
+  /* The default when the id is not one we know a colour for. */
+  background: var(--tertiary-bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.ur-subgenre {
+  display: inline-block;
+  margin-left: 0.25rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.3rem;
+  font-size: 0.62rem;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--border-color) 80%, transparent);
+}
+
+/* ── Main-genre palette ────────────────────────────────────────────────────
+   One entry per ROOT in `services/playlists/main_genres.py` (19 genres). The
+   hues are spread far enough apart to be told apart at chip size, and each is
+   light enough to hold dark text.
+
+   ⚠️ NEW VOCABULARY ROOTS FALL BACK TO `.ur-genre` ABOVE. That is deliberate:
+   a genre the palette has never heard of still renders, in neutral grey. A
+   missing colour is a cosmetic gap; a missing label would be a data loss. */
+.ur-genre--metal        { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
+.ur-genre--rock         { background: #c2410c; color: #fff; border-color: #7c2d12; }
+.ur-genre--punk         { background: #be185d; color: #fff; border-color: #831843; }
+.ur-genre--electronic   { background: #0e7490; color: #fff; border-color: #155e75; }
+.ur-genre--pop          { background: #db2777; color: #fff; border-color: #9d174d; }
+.ur-genre--hip_hop      { background: #7c3aed; color: #fff; border-color: #5b21b6; }
+.ur-genre--r_and_b      { background: #9333ea; color: #fff; border-color: #6b21a8; }
+.ur-genre--soul         { background: #b45309; color: #fff; border-color: #78350f; }
+.ur-genre--funk         { background: #a16207; color: #fff; border-color: #713f12; }
+.ur-genre--jazz         { background: #0f766e; color: #fff; border-color: #115e59; }
+.ur-genre--blues        { background: #1e40af; color: #fff; border-color: #1e3a8a; }
+.ur-genre--country      { background: #854d0e; color: #fff; border-color: #713f12; }
+.ur-genre--folk         { background: #4d7c0f; color: #fff; border-color: #365314; }
+.ur-genre--reggae       { background: #15803d; color: #fff; border-color: #166534; }
+.ur-genre--classical    { background: #57534e; color: #fff; border-color: #44403c; }
+.ur-genre--gospel       { background: #a21caf; color: #fff; border-color: #701a75; }
+.ur-genre--christian    { background: #0369a1; color: #fff; border-color: #075985; }
+.ur-genre--world        { background: #65a30d; color: #111; border-color: #4d7c0f; }
+.ur-genre--experimental { background: #475569; color: #fff; border-color: #334155; }
+
+/* ── The carousel card ─────────────────────────────────────────────────────
+   On the phone carousel the chips sit under the album title, on their own
+   line, because the card is narrow enough that an inline chip would push the
+   title into an ellipsis. */
+.ur-card .ur-genre,
+.ur-card .ur-subgenre {
+  margin-left: 0;
+  margin-right: 0.25rem;
+}
+
+/* ── Phones ────────────────────────────────────────────────────────────────
+   In the stacked-card table layout every cell becomes a labelled line, so the
+   chips already have room; only the sub-genre row is dropped. It is the least
+   important information on the row and two lines of chips is what makes a
+   fifty-row list unreadable on a phone. */
+@media (max-width: 575.98px) {
+  .ur-subgenre {
+    display: none;
+  }
+}

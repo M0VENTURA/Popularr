@@ -516,6 +516,12 @@ COLUMN_REGISTRY: dict[str, dict[str, str]] = {
         "mbid_confidence": "TEXT", "mbid_match_score": "REAL", "mbid_last_checked_at": "TEXT",
         "mbid_manual_override": "BOOLEAN DEFAULT FALSE", "candidate_release_group_mbid": "TEXT",
         "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        # Genre labels for the upcoming-releases row. ``musicbrainz_genres`` is
+        # the raw provider list (names ordered by vote); ``main_genres`` is the
+        # classified root ids the CSS colours by. Both are derived from the
+        # release group and refreshed alongside the MBID match, so a row matched
+        # before this column existed simply gets them on its next match.
+        "musicbrainz_genres": "JSONB", "main_genres": "JSONB",
     },
     "artists": {
         "country": "TEXT", "bio": "TEXT", "image_url": "TEXT",

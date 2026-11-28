@@ -75,7 +75,11 @@
    * @returns {Object} the poller handle
    */
   function create(opts = {}) {
-    const interval = opts.interval || 1000;
+    // ⚠️ `let`, not `const`, and read at SCHEDULE time rather than captured.
+    // A fixed interval cannot express "poll fast while work is happening, slowly
+    // when the library is idle" — every caller that wanted that had to stop and
+    // rebuild its poller, which loses the in-flight guard and the attempt count.
+    let interval = opts.interval || 1000;
     const maxAttempts = opts.maxAttempts || 0;
     const pauseWhenHidden = opts.pauseWhenHidden !== false;
     const immediate = opts.immediate !== false;
@@ -165,6 +169,27 @@
         handle.stop();
         return handle.start();
       },
+
+      /**
+       * Change the delay between ticks.
+       *
+       * Takes effect on the NEXT schedule, so the tick already queued is not
+       * lost and an in-flight request is never cut short. Idempotent: passing
+       * the current interval is a no-op, which lets a caller set the pace from
+       * every tick without churning timers.
+       */
+      setInterval(ms) {
+        const next = Number(ms);
+        if (!Number.isFinite(next) || next <= 0) return handle;
+        if (next === interval) return handle;
+        interval = next;
+        // Re-arm only when a tick is already pending; while a request is in
+        // flight the `finally` block schedules with the new value anyway.
+        if (running && timerId !== null) schedule();
+        return handle;
+      },
+
+      get interval() { return interval; },
 
       get isRunning() { return running; },
       get attempts() { return attempt; },

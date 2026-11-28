@@ -53,6 +53,10 @@ def upcoming_env(monkeypatch):
                 status TEXT,
                 last_seen_at TEXT,
                 updated_at TEXT,
+                -- The genre labels migration 039 adds (see the discovery
+                -- fixture's note on why the DDL has to keep up).
+                musicbrainz_genres JSON,
+                main_genres JSON,
                 UNIQUE (artist_name, album_name, primary_type)
             )
         """))

@@ -40,8 +40,13 @@ exist. It now redirects to `/correcting`, which already protects and reports
 `Change Logs/Main/2026-11-28-metadata-compare-retired.md`.
 
 Still open — Phase 1 (the real bundle), `/search`'s stub route, `artist_list`'s
-~1000 unpaginated rows, the dashboard's five 5-second polls, and the four
-oversized page modules.
+~1000 unpaginated rows, and the four oversized page modules.
+
+Fifth pass — §4.5's dashboard polling is fixed (5 s while a scan runs, 60 s when
+idle, via a new `poller.setInterval()`), and the upcoming-releases page now shows
+colour-coded main-genre and sub-genre labels derived from MusicBrainz through the
+EXISTING genre vocabulary. Changelog:
+`Change Logs/Main/2026-11-28-upcoming-genre-labels-and-adaptive-poll.md`.
 
 ---
 

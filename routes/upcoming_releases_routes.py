@@ -6,6 +6,7 @@ to ensure proper rate limiting, User-Agent, and Lucene-escaping.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -56,6 +57,85 @@ def _search_musicbrainz_release_group(artist: str, album: str, track: str = "") 
     return client.search_release_groups(query, limit=20)
 
 
+def _fetch_release_group_genres(release_group_mbid: str) -> list[str]:
+    """Genre/tag names for a release group, strongest first. Never raises.
+
+    One extra MusicBrainz call per match, through the shared rate-limited
+    client — the same ``get_release_group(..., inc="genres+tags")`` the scan's
+    genre pass uses, so the names an upcoming row shows are the same names the
+    library would end up with.
+
+    Deliberately best-effort: a candidate confirmed while MusicBrainz is rate
+    limited simply gets its label on a later refresh. Failing the match itself
+    because a cosmetic label could not be fetched would be the wrong trade.
+    """
+    if not release_group_mbid:
+        return []
+    try:
+        rg = _get_mb_client().get_release_group(release_group_mbid, inc="genres+tags") or {}
+    except Exception as exc:
+        logger.debug(
+            "Upcoming release genre fetch failed",
+            release_group_mbid=release_group_mbid,
+            error=str(exc),
+        )
+        return []
+
+    # Same precedence the scan uses: the curated ``genres`` list wins over the
+    # free-form ``tags``, which is a folksonomy rather than a vocabulary.
+    entries = rg.get("genres") or rg.get("tags") or []
+
+    from services.catalog.upcoming_genre_labels import genre_names_by_vote
+
+    return genre_names_by_vote(entries)
+
+
+def _genre_columns(release_group_mbid: str) -> dict[str, Any]:
+    """The two genre columns for one release, ready for an UPDATE."""
+    names = _fetch_release_group_genres(release_group_mbid)
+    if not names:
+        return {}
+    return _genre_columns_from_names(names)
+
+
+def _decode_genre_json(release: dict[str, Any]) -> dict[str, Any]:
+    """The release's genre labels as plain lists.
+
+    ``musicbrainz_genres`` is stored as JSON; the column comes back from SQLite
+    as a string and from PostgreSQL's JSONB as an already-decoded list, so both
+    shapes are accepted. ``sub_genres`` is recomputed here rather than stored, so
+    improving the genre vocabulary improves every existing row.
+    """
+    from services.catalog.upcoming_genre_labels import describe_release_genres
+
+    raw = release.get("musicbrainz_genres")
+    names: list[Any]
+    if isinstance(raw, str):
+        try:
+            names = json.loads(raw) if raw.strip() else []
+        except (TypeError, ValueError):
+            names = []
+    elif isinstance(raw, (list, tuple)):
+        names = list(raw)
+    else:
+        names = []
+
+    if not names:
+        return {"main_genres": [], "sub_genres": []}
+    return describe_release_genres(names)
+
+
+def _genre_columns_from_names(names: list[Any]) -> dict[str, Any]:
+    """The two genre-column values for one row, ready for an UPDATE."""
+    from services.catalog.upcoming_genre_labels import describe_release_genres
+
+    labels = describe_release_genres(names)
+    return {
+        "genres_json": json.dumps(list(names), ensure_ascii=False),
+        "main_json": json.dumps(labels["main_genres"], ensure_ascii=False),
+    }
+
+
 def _persist_match_result(release_id: int, result: dict[str, Any]) -> None:
     """Persist a pipeline match outcome (matched / candidate / unmatched)."""
     status = result.get("status", "unmatched")
@@ -70,6 +150,10 @@ def _persist_match_result(release_id: int, result: dict[str, Any]) -> None:
             primary_type = str(
                 best.get("primary-type") or best.get("primary_type") or best.get("category") or ""
             )
+            # Genre labels are fetched OUTSIDE the transaction: it is a network
+            # call and holding the write open for it would be a lock held
+            # across a MusicBrainz round trip.
+            genres = _genre_columns(str(best.get("mbid") or ""))
             session.execute(
                 text("""UPDATE upcoming_releases SET
                         release_group_mbid = :mbid,
@@ -85,10 +169,14 @@ def _persist_match_result(release_id: int, result: dict[str, Any]) -> None:
                                 THEN :date
                             ELSE release_date
                         END,
-                        primary_type = :ptype
+                        primary_type = :ptype,
+                        musicbrainz_genres = COALESCE(:genres_json, musicbrainz_genres),
+                        main_genres = COALESCE(:main_json, main_genres)
                     WHERE id = :id"""),
                 {"mbid": best.get("mbid"), "score": score, "checked": now,
-                 "date": release_date or None, "ptype": primary_type, "id": release_id},
+                 "date": release_date or None, "ptype": primary_type, "id": release_id,
+                 "genres_json": genres.get("genres_json"),
+                 "main_json": genres.get("main_json")},
             )
             try:
                 session.commit()
@@ -431,6 +519,15 @@ def api_upcoming_releases() -> Any:
             album_name = _norm(release.get("album_name"))
             release["artist_in_collection"] = artist_name in artists_in_collection
             release["album_in_collection"] = (artist_name, album_name) in albums_in_collection
+
+            # Genre labels, decoded from the stored JSON. Kept as a separate
+            # key from the raw columns so the JSON string never reaches the
+            # browser: `main_genres` is what the row colours by, and
+            # `sub_genres` is derived on read from the stored names rather than
+            # persisted — a vocabulary update then improves old rows too.
+            _main = _decode_genre_json(release)
+            release["main_genres"] = _main["main_genres"]
+            release["sub_genres"] = _main["sub_genres"]
             
             if include_queue and artist_name and album_name:
                 in_queue = (artist_name, album_name) in queued_pairs

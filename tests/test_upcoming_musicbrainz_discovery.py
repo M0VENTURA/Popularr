@@ -68,6 +68,11 @@ def mb_fetcher_env(monkeypatch):
                 status TEXT,
                 last_seen_at TEXT,
                 updated_at TEXT,
+                -- The genre labels migration 039 adds. The discovery upsert
+                -- writes them, so a fixture without them fails with
+                -- "table upcoming_releases has no column named …".
+                musicbrainz_genres JSON,
+                main_genres JSON,
                 UNIQUE (artist_name, album_name, primary_type)
             )
         """))
