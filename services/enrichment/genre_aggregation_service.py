@@ -677,7 +677,20 @@ def _suppress_generic_parents(genres: list[str]) -> list[str]:
 
 
 def clean_conflicting_genres(genres: list[Any]) -> list[str]:
+    """Drop redundant generics, keeping ONE canonical spelling per genre.
+
+    ⚠️ THIS IS THE FUNCTION THAT CREATED THE 883 DISTINCT STRINGS. It used the
+    normalised (lowercased) key as the OUTPUT value, so every genre that reached
+    here left as lower case regardless of the spelling the caller resolved —
+    ``_resolve_display_name``'s canonical "Death Metal" came out as
+    "death metal", and a file tagged "Rock" beside one tagged "rock" produced
+    two different strings in the database.
+
+    The key is still used for COMPARISON (that is what makes ``Rock`` and
+    ``rock`` the same genre); it is simply not used as the value any more.
+    """
     ordered_keys: list[str] = []
+    display_for: dict[str, str] = {}
     seen: set[str] = set()
     for g in genres or []:
         norm = normalize_genre(g)
@@ -685,6 +698,9 @@ def clean_conflicting_genres(genres: list[Any]) -> list[str]:
             continue
         seen.add(norm)
         ordered_keys.append(norm)
+        # Prefer the vocabulary's canonical spelling; keep the caller's value
+        # when the vocabulary does not know this genre.
+        display_for[norm] = _canonical_display_name(norm) or str(g or "").strip() or norm
 
     lowered_set = set(ordered_keys)
     cleaned: list[str] = []
@@ -697,12 +713,83 @@ def clean_conflicting_genres(genres: list[Any]) -> list[str]:
         if genre == "electronic" and ("punk" in lowered_set or "metal" in lowered_set):
             continue
         if not removed:
-            cleaned.append(genre)
+            cleaned.append(display_for.get(genre, genre))
 
     return _suppress_generic_parents(cleaned)
 
 
+_CANONICAL_DISPLAY_CACHE: dict[str, str] = {}
+_CANONICAL_DISPLAY_LOCK = threading.Lock()
+
+
+def _squash(value: Any) -> str:
+    """Separator- and case-insensitive form used for lookups only."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _canonical_display_name(key: str) -> str | None:
+    """The vocabulary's ONE display spelling for a normalised genre key.
+
+    ⭐ THIS IS WHAT MAKES THE FINAL LIST CANONICAL. ``_resolve_display_name``
+    picks the highest-weighted raw SPELLING a source happened to send, so
+    ``Rock`` and ``rock`` both reached the database as distinct strings — 883
+    distinct genre strings for a vocabulary of a few hundred. The vocabulary
+    already knows the right one (``rock`` → ``Rock``, ``drum_and_bass`` →
+    ``Drum and Bass``), so the answer is to ask it rather than to vote.
+
+    ⚠️ THE VOTE KEY HAS ITS SEPARATORS STRIPPED (``deathmetal``) while the
+    vocabulary id keeps them (``death_metal``), so a direct ``genres.get``
+    misses almost everything. The index below is squashed on BOTH sides, which
+    is what makes the two forms meet. (319 ids, no collisions — asserted in
+    tests/test_genre_canonical_spelling.py.)
+
+    Returns ``None`` when the genre is not in the vocabulary, so an
+    unrecognised value keeps its own spelling instead of being renamed.
+    """
+    key = str(key or "").strip()
+    if not key:
+        return None
+
+    squashed = _squash(key)
+    if not squashed:
+        return None
+
+    with _CANONICAL_DISPLAY_LOCK:
+        cached = _CANONICAL_DISPLAY_CACHE.get(squashed)
+    if cached is not None:
+        return cached or None
+
+    display: str | None = None
+    try:
+        from services.enrichment.genre_vocabulary import get_vocabulary
+
+        vocab = get_vocabulary()
+        for gid, entry in vocab.genres.items():
+            if _squash(gid) == squashed or _squash(entry.display) == squashed:
+                display = entry.display
+                break
+        if display is None:
+            classification = vocab.classify(key)
+            # ``classify`` answers ``unknown`` for anything it cannot place, and
+            # echoes the input as ``display`` — that is not a canonical name.
+            if classification is not None and classification.canonical:
+                display = classification.display
+    except Exception:
+        return None
+
+    with _CANONICAL_DISPLAY_LOCK:
+        # Cache a miss as "" so an unknown genre is not re-scanned every call.
+        _CANONICAL_DISPLAY_CACHE[squashed] = display or ""
+    return display
+
+
 def _resolve_display_name(key: str, spellings: dict[str, list[tuple[float, str]]]) -> str:
+    # ⚠️ CANONICAL FIRST. See ``_canonical_display_name`` — the vote below is
+    # only a fallback for genres the vocabulary does not list.
+    canonical = _canonical_display_name(key)
+    if canonical:
+        return canonical
+
     if key not in spellings:
         return key
     candidates = spellings[key]
