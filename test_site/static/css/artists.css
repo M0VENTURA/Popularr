@@ -38,6 +38,21 @@
   border-color: rgba(29, 185, 84, 0.3) !important;
 }
 
+/* Row actions: the corrections icon and View.
+   As `btn-sm py-1 px-2` they render ~26px tall — under half the 44px touch
+   minimum — on the page every mobile user reaches through
+   Downloads → Artists. `artist.css` already holds release rows to this bar;
+   this list was the one that never got it. */
+@media (max-width: 767.98px) {
+  .artist-row-actions .btn {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
 /* ── Metro jump grid overlay ───────────────────────────────────────────── */
 
 /*

@@ -205,6 +205,39 @@ def _length_outlier_winner(
     return best_cluster[0]
 
 
+def _copies_disagree_on_length(copies: list[dict[str, Any]]) -> bool:
+    """True when the copies do not agree on how long the song is.
+
+    Deliberately the same ``_LENGTH_OUTLIER_GAP`` the outlier rule uses: a
+    difference the majority vote would call "clearly wrong" is the same
+    difference that makes a Keep/Delete verdict unprovable without a reference.
+    Missing durations are ignored — "unknown" is not "different".
+    """
+    known = [
+        seconds for seconds in
+        (_length_seconds(c.get("duration")) for c in copies)
+        if seconds > 0
+    ]
+    if len(known) < 2:
+        return False
+    return (max(known) - min(known)) > _LENGTH_OUTLIER_GAP
+
+
+def _length_conflict_reason(copies: list[dict[str, Any]]) -> str:
+    """Explain a length disagreement the scorer refuses to rule on."""
+    seconds = sorted({
+        int(round(_length_seconds(c.get("duration"))))
+        for c in copies
+        if _length_seconds(c.get("duration")) > 0
+    })
+    shown = ", ".join(f"{s // 60}:{s % 60:02d}" for s in seconds)
+    return (
+        f"These copies run to different lengths ({shown}) and nothing in their "
+        f"tags or encoding says which is the correct one — so neither is marked "
+        f"Keep or Delete. Compare the lengths before removing either."
+    )
+
+
 def _length_reason(winner: dict[str, Any], others: list[dict[str, Any]]) -> str:
     def _fmt(value: Any) -> str:
         seconds = int(round(_length_seconds(value)))
@@ -231,9 +264,11 @@ def recommend_duplicate_keeper(
          "copies": [scored copy…]}
 
     ``confidence`` is ``"high"`` when the winner is clearly better on quality,
-    ``"length"`` when the release's expected length (or a clear majority) names
-    the wrong copy, ``"metadata"`` when quality tied and the tags broke it, and
-    ``"tie"`` when nothing separates them (the caller must then choose).
+    ``"length"`` when a PROVEN length (the release's own, or a clear majority)
+    names the right copy, ``"metadata"`` when quality tied and the tags broke it,
+    and ``"tie"`` when nothing separates them — which now includes copies that
+    disagree on length with no reference to settle it. A tie has no
+    ``keep_track_id``; the caller must then choose.
     """
     copies = score_duplicate_copies(rows)
     if len(copies) < 2:
@@ -242,6 +277,58 @@ def recommend_duplicate_keeper(
             "remove_track_ids": [],
             "confidence": "n/a",
             "reason": "Only one copy.",
+            "copies": copies,
+        }
+
+    # ── ⭐ A PROVEN LENGTH COMES BEFORE QUALITY ────────────────────────────
+    #
+    # REPORTED: "the tags to show which tracks should be kept and deleted in the
+    # album pages are falsely showing to keep tracks with the wrong song length."
+    #
+    # Quality used to be consulted first, so a higher-bitrate copy of a
+    # truncated download (or of a radio edit) was named the keeper however far
+    # its length sat from the copy beside it. A wrong-length file is not a
+    # BETTER COPY of the song — it is a different recording — so when a length
+    # can be proven wrong, that outranks bitrate.
+    #
+    # "Proven" means the release's own length (``expected_duration``, from the
+    # missing-track tracklist) or a clear majority among three or more copies.
+    # Both are decided by ``_length_outlier_winner``.
+    length_winner = _length_outlier_winner(copies, expected_duration)
+    if length_winner is not None:
+        winner_seconds = _length_seconds(length_winner.get("duration"))
+        same_length = [
+            c for c in copies
+            if c is not length_winner
+            and abs(_length_seconds(c.get("duration")) - winner_seconds)
+            <= _LENGTH_SAME_TOLERANCE
+        ]
+        # Several copies share the winning length: the length rule cannot pick
+        # one of them, so fall through to quality/metadata for THOSE — but the
+        # outliers have still been proven wrong, so they must never win.
+        if not same_length:
+            others = [c for c in copies if c is not length_winner]
+            length_winner["keep"] = True
+            length_winner["why"] = _length_reason(length_winner, others)
+            return {
+                "keep_track_id": length_winner["track_id"],
+                "remove_track_ids": [c["track_id"] for c in others],
+                "confidence": "length",
+                "reason": length_winner["why"],
+                "copies": copies,
+            }
+
+    # ── Lengths disagree and nothing can settle it ────────────────────────
+    # A "Keep" badge here would be an invented verdict: the rows disagree on
+    # how long the song is, and neither tags nor bitrate say which file is the
+    # real one. Return a TIE so the page shows a plain "Duplicate ×N" and the
+    # user compares the lengths themselves.
+    if _copies_disagree_on_length(copies):
+        return {
+            "keep_track_id": "",
+            "remove_track_ids": [],
+            "confidence": "tie",
+            "reason": _length_conflict_reason(copies),
             "copies": copies,
         }
 
@@ -265,46 +352,13 @@ def recommend_duplicate_keeper(
             "copies": copies,
         }
 
-    # ── Quality tied: LENGTH decides, then metadata ───────────────────────
-    #
-    # ⭐ REPORTED: "if multiple tracks exist on the album page for the same song,
-    # it should recommend the one to delete based on the correct track length."
-    #
-    # A wrong-length copy is not a duplicate of the right one — it is a live
-    # take, a radio edit, or a truncated download. When the copies disagree on
-    # length, the outlier is the one to remove, and it beats a metadata
-    # tie-break (a correct-length copy with thinner tags is still the right
-    # file). Duration similarity is only used when the lengths genuinely differ
-    # — a 1-second rounding difference must not be read as "one is wrong".
-    length_winner = _length_outlier_winner(quality_winners, expected_duration)
-    if length_winner is not None:
-        # ⚠️ ONLY THE OUTLIERS ARE CONDEMNED. Copies in the SAME length cluster
-        # as the winner are equally valid files — deleting them because one
-        # happened to be listed first is exactly the arbitrary verdict this
-        # guard exists to avoid. The genuine duplicates inside the cluster are
-        # left for the metadata/tie steps below.
-        winner_seconds = _length_seconds(length_winner.get("duration"))
-        same_length = [
-            c for c in copies
-            if c is not length_winner
-            and abs(_length_seconds(c.get("duration")) - winner_seconds)
-            <= _LENGTH_SAME_TOLERANCE
-        ]
-        # Several copies share the correct length: length alone cannot pick one,
-        # so fall through to metadata instead of guessing.
-        if not same_length:
-            others = [c for c in copies if c is not length_winner]
-            length_winner["keep"] = True
-            length_winner["why"] = _length_reason(length_winner, others)
-            return {
-                "keep_track_id": length_winner["track_id"],
-                "remove_track_ids": [c["track_id"] for c in others],
-                "confidence": "length",
-                "reason": length_winner["why"],
-                "copies": copies,
-            }
-
     # ── Quality tied: metadata decides ────────────────────────────────────
+    #
+    # ⚠️ LENGTH IS NO LONGER CHECKED HERE. It runs FIRST, over every copy, so a
+    # proven-wrong length cannot be outvoted by a quality winner that happened
+    # to be in the same quality tier — and an unresolvable length disagreement
+    # has already returned a tie. Everything still standing at this point has
+    # copies whose lengths agree, so only tags can separate them.
     best_metadata = max(c["metadata"] for c in quality_winners)
     metadata_winners = [c for c in quality_winners if c["metadata"] == best_metadata]
 

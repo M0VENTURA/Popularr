@@ -3774,10 +3774,12 @@
       const keepId = String(rec.keep_track_id || '');
       (group.track_ids || []).forEach((id) => {
         counts.set(String(id), Number(group.count) || 0);
-        if (keepId) {
-          keepById.set(String(id), keepId);
-          if (rec.reason) reasonById.set(String(id), rec.reason);
-        }
+        if (keepId) keepById.set(String(id), keepId);
+        // ⚠️ The reason is recorded even when there is NO keeper. "The copies
+        // run to different lengths — compare them" is exactly the case where
+        // the user needs the explanation, and it used to be dropped with the
+        // verdict, leaving a bare "×2".
+        if (rec.reason) reasonById.set(String(id), rec.reason);
       });
     });
     if (!counts.size) return;
@@ -3804,7 +3806,8 @@
           || (isKeeper ? 'Recommended: keep this copy' : 'Recommended: delete this copy');
       } else {
         badge.textContent = `Duplicate \u00d7${count}`;
-        badge.title = `This track exists ${count} times on this album (downloaded more than once)`;
+        badge.title = reasonById.get(trackId)
+          || `This track exists ${count} times on this album (downloaded more than once)`;
       }
       const anchor = titleCell.querySelector('a');
       if (anchor) anchor.insertAdjacentElement('afterend', badge);

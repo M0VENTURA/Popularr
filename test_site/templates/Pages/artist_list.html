@@ -190,8 +190,11 @@
                         </div>
                     </div>
 
-                    <div class="d-flex align-items-center gap-1 flex-shrink-0">
-                        <a href="{{ url_for('ui.artist_corrections', name=artist.link_artist) }}" class="btn btn-sm btn-outline-secondary py-1 px-2 border-0" title="Corrections &amp; Edit IDs">
+                    {# `artist-row-actions` gives both buttons the 44px touch
+                       minimum on phones (artists.css) — as `btn-sm py-1 px-2`
+                       they were ~26px, and the tools one is icon-only. #}
+                    <div class="artist-row-actions d-flex align-items-center gap-1 flex-shrink-0">
+                        <a href="{{ url_for('ui.artist_corrections', name=artist.link_artist) }}" class="btn btn-sm btn-outline-secondary py-1 px-2 border-0" title="Corrections &amp; Edit IDs" aria-label="Corrections and edit IDs for {{ artist.display_name|e }}">
                             <i class="bi bi-tools"></i>
                         </a>
                         <a href="{{ url_for('ui.artist_detail', name=artist.link_artist) }}" class="btn btn-sm btn-outline-success py-1 px-2 fw-bold" title="View Artist">

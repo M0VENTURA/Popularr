@@ -90,3 +90,60 @@ class TestTheReasonIsUserFacing:
         rec = _recommend([_copy("right", 245), _copy("wrong", 192)], expected=245)
         assert "4:05" in rec["reason"]
         assert "3:12" in rec["reason"]
+
+
+class TestQualityCannotOutvoteAProvenLength:
+    """REPORTED: "the tags ... are falsely showing to keep tracks with the
+    wrong song length."
+
+    ``_quality_score`` reads the file from disk, so a better-encoded copy of a
+    truncated download used to win outright — the length check only ran when
+    quality TIED. A wrong-length file is a different recording, not a better
+    copy of the song.
+    """
+
+    def test_a_better_encoded_wrong_length_copy_is_not_the_keeper(self, monkeypatch):
+        monkeypatch.setattr(
+            dvs, "_quality_score", lambda path: 3 if "wrong" in path else 1
+        )
+        rec = _recommend([_copy("right", 245), _copy("wrong", 192)], expected=245)
+        assert rec["keep_track_id"] == "right", rec
+        assert rec["remove_track_ids"] == ["wrong"]
+        assert rec["confidence"] == "length"
+
+    def test_quality_still_decides_when_the_lengths_agree(self, monkeypatch):
+        """CONTROL: the length rule must not swallow ordinary quality calls."""
+        monkeypatch.setattr(
+            dvs, "_quality_score", lambda path: 3 if "flac" in path else 1
+        )
+        rec = _recommend([_copy("mp3", 245), _copy("flac", 244)])
+        assert rec["keep_track_id"] == "flac", rec
+        assert rec["confidence"] == "high"
+
+
+class TestAnUnprovableLengthDisagreementNamesNobody:
+    """No reference and no majority: a Keep/Delete badge would be invented."""
+
+    def test_no_keeper_is_invented(self):
+        rec = _recommend([_copy("a", 245), _copy("b", 192)])
+        assert rec["keep_track_id"] == "", rec
+        assert rec["remove_track_ids"] == []
+        assert rec["confidence"] == "tie"
+
+    def test_the_reason_names_both_lengths(self):
+        rec = _recommend([_copy("a", 245), _copy("b", 192)])
+        assert "4:05" in rec["reason"] and "3:12" in rec["reason"], rec["reason"]
+        # The badge is a plain "Duplicate ×N" now, so the tooltip has to say
+        # that no Keep/Delete verdict was made and why.
+        assert "Keep" in rec["reason"] and "Delete" in rec["reason"]
+
+    def test_five_seconds_apart_is_still_the_same_length(self):
+        """The approved tolerance: 5 s and under is not a different take."""
+        rec = _recommend([_copy("a", 245), _copy("b", 250)])
+        assert rec["confidence"] != "length"
+        assert "different lengths" not in rec.get("reason", "")
+
+    def test_six_seconds_apart_is_a_conflict(self):
+        rec = _recommend([_copy("a", 245), _copy("b", 251)])
+        assert rec["keep_track_id"] == ""
+        assert "different lengths" in rec["reason"]

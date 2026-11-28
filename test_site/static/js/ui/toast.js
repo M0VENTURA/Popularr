@@ -269,11 +269,12 @@
   // Every existing call site keeps working. Delete an alias only once its
   // callers have been migrated.
   //
-  // NOTE: config.js currently defines its OWN `showToast` and loads after
-  // main.js, so it shadows the global. Delete that definition (and its
-  // #configToast markup) when wiring this module in — otherwise the config
-  // page keeps the old Bootstrap-Toast behaviour and this has no effect
-  // there.
+  // NOTE: config.js used to define its OWN `showToast` (bound to a
+  // #configToast Bootstrap toast) and load after main.js, shadowing the
+  // global. Both are gone: config.js calls this function now, and its
+  // page-local toast markup was deleted. `auth/setup.html` still has its own
+  // #setupToast, which `pages/setup.js` drives directly — that page does not
+  // load the shell.
   global.showToast = function (title, message, type) {
     return show({ title, message, type });
   };

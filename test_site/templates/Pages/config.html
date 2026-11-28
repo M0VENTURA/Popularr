@@ -35,43 +35,59 @@
   </div>
   {% endif %}
 
-  <!-- Vertical Tab Navigation -->
-  <div class="row mt-3">
-    <div class="col-12 col-md-3 col-xl-2 mb-4">
-      <div class="nav flex-column nav-pills sticky-top" style="top:0;z-index:100;" id="configTabs" role="tablist" aria-orientation="vertical">
-        <button class="nav-link active text-start" data-bs-toggle="pill" data-bs-target="#tab-system" type="button" role="tab">
-          <i class="bi bi-pc-display"></i> System & Users
-        </button>
-        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-apis" type="button" role="tab">
-          <i class="bi bi-plug"></i> Integrations
-        </button>
-        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-downloads" type="button" role="tab">
-          <i class="bi bi-cloud-download"></i> Downloads
-        </button>
-        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-files" type="button" role="tab">
-          <i class="bi bi-folder-symlink"></i> File Management
-        </button>
-        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-matching" type="button" role="tab">
-          <i class="bi bi-union"></i> Matching
-        </button>
-        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-analytics" type="button" role="tab">
-          <i class="bi bi-graph-up"></i> Popularity & Scoring
-        </button>
-        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-stars" type="button" role="tab">
-          <i class="bi bi-star-half"></i> Star Ratings
-        </button>
-        <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-playlists" type="button" role="tab">
-          <i class="bi bi-music-note-beamed"></i> Playlists
-        </button>
+  {# ── Section navigation ───────────────────────────────────────────────────
+     Vertical pills at ≥768px; ONE scrollable row of chips on a phone.
 
-        <hr class="my-2">
-        <label class="form-label form-label-sm mb-1" for="configSettingsSearch">Find a setting</label>
-        <div class="input-group input-group-sm mb-2">
-          <span class="input-group-text"><i class="bi bi-search"></i></span>
-          <input type="search" class="form-control" id="configSettingsSearch" placeholder="e.g. velocity, covers, threshold"
-                 autocomplete="off" aria-label="Find a setting on this page">
+     This used to be `nav flex-column nav-pills sticky-top` at EVERY width, so
+     a phone opened on eight section links plus the search box — roughly 300px
+     of chrome — before the first setting, and `sticky-top` then pinned that
+     wall while the 4 400-line form scrolled behind it.
+
+     Direction is set in popularr.css's `.config-nav` block rather than with
+     Bootstrap's `.flex-column`, whose `!important` would beat the phone
+     override. `#configTabs` stays the tablist: Bootstrap resolves each
+     `data-bs-target` from the button itself, not from the container.
+     ──────────────────────────────────────────────────────────────────────── #}
+  <div class="row mt-3">
+    <div class="col-12 col-md-3 col-xl-2 mb-3 mb-md-4">
+      <div class="config-nav">
+        <div class="nav nav-pills config-tabs" id="configTabs" role="tablist" aria-orientation="vertical">
+          <button class="nav-link active text-start" data-bs-toggle="pill" data-bs-target="#tab-system" type="button" role="tab">
+            <i class="bi bi-pc-display"></i> System & Users
+          </button>
+          <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-apis" type="button" role="tab">
+            <i class="bi bi-plug"></i> Integrations
+          </button>
+          <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-downloads" type="button" role="tab">
+            <i class="bi bi-cloud-download"></i> Downloads
+          </button>
+          <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-files" type="button" role="tab">
+            <i class="bi bi-folder-symlink"></i> File Management
+          </button>
+          <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-matching" type="button" role="tab">
+            <i class="bi bi-union"></i> Matching
+          </button>
+          <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-analytics" type="button" role="tab">
+            <i class="bi bi-graph-up"></i> Popularity & Scoring
+          </button>
+          <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-stars" type="button" role="tab">
+            <i class="bi bi-star-half"></i> Star Ratings
+          </button>
+          <button class="nav-link text-start" data-bs-toggle="pill" data-bs-target="#tab-playlists" type="button" role="tab">
+            <i class="bi bi-music-note-beamed"></i> Playlists
+          </button>
         </div>
-        <div class="small text-muted mb-2 d-none" id="configSettingsSearchState"></div>
+
+        <div class="config-nav-tools">
+          <hr class="my-2 d-none d-md-block">
+          <label class="form-label form-label-sm mb-1" for="configSettingsSearch">Find a setting</label>
+          <div class="input-group input-group-sm mb-2">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input type="search" class="form-control" id="configSettingsSearch" placeholder="e.g. velocity, covers, threshold"
+                   autocomplete="off" aria-label="Find a setting on this page">
+          </div>
+          <div class="small text-muted mb-2 d-none" id="configSettingsSearchState"></div>
+        </div>
       </div>
     </div>
 
@@ -4429,19 +4445,11 @@
     </form><!-- /configForm -->
   </div><!-- /col -->
 </div><!-- /row -->
-  <!-- Toast notification -->
-  <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
-    <div id="configToast" class="toast" role="alert">
-      <div class="toast-header">
-        <i class="bi bi-info-circle me-2"></i>
-        <strong class="me-auto" id="toastTitle">Status</strong>
-        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Dismiss notification"></button>
-      </div>
-      <div class="toast-body" id="toastMessage">
-        Message
-      </div>
-    </div>
-  </div>
+  {# ⚠️ The page-local `#configToast` Bootstrap toast is GONE. `showToast()`
+     calls in config.js resolve to ui/toast.js's global (main.js loads first),
+     which builds its own container — so this markup was dead weight with a
+     fixed `z-index: 11`, under the navbar and the bottom nav, and its
+     `role="alert"` announced nothing. #}
 </div>
 
 <!-- Raw YAML Modal -->

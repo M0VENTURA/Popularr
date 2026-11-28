@@ -97,9 +97,14 @@
 
     <div class="card-body p-3 p-md-4">
       <div class="d-flex align-items-start gap-3 mb-3">
+        {# `role="button" tabindex="0"` without a key handler is a focusable
+           control that does nothing on Enter/Space — announced as a button and
+           unusable from a keyboard. The handler below makes the role true. #}
         <div class="hero-avatar-wrap position-relative flex-shrink-0 cursor-pointer"
              role="button" tabindex="0"
              onclick='openArtistImageModal({{ artist_name|tojson }})'
+             onkeydown='if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArtistImageModal({{ artist_name|tojson }}); }'
+             aria-label="Change artist image"
              title="Change Artist Image">
           <img id="artistImage"
                src="{{ url_for('artist.api_artist_image', name=artist_name) }}"
@@ -490,7 +495,9 @@
                 <tr>
                   <td class="text-muted" data-label="#">{{ loop.index }}</td>
                   <td class="fw-semibold" data-label="Track">
-                    <a href="{{ url_for('ui.track_detail', artist=artist_name, album=track.album, track_id=track.id) }}" class="text-decoration-none text-reset">
+                    {# Only `track_id` is a route argument — `artist`/`album` are not, so
+                       they were being appended as a query string nothing reads. #}
+                    <a href="{{ url_for('ui.track_detail', track_id=track.id) }}" class="text-decoration-none text-reset">
                       {{ track.title }}
                     </a>
                   </td>

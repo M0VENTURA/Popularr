@@ -4,19 +4,13 @@
 
 {% block content %}
 {#
-  The inline nav-link override that used to live here is gone. It was
-  fixing exactly the bug popularr.css's own `.nav-pills` block now fixes
-  globally (inactive pills falling back to Bootstrap's default blue —
-  see popularr.css's "Nav Pills" section for the full explanation), so it
-  is now redundant rather than merely harmless. The three page-specific
-  rules that are NOT duplicated anywhere else stay as a small inline block.
+  No inline <style> block here any more. The nav-link override went first
+  (popularr.css's "Nav Pills" section now fixes it globally), and the last
+  four page rules moved into popularr.css's "Album page" section: a page-
+  specific stylesheet in the head of every response defeats the shared cache
+  and cannot be bundled. `.min-w-0` was already declared globally, so that
+  copy was dead.
 #}
-<style>
-  .genre-badge-more { cursor: pointer; font-size: 0.75rem; }
-  .min-w-0 { min-width: 0; }
-  [id$="-section"] { scroll-margin-top: 130px; }
-  .album-hero-sub a:hover { text-decoration: underline !important; }
-</style>
 
 {# ── Release (edition) name vs release-GROUP name ────────────────────────
    A release GROUP is the album's main identity and contains many RELEASES,
@@ -479,14 +473,21 @@
           <table class="table table-hover table-dark align-middle mb-0 tracklist-table">
             <thead>
               <tr class="text-muted small">
-                <th style="width: 56px;" class="text-center text-nowrap">
+                {# ⚠️ The two columns a phone KEEPS carry classes, not inline
+                   widths: an inline `style="width: …"` outranks every media
+                   query, so the # and Actions cells could not shrink and the
+                   Title column was squeezed off a 360px screen. Duration and
+                   Rating keep their inline widths — they are `display: none`
+                   under 768px, where their values move inline under the title
+                   (popularr.css's tracklist section). #}
+                <th class="text-center text-nowrap col-track-num">
                   <input type="checkbox" id="selectAllTracksCheckbox" onclick="toggleSelectAll(this)" title="Select all tracks" aria-label="Select all tracks">
                   <span class="ms-1">#</span>
                 </th>
                 <th>Title</th>
                 <th class="text-center col-track-duration" style="width: 100px;">Duration</th>
                 <th class="text-center col-track-rating" style="width: 120px;">Rating</th>
-                <th class="text-end" style="width: 100px;">Actions</th>
+                <th class="text-end col-track-actions">Actions</th>
               </tr>
             </thead>
             <tbody id="albumTracksTbody">

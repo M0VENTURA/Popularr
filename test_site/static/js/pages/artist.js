@@ -4,23 +4,43 @@ const BYTES_TO_MB = 1024 * 1024;
 
 const getArtistName = () => document.querySelector('[data-artist-name]')?.dataset.artistName || '';
 
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
+/*
+  ⚠️ NO LOCAL escapeHtml / formatBytes. Both live in utils/dom.js, which
+  base.html loads in the shell block BEFORE any page script.
 
+  The copy that used to live here was the createTextNode + innerHTML variant:
+  it escapes & < > but NOT " or ', and its output is interpolated into
+  ATTRIBUTES on this page — the Discogs "Open" link and the qBittorrent Add
+  button — so a quote in a URL or a title broke out of the attribute.
+
+  Worse, a top-level `function escapeHtml` in a classic script REPLACES
+  window.escapeHtml for the whole page, so every other module on the artist
+  page silently inherited the weaker escaper. Defining either helper here can
+  only make them wrong.
+
+  escapeJsString stays: it is a JS-string escaper (single quotes, newlines),
+  not an HTML one, and utils/dom.js's version is not what these call sites
+  need.
+*/
 function escapeJsString(str) {
   if (!str) return '';
   return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }
 
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+/**
+ * GET JSON, rejecting on a non-2xx.
+ *
+ * The loaders on this page used bare `fetch(...).then(r => r.json())`. A 500 or
+ * an expired session returns the login page, `r.json()` throws, and the
+ * rejection is unhandled — so the server-rendered "Loading…" stayed on screen
+ * forever and nothing reported a problem. Every loader below needs a real
+ * failure branch, and this is what gives them one.
+ */
+function artistGetJson(path) {
+  return fetch(path).then((response) => {
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -44,17 +64,30 @@ document.addEventListener('DOMContentLoaded', () => {
 function loadArtistBio(artist) {
   const bioContainer = document.getElementById('artistBio');
   if (!bioContainer) return;
-  fetch(`/api/artist/bio?name=${encodeURIComponent(artist)}`).then(r => r.json()).then(data => {
-    if (data.bio) bioContainer.innerHTML = `<p>${escapeHtml(data.bio)}</p>`;
-    else bioContainer.innerHTML = '<p class="text-muted"><em>No biography available.</em></p>';
-  });
+  artistGetJson(`/api/artist/bio?name=${encodeURIComponent(artist)}`)
+    .then((data) => {
+      bioContainer.innerHTML = data && data.bio
+        ? `<p>${escapeHtml(data.bio)}</p>`
+        : '<p class="text-muted"><em>No biography available.</em></p>';
+    })
+    .catch(() => {
+      // Say the read failed. Leaving the server-rendered placeholder made a
+      // broken request look identical to "this artist has no bio".
+      bioContainer.innerHTML = '<p class="text-muted"><em>Could not load biography.</em></p>';
+    });
 }
 
 function loadSinglesCount(artist) {
-  fetch(`/api/artist/singles-count?name=${encodeURIComponent(artist)}`).then(r => r.json()).then(data => {
-    const badge = document.getElementById('singlesCount');
-    if (badge && data.count !== undefined) badge.textContent = data.count;
-  });
+  const badge = document.getElementById('singlesCount');
+  if (!badge) return;
+  artistGetJson(`/api/artist/singles-count?name=${encodeURIComponent(artist)}`)
+    .then((data) => {
+      if (data && data.count !== undefined) badge.textContent = data.count;
+    })
+    .catch(() => {
+      badge.textContent = '—';
+      badge.title = 'Could not load the singles count';
+    });
 }
 
 // Tracklist Loader
@@ -284,35 +317,110 @@ window.artistPage.searchAllReleases = function(artist) {
 window.searchMusicBrainzForAllReleases = window.artistPage.searchAllReleases;
 
 // Misc Profile Data
-async function loadSimilarArtists(artist) {
-  fetch(`/api/artist/${encodeURIComponent(artist)}/similar`).then(r => r.json()).then(data => {
-    const container = document.getElementById('artistSimilarArtistsContainer');
-    if (!data.similar_artists) return;
-    let html = `<div class="d-flex flex-wrap gap-2">`;
-    data.similar_artists.lastfm.filter(a => a.in_collection).forEach(a => { html += `<a href="/artist/${encodeURIComponent(a.name)}" class="badge bg-success text-decoration-none">${escapeHtml(a.name)}</a>`; });
-    container.innerHTML = html + `</div>`;
-  });
+function loadSimilarArtists(artist) {
+  const container = document.getElementById('artistSimilarArtistsContainer');
+  if (!container) return;
+  artistGetJson(`/api/artist/${encodeURIComponent(artist)}/similar`)
+    .then((data) => {
+      // `similar_artists` may be absent entirely, and `lastfm` may be too —
+      // reading `.lastfm.filter` on either threw an unhandled TypeError, which
+      // read as the page simply having nothing to show.
+      const lastfm = (data && data.similar_artists && data.similar_artists.lastfm) || [];
+      const inCollection = lastfm.filter((a) => a && a.in_collection);
+      if (!inCollection.length) {
+        container.innerHTML = '<p class="text-muted small mb-0">No similar artists in the library.</p>';
+        return;
+      }
+      container.innerHTML = '<div class="d-flex flex-wrap gap-2">'
+        + inCollection.map((a) => `<a href="/artist/${encodeURIComponent(a.name)}" class="badge bg-success text-decoration-none">${escapeHtml(a.name)}</a>`).join('')
+        + '</div>';
+    })
+    .catch(() => {
+      container.innerHTML = '<p class="text-muted small mb-0">Could not load similar artists.</p>';
+    });
 }
 
-async function loadArtistFavouriteState(artist) {
-  fetch(`/api/artist/favourite?artist=${encodeURIComponent(artist)}`).then(r => r.json()).then(data => {
-    if (data.is_favourite) document.getElementById('artistFavouriteBtn')?.classList.add('btn-danger');
-  });
+/*
+  ── Favourites ──────────────────────────────────────────────────────────────
+  ⚠️ This was WRITTEN AGAINST THE WRONG ELEMENT. It looked up
+  `#artistFavouriteBtn`, which exists only in `Pages/artist_detail.html` — the
+  dead alias template nothing renders. The live page renders
+  `[data-artist-fav-btn]` with a `[data-artist-fav-icon]` heart, so:
+
+    * the saved state never painted: a favourited artist always showed the
+      outlined, unfilled heart;
+    * the toggle POSTed unconditionally, so it could ADD a favourite but never
+      remove one;
+    * and it ended in `location.reload()`, re-fetching ~24 scripts and
+      restarting every poller to repaint one icon.
+
+  The state now lives on the button itself (`aria-pressed`), which is also what
+  a screen reader announces.
+*/
+function artistFavouriteButton() {
+  return document.querySelector('[data-artist-fav-btn]');
+}
+
+function paintArtistFavourite(isFavourite) {
+  const btn = artistFavouriteButton();
+  if (!btn) return;
+  const on = !!isFavourite;
+  const icon = btn.querySelector('[data-artist-fav-icon]');
+  btn.classList.toggle('text-danger', on);
+  btn.classList.toggle('text-secondary', !on);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  btn.title = on ? 'Remove from favourites' : 'Favourite Artist';
+  if (icon) {
+    icon.classList.toggle('bi-heart-fill', on);
+    icon.classList.toggle('bi-heart', !on);
+  }
+}
+
+function loadArtistFavouriteState(artist) {
+  if (!artistFavouriteButton()) return;
+  artistGetJson(`/api/artist/favourite?artist=${encodeURIComponent(artist)}`)
+    .then((data) => paintArtistFavourite(!!(data && data.is_favourite)))
+    .catch(() => { /* the button keeps its unfilled default */ });
 }
 
 async function toggleArtistFavourite(artist) {
-  await fetch('/api/artist/favourite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ artist }) });
-  location.reload();
+  const btn = artistFavouriteButton();
+  if (!btn) return;
+  const wasFavourite = btn.getAttribute('aria-pressed') === 'true';
+  btn.disabled = true;
+  try {
+    const response = await fetch('/api/artist/favourite', {
+      method: wasFavourite ? 'DELETE' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artist }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.success === false) {
+      throw new Error(data.error || ('HTTP ' + response.status));
+    }
+    paintArtistFavourite(!!data.is_favourite);
+  } catch (error) {
+    if (window.toast) {
+      window.toast.error('Could not update favourite: ' + (error && error.message ? error.message : 'network error'));
+    }
+  } finally {
+    btn.disabled = false;
+  }
 }
 
-async function loadArtistCoveredBy(artist) {
-  fetch(`/api/artist/covered-by?artist=${encodeURIComponent(artist)}`).then(r => r.json()).then(data => {
-    if (data.covers && data.covers.length > 0) {
-      document.getElementById('artistCoveredByContainer').innerHTML = `<p class="p-3 mb-0">${data.covers.length} covers in library.</p>`;
-    } else {
-      document.getElementById('artistCoveredByContainer').innerHTML = `<p class="p-3 mb-0 text-muted">No covers found.</p>`;
-    }
-  });
+function loadArtistCoveredBy(artist) {
+  const container = document.getElementById('artistCoveredByContainer');
+  if (!container) return;
+  artistGetJson(`/api/artist/covered-by?artist=${encodeURIComponent(artist)}`)
+    .then((data) => {
+      const count = (data && data.covers && data.covers.length) || 0;
+      container.innerHTML = count > 0
+        ? `<p class="p-3 mb-0">${count} covers in library.</p>`
+        : '<p class="p-3 mb-0 text-muted">No covers found.</p>';
+    })
+    .catch(() => {
+      container.innerHTML = '<p class="p-3 mb-0 text-muted">Could not load covers.</p>';
+    });
 }
 
 /*
